@@ -1,0 +1,3 @@
+[workspace]
+
+members = ["tsuixuqd", "common", "core", "cmd/client"]
