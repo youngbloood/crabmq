@@ -1,4 +1,5 @@
-use crate::{channel::Channel, message::Message, topic::Topic};
+use crate::message::Message;
+use crate::{channel::Channel, topic::Topic};
 use anyhow::anyhow;
 use anyhow::Result;
 use common::ArcCell;

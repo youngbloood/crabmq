@@ -1,4 +1,5 @@
-use crate::{channel::Channel, message::Message};
+use crate::channel::Channel;
+use crate::message::Message;
 use anyhow::Result;
 use common::util::AtomicU64;
 use common::{ArcMuxRefCell, ArcRefCell, Name};

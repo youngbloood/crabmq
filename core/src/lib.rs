@@ -1,8 +1,9 @@
 mod channel;
 mod client;
-mod conn;
+pub mod conn;
 mod disk_queue;
 pub mod message;
+pub mod protocol;
 mod service;
 mod tcp;
 mod topic;

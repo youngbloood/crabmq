@@ -45,7 +45,7 @@ impl TcpServer {
                             });
                         }
                         Err(err)=>{
-                           info!("socket exit with err: {:?}",err);
+                           info!("socket exit with err: {err:?}");
                            continue
                         }
                     }

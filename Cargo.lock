@@ -198,6 +198,8 @@ dependencies = [
  "futures",
  "inquire",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

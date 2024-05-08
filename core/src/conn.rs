@@ -1,37 +1,52 @@
-use std::io::Read;
+use std::{
+    fmt::Debug,
+    io::Read,
+    net::{SocketAddr, ToSocketAddrs},
+};
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream,
     },
 };
+use tracing::{debug, debug_span};
 
-use crate::message::{
-    Message, ProtocolBody, ProtocolBodys, ProtocolHead, PROTOCOL_BODY_HEAD_LEN, PROTOCOL_HEAD_LEN,
+use crate::{
+    message::Message,
+    protocol::{
+        ProtocolBody, ProtocolBodys, ProtocolHead, PROTOCOL_BODY_HEAD_LEN, PROTOCOL_HEAD_LEN,
+    },
 };
 
 // 定义一个链接，包含读写端
 pub struct Conn {
     pub reader: OwnedReadHalf,
     pub writer: OwnedWriteHalf,
+    pub addr: SocketAddr,
 }
 
 impl Conn {
     pub fn new(conn: TcpStream) -> Self {
+        let addr = conn.peer_addr().unwrap();
         let (reader, writer) = conn.into_split();
         Conn {
-            reader: reader,
-            writer: writer,
+            addr,
+            reader,
+            writer,
         }
     }
 
+    pub async fn write(&mut self, body: &[u8]) -> Result<()> {
+        self.writer.write_all(body).await?;
+        Ok(())
+    }
     // 循环
     pub async fn read_parse(&mut self) -> Result<Message> {
-        let head = self.read_protocol_head().await?;
+        let head: ProtocolHead = self.read_protocol_head().await?;
         let body = self.read_protocol_body(head.msg_num()).await?;
         Ok(Message::with(head, body))
     }
@@ -41,6 +56,10 @@ impl Conn {
         let mut ph: ProtocolHead = ProtocolHead::new();
         let mut buf = BytesMut::new();
 
+        // let addr = format_args!("{:?}", self.addr)
+        //     .as_str()
+        //     .unwrap_or("unkown address");
+        debug!(addr = "{self.addr:?}", "read protocol head");
         // parse head
         buf.resize(PROTOCOL_HEAD_LEN, 0);
         self.reader.read_exact(&mut buf).await?;
@@ -50,18 +69,21 @@ impl Conn {
                 .expect("convert BytesMut to array failed"),
         );
 
+        debug!(addr = "{self.addr:?}", "parse topic name");
         // parse topic name
         buf.resize(ph.topic_len() as usize, 0);
         self.reader.read_exact(&mut buf).await?;
         let topic: String = String::from_utf8(buf.to_vec()).expect("illigal topic name");
         ph.set_topic(topic.as_str())?;
 
+        debug!(addr = "{self.addr:?}", "parse channel name");
         // parse channel name
         buf.resize(ph.channel_len() as usize, 0);
         self.reader.read_exact(&mut buf).await?;
         let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
         ph.set_channel(channel.as_str())?;
 
+        debug!(addr = "{self.addr:?}", "parse token");
         // parse token
         buf.resize(ph.token_len() as usize, 0);
         self.reader.read_exact(&mut buf).await?;
