@@ -15,11 +15,8 @@ pub struct Channel {
     msg_recver: Receiver<Message>,
 }
 
-unsafe impl Sync for Channel {}
-unsafe impl Send for Channel {}
-
-// unsafe impl Sync for RefCell<Channel> {}
-// unsafe impl Send for RefCell<Channel> {}
+// unsafe impl Sync for Channel {}
+// unsafe impl Send for Channel {}
 
 impl Channel {
     pub fn new() -> Self {

@@ -227,6 +227,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "common",
+ "futures",
  "rsbit",
  "tokio",
  "tokio-util",

@@ -2,9 +2,6 @@ use crate::message::Message;
 use crate::{channel::Channel, topic::Topic};
 use anyhow::anyhow;
 use anyhow::Result;
-use common::ArcCell;
-use common::ArcMuxRefCell;
-use common::ArcRefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -25,6 +22,9 @@ pub struct TsuixuqOption {
     pub channel_message_buffer: u64, // channel中的message数量缓存数
     pub channel_num_in_topic: u64,   // 一个topic下的channel数量
     pub topic_num_in_tsuixuq: u64,   // 一个tsuixuq下的topic数量
+
+    pub client_timeout: u16,       // 一个client多长时间没收到包，单位(s)
+    pub client_timeout_count: u16, // 一个client超时次数限制，超过该限制client会主动断开
 }
 
 impl TsuixuqOption {
@@ -40,6 +40,8 @@ impl TsuixuqOption {
             channel_message_buffer: DEFAULT_BUFFER,
             channel_num_in_topic: DEFAULT_NUM,
             topic_num_in_tsuixuq: DEFAULT_NUM,
+            client_timeout: 30,
+            client_timeout_count: 3,
         }
     }
 }
@@ -93,4 +95,25 @@ impl Tsuixuq {
         let topic = self.get_or_create_topic(topic_name)?;
         Ok(topic.get_mut_channel(chan_name))
     }
+
+    pub fn fin(&mut self) {}
+
+    pub fn rdy(&mut self) {}
+
+    pub fn publish(&mut self) {}
+    // fn req(&mut self    fn publish(&mut self) {}
+
+    pub fn mpub(&mut self) {}
+
+    pub fn dpub(&mut self) {}
+
+    pub fn nop(&mut self) {}
+
+    pub fn touch(&mut self) {}
+
+    pub fn sub(&mut self) {}
+
+    pub fn cls(&mut self) {}
+
+    pub fn auth(&mut self) {}
 }

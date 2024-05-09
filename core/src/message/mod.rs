@@ -49,6 +49,13 @@ impl Message {
         }
     }
 
+    pub fn action(&self) -> u8 {
+        match self {
+            Self::V1(v1) => return v1.action(),
+            _ => panic!("not get here"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::V1(v1) => return v1.validate(),

@@ -85,8 +85,8 @@ impl Tsuixuqd {
                 Ok(tcp_listener) => {
                     // 将处理tcp_listener单独放到一个Future中处理
                     tokio::spawn(async {
-                        let mut tcp_server = TcpServer::new(opt_arc, tcp_listener);
-                        tcp_server.serve(tcp_tx, tsuixuq_clone).await;
+                        let mut tcp_server = TcpServer::new(opt_arc, tcp_listener, tsuixuq_clone);
+                        tcp_server.serve(tcp_tx).await;
                     });
                     return Ok(());
                 }

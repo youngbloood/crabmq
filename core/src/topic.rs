@@ -2,7 +2,7 @@ use crate::channel::Channel;
 use crate::message::Message;
 use anyhow::Result;
 use common::util::AtomicU64;
-use common::{ArcMuxRefCell, ArcRefCell, Name};
+use common::Name;
 use std::{collections::HashMap, sync::Arc};
 
 pub struct Topic {

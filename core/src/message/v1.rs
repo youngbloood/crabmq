@@ -33,6 +33,10 @@ impl MessageV1 {
         self.head.topic()
     }
 
+    pub fn action(&self) -> u8 {
+        self.head.action()
+    }
+
     pub fn post_fill(&mut self) {
         self.head.post_fill();
         self.bodys.post_fill();
