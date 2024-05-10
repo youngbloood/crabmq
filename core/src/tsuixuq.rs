@@ -66,23 +66,6 @@ pub struct TsuixuqOption {
 }
 
 impl TsuixuqOption {
-    // pub fn new() -> Self {
-    //     TsuixuqOption {
-    //         msg_num_buffer: DEFAULT_BUFFER as u16,
-    //         tcp_port: 3890,
-    //         memory_message_size: DEFAULT_BUFFER,
-    //         memory_message_count: DEFAULT_BUFFER,
-    //         message_flush_factor: DEFAULT_FACTOR,
-    //         message_flush_interval: DEFAULT_BUFFER,
-    //         topic_message_buffer: DEFAULT_BUFFER,
-    //         channel_message_buffer: DEFAULT_BUFFER,
-    //         channel_num_in_topic: DEFAULT_NUM,
-    //         topic_num_in_tsuixuq: DEFAULT_NUM,
-    //         client_timeout: 30,
-    //         client_timeout_count: 3,
-    //     }
-    // }
-
     pub fn from_config(filename: &str) -> Result<TsuixuqOption> {
         let mut opt = TsuixuqOption::parse();
         if filename.len() != 0 {

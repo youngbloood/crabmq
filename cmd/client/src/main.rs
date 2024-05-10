@@ -9,7 +9,6 @@ use core::message::Message;
 use core::protocol::ProtocolBody;
 use core::protocol::ProtocolBodys;
 use core::protocol::ProtocolHead;
-use core::protocol::ACTION_MPUB;
 use futures::executor::block_on;
 use inquire::Text;
 use std::env::args;
@@ -145,11 +144,6 @@ impl Args {
         if self.head.is_none() {
             return Err(anyhow!("can't set body when not set head"));
         }
-        if action_to_u8(self.head.as_ref().unwrap().action.as_str()) == ACTION_MPUB {
-            self.bodys.push(body);
-            return Ok(());
-        }
-        self.bodys.clear();
         self.bodys.push(body);
         Ok(())
     }
