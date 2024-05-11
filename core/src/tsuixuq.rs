@@ -1,5 +1,6 @@
+use crate::channel::Channel;
 use crate::message::Message;
-use crate::{channel::Channel, topic::Topic};
+use crate::topic::Topic;
 use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
@@ -178,5 +179,12 @@ impl Tsuixuq {
     ) -> Result<ArcMux<Channel>> {
         let topic = self.get_or_create_topic(topic_name)?;
         Ok(topic.get_mut_channel(chan_name)?)
+    }
+
+    pub async fn delete_client_from_channel(&mut self, chan_name: &str) {
+        let mut iter = self.topics.iter_mut();
+        while let Some((_addr, topic)) = iter.next() {
+            topic.delete_client_from_channel(chan_name).await;
+        }
     }
 }

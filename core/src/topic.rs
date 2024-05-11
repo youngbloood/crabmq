@@ -80,4 +80,12 @@ impl Topic {
 
         true
     }
+
+    pub async fn delete_client_from_channel(&mut self, chan_name: &str) {
+        let mut iter = self.channels.iter_mut();
+
+        while let Some((_addr, chan)) = iter.next() {
+            chan.lock().await.delete_channel(chan_name)
+        }
+    }
 }

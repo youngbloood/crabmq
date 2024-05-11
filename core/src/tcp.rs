@@ -1,6 +1,6 @@
-use crate::client::{Client, ClientGuard};
+use crate::client::{io_loop, Client};
 use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
-use common::global::CANCEL_TOKEN;
+use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use common::ArcMux;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use tracing::info;
 pub struct TcpServer {
     opt: Arc<TsuixuqOption>,
     tcp_listener: TcpListener,
-    clients: HashMap<String, ClientGuard>,
+    clients: HashMap<String, Guard<Client>>,
     tsuixuq: ArcMux<Tsuixuq>,
 }
 
@@ -33,9 +33,6 @@ impl TcpServer {
     }
 
     pub async fn serve(&mut self) {
-        // 用于从TcpServer中删除Client的消息流
-        let (client_tx, mut client_rx) = mpsc::channel(1);
-
         loop {
             select! {
                 handle = self.tcp_listener.accept() => {
@@ -49,12 +46,11 @@ impl TcpServer {
                             let guard = client.builder();
                             self.clients.insert(addr.to_string(),guard.clone());
 
-                            let client_tx = client_tx.clone();
                                 // 每个socket交由单独的一个Future处理
                             tokio::spawn(async move {
-                                guard.io_loop().await;
+                                io_loop(guard).await;
                                 // 该client遇到某些错误，结束了io_loop，将其发送至client_tx中，等待删除
-                                let _ = client_tx.send(addr.to_string()).await;
+                                let _ = CLIENT_DROP_GUARD.send(addr.to_string().as_str()).await;
                             });
                         }
                         Err(err)=>{
@@ -65,8 +61,12 @@ impl TcpServer {
                 }
 
                 // 删除收到的client
-                addr_str = client_rx.recv() => {
-                    self.clients.remove(addr_str.as_ref().unwrap().as_str());
+                addr = CLIENT_DROP_GUARD.recv() => {
+                    let address = addr.as_str();
+                    info!("从tpc clients中删除{address}成功");
+                    self.clients.remove(addr.as_str());
+                    self.tsuixuq.lock().await.delete_client_from_channel(addr.as_str()).await;
+                    info!("从 tsuixuq 中删除{address}成功");
                 }
 
 

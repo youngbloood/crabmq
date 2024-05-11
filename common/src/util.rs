@@ -1,3 +1,7 @@
+pub fn type_of<T>(_: T) -> &'static str {
+    std::any::type_name::<T>()
+}
+
 // use parking_lot::RwLock;
 // use std::{borrow::BorrowMut, cell::UnsafeCell};
 

@@ -248,6 +248,7 @@ dependencies = [
  "rs-snowflake",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

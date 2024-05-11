@@ -1,6 +1,6 @@
-use crate::{client::ClientGuard, message::Message};
+use crate::{client::Client, message::Message};
 use anyhow::Result;
-use common::Name;
+use common::{global::Guard, Name};
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
@@ -15,7 +15,7 @@ pub struct Channel {
     msg_sender: Sender<Message>,
     msg_recver: Receiver<Message>,
 
-    clients: HashMap<String, ClientGuard>,
+    clients: HashMap<String, Guard<Client>>,
 }
 
 unsafe impl Sync for Channel {}
@@ -35,7 +35,7 @@ impl Channel {
         }
     }
 
-    pub fn set_client(&mut self, addr: String, client_guard: ClientGuard) {
+    pub fn set_client(&mut self, addr: String, client_guard: Guard<Client>) {
         self.clients.insert(addr, client_guard);
     }
 
@@ -53,5 +53,9 @@ impl Channel {
 
     pub fn pub_num_increase(&mut self) {
         // self.pub_num.increase();
+    }
+
+    pub fn delete_channel(&mut self, chan_name: &str) {
+        self.clients.remove(chan_name);
     }
 }

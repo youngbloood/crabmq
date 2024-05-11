@@ -6,8 +6,9 @@ use crate::protocol::{
 };
 use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
 use anyhow::Result;
-use common::global::CANCEL_TOKEN;
+use common::global::{Guard, CANCEL_TOKEN};
 use common::ArcMux;
+use std::borrow::BorrowMut;
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -15,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Mutex;
 use tokio::time::Interval;
 use tokio::{select, time};
 use tracing::{debug, error, info, warn};
@@ -44,7 +44,6 @@ pub struct Client {
 
     state: ClientState,
 
-    mutex: Mutex<()>,
     tsuixuq: ArcMux<Tsuixuq>,
 }
 
@@ -79,17 +78,14 @@ impl Client {
             defeat_count: AtomicU16::new(0),
             state: CLIENT_STATE_NOT_READY,
             opt,
-            mutex: Mutex::default(),
 
             msg_rx: UnsafeCell::new(rx),
             msg_tx: UnsafeCell::new(tx),
         }
     }
 
-    pub fn builder(self: Self) -> ClientGuard {
-        ClientGuard {
-            inner: Arc::new(self),
-        }
+    pub fn builder(self: Self) -> Guard<Self> {
+        Guard::new(self)
     }
 
     pub async fn send_msg(&self, msg: Message) -> Result<()> {
@@ -103,7 +99,7 @@ impl Client {
         recver.recv().await.unwrap()
     }
 
-    pub async fn io_loop(&self, guard: ClientGuard) {
+    pub async fn io_loop(&self, guard: Guard<Self>) {
         // let client = client.borrow_mut();
         // 用于处理从客户端接收到的消息流
         let (tx, mut rx) = mpsc::channel(1);
@@ -194,7 +190,6 @@ impl Client {
     pub async fn publish(&self, msg: Message) {
         let mut daemon = self.tsuixuq.lock().await;
         let _ = daemon.send_message(msg).await;
-        info!("发布消息成功");
     }
     pub async fn req(&self, msg: Message) {}
 
@@ -202,7 +197,7 @@ impl Client {
 
     pub async fn touch(&self, msg: Message) {}
 
-    pub async fn sub(&self, msg: Message, guard: ClientGuard) {
+    pub async fn sub(&self, msg: Message, guard: Guard<Self>) {
         info!("订阅消息  msg = {msg:?}");
         let topic_name = msg.get_topic();
         let chan_name = msg.get_channel();
@@ -210,6 +205,7 @@ impl Client {
         let tsuixuq = self.tsuixuq.clone();
         let mut daemon = tsuixuq.lock().await;
         let topic = daemon
+            .borrow_mut()
             .get_or_create_topic(topic_name)
             .expect("get topic err");
         let chan = topic.get_create_mut_channel(chan_name);
@@ -227,29 +223,8 @@ impl Client {
     //============================ Handle Action ==============================//
 }
 
-pub struct ClientGuard {
-    inner: Arc<Client>,
-}
-
-unsafe impl Sync for ClientGuard {}
-unsafe impl Send for ClientGuard {}
-
-impl ClientGuard {
-    pub fn clone(&self) -> Self {
-        ClientGuard {
-            inner: self.inner.clone(),
-        }
-    }
-
-    pub fn get(&self) -> Arc<Client> {
-        self.inner.clone()
-    }
-}
-
-impl ClientGuard {
-    pub async fn io_loop(&self) {
-        let client_arc = self.inner.clone();
-        let client_guard = self.clone();
-        client_arc.io_loop(client_guard).await;
-    }
+pub async fn io_loop(guard: Guard<Client>) {
+    let client = guard.get();
+    let new_guard = guard.clone();
+    client.io_loop(new_guard).await;
 }
