@@ -1,32 +1,24 @@
 use crate::{
-    message::Message,
     tcp::TcpServer,
     tsuixuq::{Tsuixuq, TsuixuqOption},
 };
 use anyhow::{anyhow, Result};
-use common::{global, ArcMuxRefCell};
-use std::{cell::RefCell, sync::Arc};
-use tokio::{
-    net::TcpListener,
-    select,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Mutex,
-    },
-};
+use common::{global, ArcMux};
+use std::sync::Arc;
+use tokio::{net::TcpListener, select, sync::Mutex};
 use tracing::info;
 
 pub struct Tsuixuqd {
     opt: Arc<TsuixuqOption>,
-    tsuixuq: ArcMuxRefCell<Tsuixuq>,
+    tsuixuq: ArcMux<Tsuixuq>,
 }
 
 impl Tsuixuqd {
     pub fn new(mut opt: TsuixuqOption) -> Self {
-        let opt_cell = Arc::new(opt);
+        let opt_arc = Arc::new(opt);
         Tsuixuqd {
-            opt: opt_cell.clone(),
-            tsuixuq: Arc::new(Mutex::new(RefCell::new(Tsuixuq::new(opt_cell.clone())))),
+            opt: opt_arc.clone(),
+            tsuixuq: Arc::new(Mutex::new(Tsuixuq::new(opt_arc.clone()))),
         }
     }
 
@@ -35,15 +27,11 @@ impl Tsuixuqd {
     }
 
     pub async fn serve(&mut self) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel(10000);
-
         select! {
             // tcp server
             r1 =  tokio::spawn(Self::serve_tcp(
                 self.opt.clone(),
                 self.tsuixuq.clone(),
-                tx.clone(),
-                rx,
             ))=>{
                 match r1{
                     Ok(v)=>{
@@ -56,6 +44,7 @@ impl Tsuixuqd {
                     }
                 }
             }
+            // TODO: http server
 
             _=global::CANCEL_TOKEN.cancelled()=>{
                 return Err(anyhow!("process stopped"))
@@ -64,16 +53,10 @@ impl Tsuixuqd {
         Ok(())
     }
 
-    async fn serve_tcp(
-        opt: Arc<TsuixuqOption>,
-        tsuixuq: ArcMuxRefCell<Tsuixuq>,
-        tx: Sender<Message>,
-        mut rx: Receiver<Message>,
-    ) -> Result<()> {
+    async fn serve_tcp(opt: Arc<TsuixuqOption>, tsuixuq: ArcMux<Tsuixuq>) -> Result<()> {
         // start tcp serve
-        let tcp_tx = tx.clone();
         let tcp_port = opt.tcp_port;
-        let tsuixuq_clone: Arc<Mutex<RefCell<Tsuixuq>>> = tsuixuq.clone();
+        let tsuixuq_clone: Arc<Mutex<Tsuixuq>> = tsuixuq.clone();
         let opt_arc = opt.clone();
 
         match tokio::spawn(async move {
@@ -84,9 +67,9 @@ impl Tsuixuqd {
                 }
                 Ok(tcp_listener) => {
                     // 将处理tcp_listener单独放到一个Future中处理
-                    tokio::spawn(async {
+                    tokio::spawn(async move {
                         let mut tcp_server = TcpServer::new(opt_arc, tcp_listener, tsuixuq_clone);
-                        tcp_server.serve(tcp_tx).await;
+                        tcp_server.serve().await;
                     });
                     return Ok(());
                 }
@@ -104,11 +87,52 @@ impl Tsuixuqd {
             }
         }
 
-        info!("start recieve params from socket");
-        while let Some(msg) = rx.recv().await {
-            let mut tsuixuq = tsuixuq.lock().await;
-            tsuixuq.get_mut().send_message(msg).await?;
-        }
+        global::CANCEL_TOKEN.cancelled().await;
+        // info!("start recieve params from socket");
+        // while let Some((remote_addr, msg)) = rx.recv().await {
+        //     info!("收到消息: {remote_addr},{msg:?}");
+        //     match msg.action() {
+        //         ACTION_FIN => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.fin(remote_addr, msg).await;
+        //         }
+        //         ACTION_RDY => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.rdy(remote_addr, msg).await;
+        //         }
+        //         ACTION_REQ => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.req(remote_addr, msg).await
+        //         }
+        //         ACTION_PUB => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.publish(remote_addr, msg).await;
+        //             drop(daemon);
+        //         }
+        //         ACTION_NOP => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.nop(remote_addr, msg).await;
+        //         }
+        //         ACTION_TOUCH => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.touch(remote_addr, msg).await;
+        //         }
+        //         ACTION_SUB => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.sub(remote_addr, msg).await;
+        //             drop(daemon);
+        //         }
+        //         ACTION_CLS => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.cls(remote_addr, msg).await;
+        //         }
+        //         ACTION_AUTH => {
+        //             let mut daemon = tsuixuq.lock().await;
+        //             daemon.auth(remote_addr, msg).await;
+        //         }
+        //         _ => unreachable!(),
+        //     }
+        // }
         Ok(())
     }
 }

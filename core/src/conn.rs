@@ -24,6 +24,9 @@ pub struct Conn {
     pub addr: SocketAddr,
 }
 
+unsafe impl Send for Conn {}
+unsafe impl Sync for Conn {}
+
 impl Conn {
     pub fn new(conn: TcpStream) -> Self {
         let addr = conn.peer_addr().unwrap();

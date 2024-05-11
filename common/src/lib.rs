@@ -16,8 +16,8 @@ pub type ArcMux<T> = Arc<Mutex<T>>;
 pub struct Name(String);
 
 impl Name {
-    pub fn new() -> Self {
-        Name("".to_string())
+    pub fn new(name: &str) -> Self {
+        Name(name.to_string())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -30,6 +30,10 @@ impl Name {
         // TODO:
 
         Ok(())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0.as_str()
     }
 }
 

@@ -99,6 +99,9 @@ impl Args {
     }
 
     fn builder(&self) -> Result<Message> {
+        if self.head.is_none() {
+            return Err(anyhow!("not found head in message"));
+        }
         let mut head = ProtocolHead::new();
         head.set_topic(&self.head.as_ref().unwrap().topic_name.as_str())?;
         head.set_channel(&self.head.as_ref().unwrap().channel_name.as_str())?;
@@ -161,13 +164,11 @@ fn action_to_u8(action: &str) -> u8 {
         "rdy" => a = 2,
         "req" => a = 3,
         "pub" => a = 4,
-        "mpub" => a = 5,
-        "dpub" => a = 6,
-        "nop" => a = 7,
-        "touch" => a = 8,
-        "sub" => a = 9,
-        "cls" => a = 10,
-        "auth" => a = 11,
+        "nop" => a = 5,
+        "touch" => a = 6,
+        "sub" => a = 7,
+        "cls" => a = 8,
+        "auth" => a = 9,
         _ => a = u8::MIN,
     }
 
@@ -311,7 +312,7 @@ async fn main() -> Result<()> {
             resp = conn.read_parse() =>{
                 match resp {
                     Ok(msg) => {
-                        println!("recieve message: {msg:?}");
+                        println!("recieve message: {msg:?}\n");
                     }
                     Err(e) => {
                         eprintln!("recieve err: {e}");

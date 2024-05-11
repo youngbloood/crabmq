@@ -3,6 +3,7 @@ use crate::{channel::Channel, topic::Topic};
 use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
+use common::ArcMux;
 use config::{Config, File};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -129,7 +130,6 @@ impl TsuixuqOption {
 pub struct Tsuixuq {
     opt: Arc<TsuixuqOption>,
     topics: HashMap<String, Topic>,
-
     params: Receiver<Vec<Vec<u8>>>,
     params_sender: Sender<Vec<Vec<u8>>>,
 }
@@ -171,29 +171,12 @@ impl Tsuixuq {
         Ok(())
     }
 
-    pub fn get_topic_channel(&mut self, topic_name: &str, chan_name: &str) -> Result<Arc<Channel>> {
+    pub fn get_topic_channel(
+        &mut self,
+        topic_name: &str,
+        chan_name: &str,
+    ) -> Result<ArcMux<Channel>> {
         let topic = self.get_or_create_topic(topic_name)?;
-        Ok(topic.get_mut_channel(chan_name))
+        Ok(topic.get_mut_channel(chan_name)?)
     }
-
-    pub fn fin(&mut self) {}
-
-    pub fn rdy(&mut self) {}
-
-    pub fn publish(&mut self) {}
-    // fn req(&mut self    fn publish(&mut self) {}
-
-    pub fn mpub(&mut self) {}
-
-    pub fn dpub(&mut self) {}
-
-    pub fn nop(&mut self) {}
-
-    pub fn touch(&mut self) {}
-
-    pub fn sub(&mut self) {}
-
-    pub fn cls(&mut self) {}
-
-    pub fn auth(&mut self) {}
 }

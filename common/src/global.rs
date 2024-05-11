@@ -1,9 +1,8 @@
-use std::{borrow::BorrowMut, cell::RefCell, sync::Arc};
-
 use anyhow::*;
 use futures::executor::block_on;
 use lazy_static::*;
 use snowflake::SnowflakeIdBucket;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 

@@ -289,6 +289,14 @@ impl ProtocolHead {
         tp
     }
 
+    pub fn channel(&self) -> &str {
+        let chan = self.channel.as_str();
+        if chan.len() == 0 {
+            return "default";
+        }
+        chan
+    }
+
     pub fn set_topic(&mut self, topic: &str) -> Result<()> {
         if topic.len() > u8::MAX as usize {
             return Err(anyhow!("topic len exceed max length 256"));

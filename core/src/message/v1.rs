@@ -4,6 +4,7 @@ use anyhow::Result;
 // 一个标准的消息体
 #[derive(Debug)]
 pub struct MessageV1 {
+    remote_addr: String,
     head: ProtocolHead,
     bodys: ProtocolBodys,
 }
@@ -13,12 +14,21 @@ impl MessageV1 {
         MessageV1 {
             head: ProtocolHead::default(),
             bodys: ProtocolBodys::new(),
+            remote_addr: "".to_string(),
         }
     }
 
     pub fn with(mut head: ProtocolHead, bodys: ProtocolBodys) -> Self {
         let _ = head.set_msg_num(bodys.len() as u8);
-        MessageV1 { head, bodys }
+        MessageV1 {
+            head,
+            bodys,
+            remote_addr: "".to_string(),
+        }
+    }
+
+    pub fn set_remote_addr(&mut self, remote_add: &str) {
+        self.remote_addr = remote_add.to_string();
     }
 
     pub fn clone(&self) -> Self {
@@ -31,6 +41,10 @@ impl MessageV1 {
 
     pub fn get_topic(&self) -> &str {
         self.head.topic()
+    }
+
+    pub fn get_channel(&self) -> &str {
+        self.head.channel()
     }
 
     pub fn action(&self) -> u8 {
