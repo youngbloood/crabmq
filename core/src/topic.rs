@@ -1,6 +1,7 @@
 use crate::channel::Channel;
 use crate::message::Message;
 use anyhow::{anyhow, Result};
+use common::global::Guard;
 use common::ArcMux;
 use common::Name;
 use std::{collections::HashMap, sync::Arc};
@@ -16,7 +17,7 @@ pub struct Topic {
 
     ephemeral: bool,
 
-    channels: HashMap<String, ArcMux<Channel>>,
+    channels: HashMap<String, Guard<Channel>>,
 }
 
 impl Topic {
@@ -33,23 +34,26 @@ impl Topic {
         };
 
         // 每个topic默认有个default的channel
-        topic.channels.insert(
-            "default".to_string(),
-            Arc::new(Mutex::new(Channel::new("default"))),
-        );
+        topic
+            .channels
+            .insert("default".to_string(), Guard::new(Channel::new("default")));
 
         topic
+    }
+
+    pub fn builder(self: Self) -> Guard<Self> {
+        Guard::new(self)
     }
 
     pub async fn send_msg(&mut self, msg: Message) -> Result<()> {
         let mut iter = self.channels.iter();
         while let Some((_chan_name, chan)) = iter.next() {
-            chan.lock().await.send_msg(msg.clone()).await?;
+            chan.get_mut().send_msg(msg.clone()).await?;
         }
         Ok(())
     }
 
-    pub fn get_mut_channel(&mut self, chan_name: &str) -> Result<ArcMux<Channel>> {
+    pub fn get_mut_channel(&mut self, chan_name: &str) -> Result<Guard<Channel>> {
         let topic = self.name.as_str();
         match self.channels.get(chan_name) {
             Some(chan) => Ok(chan.clone()),
@@ -57,11 +61,11 @@ impl Topic {
         }
     }
 
-    pub fn get_create_mut_channel(&mut self, chan_name: &str) -> ArcMux<Channel> {
+    pub fn get_create_mut_channel(&mut self, chan_name: &str) -> Guard<Channel> {
         let chan = self
             .channels
             .entry(chan_name.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(Channel::new(chan_name))));
+            .or_insert_with(|| Channel::new(chan_name).builder());
 
         chan.clone()
     }
@@ -85,7 +89,7 @@ impl Topic {
         let mut iter = self.channels.iter_mut();
 
         while let Some((_addr, chan)) = iter.next() {
-            chan.lock().await.delete_channel(chan_name)
+            chan.get_mut().delete_channel(chan_name)
         }
     }
 }

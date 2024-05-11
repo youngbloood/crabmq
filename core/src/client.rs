@@ -208,11 +208,10 @@ impl Client {
             .borrow_mut()
             .get_or_create_topic(topic_name)
             .expect("get topic err");
-        let chan = topic.get_create_mut_channel(chan_name);
+        let chan = topic.get_mut().get_create_mut_channel(chan_name);
 
         info!("将client设置到channel中");
-        chan.lock()
-            .await
+        chan.get_mut()
             .set_client(self.remote_addr.to_string(), guard);
         info!("将client设置到channel中  成功");
     }

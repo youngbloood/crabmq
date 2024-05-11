@@ -4,6 +4,7 @@ use crate::topic::Topic;
 use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
+use common::global::Guard;
 use common::ArcMux;
 use config::{Config, File};
 use std::collections::HashMap;
@@ -130,7 +131,7 @@ impl TsuixuqOption {
 
 pub struct Tsuixuq {
     opt: Arc<TsuixuqOption>,
-    topics: HashMap<String, Topic>,
+    topics: HashMap<String, Guard<Topic>>,
     params: Receiver<Vec<Vec<u8>>>,
     params_sender: Sender<Vec<Vec<u8>>>,
 }
@@ -143,13 +144,13 @@ impl Tsuixuq {
         let (tx, rx) = mpsc::channel(10000);
         Tsuixuq {
             opt,
-            topics: HashMap::<String, Topic>::new(),
+            topics: HashMap::new(),
             params: rx,
             params_sender: tx,
         }
     }
 
-    pub fn get_or_create_topic(&mut self, topic_name: &str) -> Result<&mut Topic> {
+    pub fn get_or_create_topic(&mut self, topic_name: &str) -> Result<Guard<Topic>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
             && topics_len >= (self.opt.topic_num_in_tsuixuq as usize)
@@ -160,15 +161,15 @@ impl Tsuixuq {
         let topic = self
             .topics
             .entry(topic_name.to_string())
-            .or_insert_with(|| Topic::new(topic_name));
+            .or_insert_with(|| Topic::new(topic_name).builder());
 
-        Ok(topic)
+        Ok(topic.clone())
     }
 
     pub async fn send_message(&mut self, msg: Message) -> Result<()> {
         let topic_name = msg.get_topic();
         let topic = self.get_or_create_topic(topic_name)?;
-        topic.send_msg(msg).await?;
+        topic.get_mut().send_msg(msg).await?;
         Ok(())
     }
 
@@ -176,15 +177,15 @@ impl Tsuixuq {
         &mut self,
         topic_name: &str,
         chan_name: &str,
-    ) -> Result<ArcMux<Channel>> {
+    ) -> Result<Guard<Channel>> {
         let topic = self.get_or_create_topic(topic_name)?;
-        Ok(topic.get_mut_channel(chan_name)?)
+        Ok(topic.get_mut().get_mut_channel(chan_name)?)
     }
 
     pub async fn delete_client_from_channel(&mut self, chan_name: &str) {
         let mut iter = self.topics.iter_mut();
         while let Some((_addr, topic)) = iter.next() {
-            topic.delete_client_from_channel(chan_name).await;
+            topic.get_mut().delete_client_from_channel(chan_name).await;
         }
     }
 }

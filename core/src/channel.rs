@@ -35,6 +35,10 @@ impl Channel {
         }
     }
 
+    pub fn builder(self: Self) -> Guard<Self> {
+        Guard::new(self)
+    }
+
     pub fn set_client(&mut self, addr: String, client_guard: Guard<Client>) {
         self.clients.insert(addr, client_guard);
     }
