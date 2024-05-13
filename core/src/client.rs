@@ -1,4 +1,4 @@
-use crate::conn::{write, Conn};
+use crate::conn::Conn;
 use crate::message::Message;
 use crate::protocol::{
     ACTION_AUTH, ACTION_CLS, ACTION_FIN, ACTION_NOP, ACTION_PUB, ACTION_RDY, ACTION_REQ,
@@ -70,7 +70,7 @@ impl Client {
             tsuixuq,
             conn: UnsafeCell::new(Conn::new(socket)),
             ticker: UnsafeCell::new(time::interval(Duration::from_secs(
-                opt.get().client_timeout as _,
+                opt.get().client_heartbeat_interval as _,
             ))),
             defeat_count: AtomicU16::new(0),
             state: CLIENT_STATE_NOT_READY,
@@ -104,14 +104,25 @@ impl Client {
         let addr = self.remote_addr.to_string();
         debug!(addr = addr, "start client io_loop");
 
-        let conn = unsafe { self.conn.get().as_mut() }.unwrap();
         let ticker = unsafe { self.ticker.get().as_mut() }.unwrap();
+        let mut write_timeout_count = 0;
+        let mut read_timeout_count = 0;
 
         loop {
-            if self.defeat_count.load(Ordering::Relaxed) > self.opt.get().client_timeout_count {
+            if self.defeat_count.load(Ordering::Relaxed) > self.opt.get().client_expire_count {
                 info!(addr = addr, "not response, then will disconnect");
                 return;
             }
+            if read_timeout_count > self.opt.get().client_read_timeout_count {
+                info!(addr = addr, "read timeout count exceed maxnium config");
+                return;
+            }
+            if write_timeout_count > self.opt.get().client_write_timeout_count {
+                info!(addr = addr, "write timeout count exceed maxnium config");
+                return;
+            }
+
+            let conn = unsafe { self.conn.get().as_mut() }.unwrap();
             select! {
                 // 全局取消信号
                 _ = CANCEL_TOKEN.cancelled() => {
@@ -119,7 +130,7 @@ impl Client {
                 }
 
                 // 不断从链接中解析数据
-                result = conn.read_parse(600) => {
+                result = conn.read_parse(self.opt.get().client_read_timeout) => {
                     match result{
                         Ok(msg)=>{
                             match tx.send(msg).await{
@@ -128,6 +139,7 @@ impl Client {
                                     continue
                                 }
                                 Err(e) =>{
+                                    read_timeout_count += 1;
                                     error!(addr = addr, "send msg to tsuixuq err: {e:?}");
                                     continue
                                 }
@@ -150,7 +162,8 @@ impl Client {
 
                 // 从self.channel中获取数据并返回给client
                 msg = self.recv_msg() => {
-                    if let Err(e) = write(&mut conn.writer,&msg.as_bytes()).await{
+                    if let Err(e) =conn.write(&msg.as_bytes(), self.opt.get().client_write_timeout).await{
+                        write_timeout_count += 1;
                         error!(addr = addr, "write msg err: {e:?}");
                     }
                 }

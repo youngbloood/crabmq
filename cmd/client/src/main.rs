@@ -277,7 +277,7 @@ async fn main() -> Result<()> {
                                         Ok(msg) => {
                                             let bts = &msg.as_bytes();
                                             println!("send bts: {bts:?}");
-                                            if let Err(e) = conn.write(&msg.as_bytes()).await
+                                            if let Err(e) = conn.write(&msg.as_bytes(), 30).await
                                             {
                                                 eprintln!("write err: {e}");
                                             }

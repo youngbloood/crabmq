@@ -26,43 +26,74 @@ pub struct TsuixuqOption {
     pub log_level: String,
 
     #[arg(long = "log-rolling", default_value = "")]
+    /// log rolling type
     pub log_rolling: String,
 
     #[arg(short = 'p', long = "port", default_value_t = 3890)]
-    pub tcp_port: u16, // tcp监听端口
+    /// tcp监听端口
+    pub tcp_port: u16,
 
     #[arg(long = "msg-num-buffer", default_value_t = DEFAULT_BUFFER as u16)]
-    pub msg_num_buffer: u16, // 客户端发送的params缓存数量
+    /// 客户端发送的params缓存数量
+    pub msg_num_buffer: u16,
 
     #[arg(long = "memory-msg-size", default_value_t = DEFAULT_BUFFER)]
-    pub memory_message_size: u64, // 内存中存储message的大小
+    /// 内存中存储message的大小
+    pub memory_message_size: u64,
 
     #[arg(long = "memory-msg-count", default_value_t = DEFAULT_BUFFER)]
-    pub memory_message_count: u64, // 内存中存储message的数量
+    /// 内存中存储message的数量
+    pub memory_message_count: u64,
 
     #[arg(long = "msg-flush-factor", default_value_t = DEFAULT_FACTOR)]
-    pub message_flush_factor: u16, // messag flush至disk因子
+    /// messag flush至disk因子
+    pub message_flush_factor: u16,
 
     #[arg(long = "msg-flush-interval", default_value_t = DEFAULT_FACTOR as u64)]
-    pub message_flush_interval: u64, // messaage flush至disk的时间间隔
+    /// messaage flush至disk的时间间隔
+    pub message_flush_interval: u64,
 
     #[arg(long = "topic-msg-buffer", default_value_t = DEFAULT_BUFFER)]
-    pub topic_message_buffer: u64, // topic中message数量缓存数
+    /// topic中message数量缓存数
+    pub topic_message_buffer: u64,
 
     #[arg(long = "channel-msg-buffer", default_value_t = DEFAULT_BUFFER)]
-    pub channel_message_buffer: u64, // channel中的message数量缓存数
+    /// channel中的message数量缓存数
+    pub channel_message_buffer: u64,
 
     #[arg(long = "channel-num-in-topic", default_value_t = DEFAULT_BUFFER)]
-    pub channel_num_in_topic: u64, // 一个topic下的channel数量
+    /// 一个topic下的channel数量
+    pub channel_num_in_topic: u64,
 
     #[arg(long = "topic-num-in-tsuixuq", default_value_t = DEFAULT_BUFFER)]
-    pub topic_num_in_tsuixuq: u64, // 一个tsuixuq下的topic数量
+    /// 一个tsuixuq下的topic数量
+    pub topic_num_in_tsuixuq: u64,
 
-    #[arg(long = "client-timeout", default_value_t = 30)]
-    pub client_timeout: u16, // 一个client多长时间没收到包，单位(s)
+    #[arg(long = "client-heartbeat-interval", default_value_t = 30)]
+    /// 一个client收到心跳包的时间间隔，单位(s)
+    pub client_heartbeat_interval: u16,
 
-    #[arg(long = "client-timeout-count", default_value_t = 3)]
-    pub client_timeout_count: u16, // 一个client超时次数限制，超过该限制client会主动断开
+    #[arg(long = "client-expire-count", default_value_t = 3)]
+    /// 一个client超时次数限制，超过该限制client会主动断开
+    ///
+    /// 超时定义：固定[`client_heartbeat_interval`]时间内未收到包为超时
+    pub client_expire_count: u16,
+
+    #[arg(long = "client-read-timeout", default_value_t = 30)]
+    /// 一个client读取数据超时时间
+    pub client_read_timeout: u64,
+
+    #[arg(long = "client-read-timeout-count", default_value_t = 3)]
+    /// 一个client读取数据超时次数，超过该次数会断开链接
+    pub client_read_timeout_count: u64,
+
+    #[arg(long = "client-write-timeout", default_value_t = 30)]
+    /// 一个client写入数据超时时间
+    pub client_write_timeout: u64,
+
+    #[arg(long = "client-write-timeout-count", default_value_t = 3)]
+    /// 一个client写入数据超时次数，超过该次数会断开链接
+    pub client_write_timeout_count: u64,
 }
 
 impl TsuixuqOption {

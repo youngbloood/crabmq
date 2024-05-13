@@ -35,9 +35,6 @@ impl Conn {
         }
     }
 
-    pub async fn write(&mut self, body: &[u8]) -> Result<()> {
-        write(&mut self.writer, body).await
-    }
     // 循环
     pub async fn read_parse(&mut self, timeout: u64) -> Result<Message> {
         let mut head = ProtocolHead::new();
@@ -46,11 +43,21 @@ impl Conn {
         execute_timeout::<()>(bodys.read_parse(&mut self.reader, head.msg_num()), timeout).await?;
 
         Ok(Message::with(head, bodys))
-        // read_parse(&mut self.reader, timeout).await
+    }
+
+    pub async fn write(&mut self, body: &[u8], timeout: u64) -> Result<()> {
+        execute_timeout(
+            async {
+                self.writer.write_all(body).await?;
+                Ok(())
+            },
+            timeout,
+        )
+        .await
     }
 }
 
-pub async fn write(writer: &mut OwnedWriteHalf, body: &[u8]) -> Result<()> {
-    writer.write_all(body).await?;
-    Ok(())
-}
+// pub async fn write(writer: &mut OwnedWriteHalf, body: &[u8]) -> Result<()> {
+//     writer.write_all(body).await?;
+//     Ok(())
+// }
