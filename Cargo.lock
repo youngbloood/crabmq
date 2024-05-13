@@ -310,6 +310,7 @@ dependencies = [
  "common",
  "config",
  "futures",
+ "lazy_static",
  "parking_lot",
  "rsbit",
  "serde",

@@ -1,4 +1,4 @@
-use crate::conn::{read_parse, write, Conn};
+use crate::conn::{write, Conn};
 use crate::message::Message;
 use crate::protocol::{
     ACTION_AUTH, ACTION_CLS, ACTION_FIN, ACTION_NOP, ACTION_PUB, ACTION_RDY, ACTION_REQ,
@@ -119,7 +119,7 @@ impl Client {
                 }
 
                 // 不断从链接中解析数据
-                result = read_parse(&mut conn.reader) =>{
+                result = conn.read_parse(600) => {
                     match result{
                         Ok(msg)=>{
                             match tx.send(msg).await{
@@ -156,12 +156,17 @@ impl Client {
                 }
 
                 // 处理从链接中收到的msg
-                msg_opt = rx.recv() =>{
+                msg_opt = rx.recv() => {
                     if msg_opt.is_none(){
                         continue;
                     }
                     let msg = msg_opt.unwrap();
-                    let ref_clone = guard.clone();
+                    let (resp,passed) = self.validate(&msg);
+                    if !passed{
+                        let _ = self.send_msg(resp.unwrap()).await;
+                    }
+
+                    let client_guard = guard.clone();
                     match msg.action() {
                         ACTION_FIN => self.fin(msg).await,
                         ACTION_RDY => self.rdy(msg).await,
@@ -169,7 +174,7 @@ impl Client {
                         ACTION_PUB => self.publish(msg).await,
                         ACTION_NOP => self.nop(msg).await,
                         ACTION_TOUCH => self.touch(msg).await,
-                        ACTION_SUB => self.sub(msg,ref_clone).await,
+                        ACTION_SUB => self.sub(msg,client_guard).await,
                         ACTION_CLS =>self.cls(msg).await,
                         ACTION_AUTH => self.auth(msg).await,
                         _ => unreachable!(),
@@ -177,6 +182,23 @@ impl Client {
                 }
             }
         }
+    }
+
+    fn validate(&self, msg: &Message) -> (Option<Message>, bool) {
+        match msg.validate(u8::MAX, u64::MAX) {
+            Ok(_) => {}
+            Err(e) => match msg.clone() {
+                Message::Null => todo!(),
+                Message::V1(mut v1) => {
+                    v1.head.set_flag_resq(true);
+                    v1.head.set_reject_code(e.code);
+                    warn!("{e}");
+                    return (Some(Message::V1(v1)), false);
+                }
+            },
+        }
+
+        (None, true)
     }
 
     //============================ Handle Action ==============================//

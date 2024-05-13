@@ -118,27 +118,27 @@ impl Args {
                 .with_delete(msg.delete)
                 .with_persist(msg.persist)
                 .with_ready(msg.not_ready)
-                .set_defer_time(msg.defer);
+                .with_defer_time(msg.defer);
 
             if let Some(body_str) = msg.body.as_ref() {
-                body.set_body(Bytes::copy_from_slice(body_str.as_bytes()))
+                body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))
                     .expect("set body err");
             }
             if let Some(body_file) = msg.body_file.as_ref() {
                 let content = block_on(fs::read(body_file)).expect("read {filename} err");
-                body.set_body(Bytes::copy_from_slice(&content))
+                body.with_body(Bytes::copy_from_slice(&content))
                     .expect("set body err");
             }
 
             if let Some(id) = msg.id.as_ref() {
-                body.set_id(&id).expect("set id err");
+                body.with_id(&id).expect("set id err");
             }
 
             bodys.push(body);
         });
 
         let mut msg = Message::with(head, bodys);
-        msg.validate()?;
+        msg.validate(u8::MAX, u64::MAX)?;
         msg.post_fill();
         Ok(msg)
     }
@@ -309,14 +309,16 @@ async fn main() -> Result<()> {
                 }
 
             }
-            resp = conn.read_parse() =>{
+            resp = conn.read_parse(30) =>{
                 match resp {
                     Ok(msg) => {
                         println!("recieve message: {msg:?}\n");
                     }
                     Err(e) => {
-                        eprintln!("recieve err: {e}");
-                        break;
+                        eprintln!("recieve err: {e}\n");
+                        if e.to_string().contains("eof"){
+                            break;
+                        }
                     }
                 }
             }

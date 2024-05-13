@@ -1,7 +1,9 @@
-use crate::protocol::{ProtocolBodys, ProtocolHead};
-use anyhow::{anyhow, Result};
-
 use self::v1::MessageV1;
+use crate::{
+    error::ProtocolError,
+    protocol::{ProtocolBodys, ProtocolHead},
+};
+use std::result::Result as StdResult;
 pub mod v1;
 
 #[derive(Debug)]
@@ -63,17 +65,10 @@ impl Message {
         }
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, max_msg_num: u8, max_msg_len: u64) -> StdResult<(), ProtocolError> {
         match self {
-            Self::V1(v1) => return v1.validate(),
-            _ => return Err(anyhow!("not support message version")),
+            Self::V1(v1) => return Ok(v1.validate(max_msg_num, max_msg_len)?),
+            _ => unreachable!(),
         }
     }
 }
-
-// pub fn convert_to_message(head: ProtocolHead, bodys: ProtocolBodys) -> Result<Message> {
-//     match head.version() {
-//         1 => return Ok(Message::V1(MessageV1::new())),
-//         _ => return Err(anyhow!("not support protocol version")),
-//     }
-// }

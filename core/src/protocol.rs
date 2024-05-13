@@ -1,8 +1,11 @@
+use crate::error::*;
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use common::global;
 use rsbit::{BitFlagOperation, BitOperation};
-use tracing::warn;
+use std::result::Result as StdResult;
+use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
+use tracing::{debug, warn};
 
 pub const SUPPORT_PROTOCOLS: [u8; 1] = [1];
 
@@ -62,7 +65,7 @@ pub const ACTION_AUTH: u8 = 9;
 * 3rd byte: extend flags
 * 4th byte:
 *           4bit: version: protocol version.
-*           4bit: message number.
+*           4bit: message number. (max is 128)
 * 5th byte: topic length.
 * 6th byte: channel length.
 * 7th byte: token length.
@@ -104,6 +107,46 @@ impl ProtocolHead {
         }
     }
 
+    /// [`read_parse`] read the protocol head from reader.
+    pub async fn read_parse(&mut self, reader: &mut OwnedReadHalf) -> Result<()> {
+        // let mut ph: ProtocolHead = ProtocolHead::new();
+        let mut buf = BytesMut::new();
+
+        // debug!(addr = "{self.addr:?}", "read protocol head");
+        // parse head
+        buf.resize(PROTOCOL_HEAD_LEN, 0);
+        reader.read_exact(&mut buf).await?;
+        self.set_head(
+            buf.to_vec()
+                .try_into()
+                .expect("convert BytesMut to array failed"),
+        );
+        debug!(addr = "{self.addr:?}", "parse topic name");
+
+        // parse topic name
+        buf.resize(self.topic_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let topic: String = String::from_utf8(buf.to_vec()).expect("illigal topic name");
+        self.set_topic(topic.as_str())?;
+
+        debug!(addr = "{self.addr:?}", "parse channel name");
+
+        // parse channel name
+        buf.resize(self.channel_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
+        self.set_channel(channel.as_str())?;
+
+        debug!(addr = "{self.addr:?}", "parse token");
+        // parse token
+        buf.resize(self.token_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let token = String::from_utf8(buf.to_vec()).expect("illigal token value");
+        self.set_token(token.as_str())?;
+
+        Ok(())
+    }
+
     pub fn clone(&self) -> Self {
         let mut ph = Self::new();
         ph.set_head(self.head);
@@ -114,35 +157,52 @@ impl ProtocolHead {
         ph
     }
 
-    pub fn validate(&self) -> Result<()> {
-        if self.is_req() {
-            return self.validate_req();
-        }
-        self.validate_resq()
-    }
-
-    fn validate_req(&self) -> Result<()> {
-        if !self.is_req() {
-            return Err(anyhow!("this is not req packet"));
-        }
-        let action = self.action();
-        if !SUPPORT_ACTIONS.contains(&action) {
-            return Err(anyhow!("not support action:{action}"));
-        }
+    pub fn validate(&self, max_msg_num: u8) -> StdResult<(), ProtocolError> {
         let v = self.version();
         if !SUPPORT_PROTOCOLS.contains(&v) {
-            return Err(anyhow!("not support protocol version:{v}"));
+            return Err(ProtocolError::new(PROT_ERR_CODE_NOT_SUPPORT_VERSION));
         }
-        // TODO: 根据action单独校验
+        if self.is_req() {
+            return self.validate_req(max_msg_num);
+        }
+
+        self.validate_resq(max_msg_num)
+    }
+
+    /// [`validate_req`] validate the head is valid in protocol.
+    fn validate_req(&self, max_msg_num: u8) -> StdResult<(), ProtocolError> {
+        if !self.is_req() {
+            return Err(ProtocolError::new(PROT_ERR_CODE_ZERO));
+        }
+        if self.reject() || self.reject_code() != 0 {
+            return Err(ProtocolError::new(PROT_ERR_CODE_SHOULD_NOT_REJECT_CODE));
+        }
+        match self.action() {
+            ACTION_PUB | ACTION_FIN | ACTION_RDY | ACTION_REQ => {
+                if self.msg_num() == 0 {
+                    return Err(ProtocolError::new(PROT_ERR_CODE_NEED_MSG));
+                }
+                if self.msg_num() > max_msg_num {
+                    return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_NUM));
+                }
+            }
+            _ => {
+                if self.msg_num() != 0 {
+                    return Err(ProtocolError::new(PROT_ERR_CODE_SHOULD_NOT_MSG));
+                }
+            }
+        }
         Ok(())
     }
 
-    fn validate_resq(&self) -> Result<()> {
+    /// [`validate_resq`] validate the head is valid in protocol.
+    fn validate_resq(&self, max_msg_num: u8) -> StdResult<(), ProtocolError> {
         if self.is_req() {
-            return Err(anyhow!("this is not resq packet"));
+            return Err(ProtocolError::new(PROT_ERR_CODE_ZERO));
         }
-        if self.reject() && self.reject_code() == 0 {}
-
+        if self.msg_num() > max_msg_num {
+            return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_NUM));
+        }
         Ok(())
     }
 
@@ -172,6 +232,24 @@ impl ProtocolHead {
 
     pub fn set_head(&mut self, head: [u8; PROTOCOL_HEAD_LEN]) -> &mut Self {
         self.head = head;
+        self
+    }
+
+    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
+        if index >= self.head.len() || pos > 7 {
+            return;
+        }
+        let mut flag = self.head[index];
+        if on {
+            (&mut flag).set_1(pos);
+        } else {
+            (&mut flag).set_0(pos);
+        }
+        self.head[index] = flag;
+    }
+
+    pub fn set_flag_resq(&mut self, resp: bool) -> &mut Self {
+        self.set_head_flag(1, 7, resp);
         self
     }
 
@@ -342,6 +420,63 @@ impl ProtocolBodys {
         }
     }
 
+    /// [`read_parse`] read the protocol bodys from reader.
+    pub async fn read_parse(&mut self, reader: &mut OwnedReadHalf, mut msg_num: u8) -> Result<()> {
+        // let mut pbs = ProtocolBodys::new();
+        while msg_num != 0 {
+            msg_num -= 1;
+
+            let mut pb = ProtocolBody::new();
+            let mut buf = BytesMut::new();
+
+            // parse protocol body head
+            buf.resize(PROTOCOL_BODY_HEAD_LEN, 0);
+            reader.read_exact(&mut buf).await?;
+            pb.with_head(
+                buf.to_vec()
+                    .try_into()
+                    .expect("convert to protocol body head failed"),
+            );
+
+            // parse defer time
+            if pb.is_defer() {
+                buf.resize(8, 0);
+                reader.read_exact(&mut buf).await?;
+                let defer_time = u64::from_be_bytes(
+                    buf.to_vec()
+                        .try_into()
+                        .expect("convert to defer time failed"),
+                );
+                pb.with_defer_time(defer_time);
+            }
+
+            // parse id
+            let id_len = pb.id_len();
+            if id_len != 0 {
+                buf.resize(id_len as usize, 0);
+                reader.read_exact(&mut buf).await?;
+                let id = String::from_utf8(buf.to_vec()).expect("illigal id value");
+                pb.with_id(id.as_str())?;
+            }
+            // parse body
+            let body_len = pb.body_len();
+            if body_len != 0 {
+                buf.resize(body_len as usize, 0);
+                reader.read_exact(&mut buf).await?;
+                let bts: Bytes = Bytes::copy_from_slice(buf.as_ref());
+                pb.with_body(bts)?;
+            }
+
+            self.push(pb);
+        }
+
+        Ok(())
+    }
+
+    pub fn get(&self) -> &Vec<ProtocolBody> {
+        &self.list
+    }
+
     pub fn len(&self) -> usize {
         self.list.len()
     }
@@ -378,6 +513,16 @@ impl ProtocolBodys {
             pb.set_sid(self.sid);
             pb.post_fill();
         })
+    }
+
+    pub fn validate(&self, max_msg_len: u64) -> StdResult<(), ProtocolError> {
+        let mut iter = self.list.iter();
+        while let Some(pb) = iter.next() {
+            if pb.body_len() > max_msg_len {
+                return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_LEN));
+            }
+        }
+        Ok(())
     }
 }
 /**
@@ -418,11 +563,11 @@ impl ProtocolBody {
 
     pub fn clone(&self) -> Self {
         let mut pb = Self::new();
-        pb.set_head(self.head);
+        pb.with_head(self.head);
         let _ = pb.set_sid(self.sid);
-        let _ = pb.set_defer_time(self.defer_time);
-        let _ = pb.set_id(&self.id.as_str());
-        let _ = pb.set_body(self.body.clone());
+        let _ = pb.with_defer_time(self.defer_time);
+        let _ = pb.with_id(&self.id.as_str());
+        let _ = pb.with_body(self.body.clone());
 
         pb
     }
@@ -443,7 +588,7 @@ impl ProtocolBody {
             return;
         }
         let id = global::SNOWFLAKE.get_id().to_string();
-        let _ = self.set_id(id.as_str());
+        let _ = self.with_id(id.as_str());
     }
     // pub fn clone(&self) -> Self {
     //     let new_pb = Self::new();
@@ -454,7 +599,7 @@ impl ProtocolBody {
         self.sid = sid;
     }
 
-    pub fn set_head(&mut self, head: [u8; PROTOCOL_BODY_HEAD_LEN]) -> &mut Self {
+    pub fn with_head(&mut self, head: [u8; PROTOCOL_BODY_HEAD_LEN]) -> &mut Self {
         self.head = head;
         self
     }
@@ -521,7 +666,7 @@ impl ProtocolBody {
         self.head[1]
     }
 
-    pub fn set_id(&mut self, id: &str) -> Result<()> {
+    pub fn with_id(&mut self, id: &str) -> Result<()> {
         if id.len() > u8::MAX as usize {
             return Err(anyhow!("id len exceed max length 128"));
         }
@@ -539,7 +684,7 @@ impl ProtocolBody {
         )
     }
 
-    pub fn set_body(&mut self, body: Bytes) -> Result<()> {
+    pub fn with_body(&mut self, body: Bytes) -> Result<()> {
         // set the body length in head
         let body_len = body.len().to_be_bytes();
         let mut new_head = self.head[..2].to_vec();
@@ -553,7 +698,7 @@ impl ProtocolBody {
         Ok(())
     }
 
-    pub fn set_defer_time(&mut self, defer_time: u64) {
+    pub fn with_defer_time(&mut self, defer_time: u64) {
         if defer_time == 0 {
             return;
         }

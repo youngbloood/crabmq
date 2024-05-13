@@ -1,5 +1,28 @@
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use futures::Future;
+use tokio::{select, time::interval};
+
 pub fn type_of<T>(_: T) -> &'static str {
     std::any::type_name::<T>()
+}
+
+/// [`execute_timeout`] execute the [`fut`] in timeout interval. It will return Err when timeout or fur return a Err.
+pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u64) -> Result<T> {
+    let mut ticker = interval(Duration::from_secs(timeout));
+    ticker.tick().await;
+    select! {
+        out = fut => {
+            if let Err(e) = out {
+                return Err(anyhow!(e));
+            }
+            return out;
+        },
+        _ = ticker.tick() => {
+            return Err(anyhow!("execute timeout"));
+        }
+    };
 }
 
 // use parking_lot::RwLock;

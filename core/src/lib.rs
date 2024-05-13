@@ -2,6 +2,7 @@ mod channel;
 mod client;
 pub mod conn;
 mod disk_queue;
+pub mod error;
 pub mod message;
 pub mod protocol;
 mod service;

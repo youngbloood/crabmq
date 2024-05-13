@@ -1,11 +1,11 @@
-use crate::protocol::{ProtocolBodys, ProtocolHead};
-use anyhow::Result;
+use crate::{error::*, protocol::*};
+use std::result::Result as StdResult;
 
 // 一个标准的消息体
 #[derive(Debug)]
 pub struct MessageV1 {
     remote_addr: String,
-    head: ProtocolHead,
+    pub head: ProtocolHead,
     bodys: ProtocolBodys,
 }
 
@@ -63,8 +63,11 @@ impl MessageV1 {
 
         result
     }
-    // 该message是否合法
-    pub fn validate(&self) -> Result<()> {
+
+    /// 该message是否合法
+    pub fn validate(&self, max_msg_num: u8, max_msg_len: u64) -> StdResult<(), ProtocolError> {
+        self.head.validate(max_msg_num)?;
+        self.bodys.validate(max_msg_len)?;
         Ok(())
     }
 }
