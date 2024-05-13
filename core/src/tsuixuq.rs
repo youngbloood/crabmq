@@ -5,11 +5,8 @@ use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
 use common::global::Guard;
-use common::ArcMux;
 use config::{Config, File};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use tracing::Level;
 use tracing_appender::rolling::{daily, hourly, minutely, never, RollingFileAppender};
 
@@ -130,30 +127,25 @@ impl TsuixuqOption {
 }
 
 pub struct Tsuixuq {
-    opt: Arc<TsuixuqOption>,
+    opt: Guard<TsuixuqOption>,
     topics: HashMap<String, Guard<Topic>>,
-    params: Receiver<Vec<Vec<u8>>>,
-    params_sender: Sender<Vec<Vec<u8>>>,
 }
 
 unsafe impl Sync for Tsuixuq {}
 unsafe impl Send for Tsuixuq {}
 
 impl Tsuixuq {
-    pub fn new(opt: Arc<TsuixuqOption>) -> Self {
-        let (tx, rx) = mpsc::channel(10000);
+    pub fn new(opt: Guard<TsuixuqOption>) -> Self {
         Tsuixuq {
             opt,
             topics: HashMap::new(),
-            params: rx,
-            params_sender: tx,
         }
     }
 
     pub fn get_or_create_topic(&mut self, topic_name: &str) -> Result<Guard<Topic>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
-            && topics_len >= (self.opt.topic_num_in_tsuixuq as usize)
+            && topics_len >= (self.opt.get().topic_num_in_tsuixuq as _)
         {
             return Err(anyhow!("exceed upperlimit of topic"));
         }

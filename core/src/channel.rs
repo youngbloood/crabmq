@@ -1,6 +1,7 @@
 use crate::{client::Client, message::Message};
 use anyhow::Result;
 use common::{global::Guard, Name};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
@@ -15,7 +16,7 @@ pub struct Channel {
     msg_sender: Sender<Message>,
     msg_recver: Receiver<Message>,
 
-    clients: HashMap<String, Guard<Client>>,
+    clients: RwLock<HashMap<String, Guard<Client>>>,
 }
 
 unsafe impl Sync for Channel {}
@@ -31,7 +32,7 @@ impl Channel {
             msg_recver: rx,
             pub_num: 0,
             sub_num: 0,
-            clients: HashMap::new(),
+            clients: RwLock::new(HashMap::new()),
         }
     }
 
@@ -39,12 +40,14 @@ impl Channel {
         Guard::new(self)
     }
 
-    pub fn set_client(&mut self, addr: String, client_guard: Guard<Client>) {
-        self.clients.insert(addr, client_guard);
+    pub fn set_client(&self, addr: String, client_guard: Guard<Client>) {
+        let mut rw = self.clients.write();
+        rw.insert(addr, client_guard);
     }
 
     pub async fn send_msg(&self, msg: Message) -> Result<()> {
-        let mut iter = self.clients.iter();
+        let rg = self.clients.read();
+        let mut iter = rg.iter();
         while let Some((_addr, client)) = iter.next() {
             client.get().send_msg(msg.clone()).await?;
         }
@@ -59,7 +62,8 @@ impl Channel {
         // self.pub_num.increase();
     }
 
-    pub fn delete_channel(&mut self, chan_name: &str) {
-        self.clients.remove(chan_name);
+    pub fn delete_channel(&self, chan_name: &str) {
+        let mut wg = self.clients.write();
+        wg.remove(chan_name);
     }
 }

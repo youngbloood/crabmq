@@ -1,13 +1,10 @@
 use crate::{util::type_of, ArcMux};
 use anyhow::*;
-use futures::executor::block_on;
 use lazy_static::*;
+use parking_lot::Mutex;
 use snowflake::SnowflakeIdBucket;
 use std::{cell::UnsafeCell, sync::Arc};
-use tokio::sync::{
-    broadcast::{self, Receiver, Sender},
-    Mutex,
-};
+use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -42,7 +39,8 @@ impl SnowFlake {
     }
 
     pub fn get_id(&self) -> i64 {
-        block_on(self.inner.lock()).get_id()
+        self.inner.lock().get_id()
+        // block_on(self.inner.lock()).get_id()
     }
 }
 

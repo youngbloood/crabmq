@@ -310,6 +310,7 @@ dependencies = [
  "common",
  "config",
  "futures",
+ "parking_lot",
  "rsbit",
  "serde",
  "tokio",

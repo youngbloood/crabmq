@@ -2,16 +2,14 @@ pub mod global;
 pub mod util;
 
 use anyhow::{anyhow, Result};
-use std::{
-    cell::{Cell, RefCell},
-    sync::Arc,
-};
-use tokio::sync::Mutex;
+use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 
-pub type ArcRefCell<T> = Arc<RefCell<T>>;
-pub type ArcCell<T> = Arc<Cell<T>>;
-pub type ArcMuxRefCell<T> = Arc<Mutex<RefCell<T>>>;
+/// ArcMux is std::sycn::Arc<parking_lot::Mutex<T>>
 pub type ArcMux<T> = Arc<Mutex<T>>;
+
+/// ArcRwMux is std::sycn::Arc<parking_lot::RwLock<T>>
+pub type ArcRwMux<T> = Arc<RwLock<T>>;
 
 pub struct Name(String);
 

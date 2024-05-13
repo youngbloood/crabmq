@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use common::global;
+use common::global::{self, Guard};
 use core::{tsuixuq::TsuixuqOption, tsuixuqd::Tsuixuqd};
 use tokio::{select, signal};
 
@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     // 初始化日志subcriber
     opt.init_log()?;
 
-    let mut daemon = Tsuixuqd::new(opt);
+    let mut daemon = Tsuixuqd::new(Guard::new(opt));
     select! {
         result =  daemon.serve() => {
             if let Err(err) = result{

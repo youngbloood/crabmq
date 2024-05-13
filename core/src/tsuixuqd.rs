@@ -3,22 +3,20 @@ use crate::{
     tsuixuq::{Tsuixuq, TsuixuqOption},
 };
 use anyhow::{anyhow, Result};
-use common::{global, ArcMux};
-use std::sync::Arc;
-use tokio::{net::TcpListener, select, sync::Mutex};
+use common::global::{self, Guard};
+use tokio::{net::TcpListener, select};
 use tracing::info;
 
 pub struct Tsuixuqd {
-    opt: Arc<TsuixuqOption>,
-    tsuixuq: ArcMux<Tsuixuq>,
+    opt: Guard<TsuixuqOption>,
+    tsuixuq: Guard<Tsuixuq>,
 }
 
 impl Tsuixuqd {
-    pub fn new(mut opt: TsuixuqOption) -> Self {
-        let opt_arc = Arc::new(opt);
+    pub fn new(opt: Guard<TsuixuqOption>) -> Self {
         Tsuixuqd {
-            opt: opt_arc.clone(),
-            tsuixuq: Arc::new(Mutex::new(Tsuixuq::new(opt_arc.clone()))),
+            tsuixuq: Guard::new(Tsuixuq::new(opt.clone())),
+            opt,
         }
     }
 
@@ -53,10 +51,10 @@ impl Tsuixuqd {
         Ok(())
     }
 
-    async fn serve_tcp(opt: Arc<TsuixuqOption>, tsuixuq: ArcMux<Tsuixuq>) -> Result<()> {
+    async fn serve_tcp(opt: Guard<TsuixuqOption>, tsuixuq: Guard<Tsuixuq>) -> Result<()> {
         // start tcp serve
-        let tcp_port = opt.tcp_port;
-        let tsuixuq_clone: Arc<Mutex<Tsuixuq>> = tsuixuq.clone();
+        let tcp_port = opt.get().tcp_port;
+        let tsuixuq_clone: Guard<Tsuixuq> = tsuixuq.clone();
         let opt_arc = opt.clone();
 
         match tokio::spawn(async move {
@@ -88,51 +86,6 @@ impl Tsuixuqd {
         }
 
         global::CANCEL_TOKEN.cancelled().await;
-        // info!("start recieve params from socket");
-        // while let Some((remote_addr, msg)) = rx.recv().await {
-        //     info!("收到消息: {remote_addr},{msg:?}");
-        //     match msg.action() {
-        //         ACTION_FIN => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.fin(remote_addr, msg).await;
-        //         }
-        //         ACTION_RDY => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.rdy(remote_addr, msg).await;
-        //         }
-        //         ACTION_REQ => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.req(remote_addr, msg).await
-        //         }
-        //         ACTION_PUB => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.publish(remote_addr, msg).await;
-        //             drop(daemon);
-        //         }
-        //         ACTION_NOP => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.nop(remote_addr, msg).await;
-        //         }
-        //         ACTION_TOUCH => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.touch(remote_addr, msg).await;
-        //         }
-        //         ACTION_SUB => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.sub(remote_addr, msg).await;
-        //             drop(daemon);
-        //         }
-        //         ACTION_CLS => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.cls(remote_addr, msg).await;
-        //         }
-        //         ACTION_AUTH => {
-        //             let mut daemon = tsuixuq.lock().await;
-        //             daemon.auth(remote_addr, msg).await;
-        //         }
-        //         _ => unreachable!(),
-        //     }
-        // }
         Ok(())
     }
 }

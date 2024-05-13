@@ -7,12 +7,9 @@ use crate::protocol::{
 use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
-use common::ArcMux;
-use std::borrow::BorrowMut;
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -34,7 +31,7 @@ pub struct Client {
     // 链接远程地址
     remote_addr: SocketAddr,
     //
-    opt: Arc<TsuixuqOption>,
+    opt: Guard<TsuixuqOption>,
     // 超时ticker
     ticker: UnsafeCell<Interval>,
     defeat_count: AtomicU16,
@@ -44,7 +41,7 @@ pub struct Client {
 
     state: ClientState,
 
-    tsuixuq: ArcMux<Tsuixuq>,
+    tsuixuq: Guard<Tsuixuq>,
 }
 
 unsafe impl Sync for Client {}
@@ -61,8 +58,8 @@ impl Client {
     pub fn new(
         socket: TcpStream,
         remote_addr: SocketAddr,
-        opt: Arc<TsuixuqOption>,
-        tsuixuq: ArcMux<Tsuixuq>,
+        opt: Guard<TsuixuqOption>,
+        tsuixuq: Guard<Tsuixuq>,
     ) -> Self {
         let addr = remote_addr.to_string();
         debug!(addr = addr, "new client");
@@ -73,7 +70,7 @@ impl Client {
             tsuixuq,
             conn: UnsafeCell::new(Conn::new(socket)),
             ticker: UnsafeCell::new(time::interval(Duration::from_secs(
-                opt.client_timeout as u64,
+                opt.get().client_timeout as _,
             ))),
             defeat_count: AtomicU16::new(0),
             state: CLIENT_STATE_NOT_READY,
@@ -111,7 +108,7 @@ impl Client {
         let ticker = unsafe { self.ticker.get().as_mut() }.unwrap();
 
         loop {
-            if self.defeat_count.load(Ordering::Relaxed) > self.opt.client_timeout_count {
+            if self.defeat_count.load(Ordering::Relaxed) > self.opt.get().client_timeout_count {
                 info!(addr = addr, "not response, then will disconnect");
                 return;
             }
@@ -188,7 +185,7 @@ impl Client {
     pub async fn rdy(&self, msg: Message) {}
 
     pub async fn publish(&self, msg: Message) {
-        let mut daemon = self.tsuixuq.lock().await;
+        let daemon = self.tsuixuq.get_mut();
         let _ = daemon.send_message(msg).await;
     }
     pub async fn req(&self, msg: Message) {}
@@ -203,9 +200,8 @@ impl Client {
         let chan_name = msg.get_channel();
 
         let tsuixuq = self.tsuixuq.clone();
-        let mut daemon = tsuixuq.lock().await;
+        let daemon = tsuixuq.get_mut();
         let topic = daemon
-            .borrow_mut()
             .get_or_create_topic(topic_name)
             .expect("get topic err");
         let chan = topic.get_mut().get_create_mut_channel(chan_name);

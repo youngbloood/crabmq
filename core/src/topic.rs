@@ -2,10 +2,8 @@ use crate::channel::Channel;
 use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::global::Guard;
-use common::ArcMux;
 use common::Name;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::collections::HashMap;
 
 pub struct Topic {
     name: Name,
