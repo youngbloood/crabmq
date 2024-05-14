@@ -1,9 +1,5 @@
 use crate::conn::Conn;
 use crate::message::Message;
-use crate::protocol::{
-    ACTION_AUTH, ACTION_CLS, ACTION_FIN, ACTION_NOP, ACTION_PUB, ACTION_RDY, ACTION_REQ,
-    ACTION_SUB, ACTION_TOUCH,
-};
 use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
@@ -96,11 +92,7 @@ impl Client {
         recver.recv().await.unwrap()
     }
 
-    pub async fn io_loop(&self, guard: Guard<Self>) {
-        // let client = client.borrow_mut();
-        // 用于处理从客户端接收到的消息流
-        let (tx, mut rx) = mpsc::channel(1);
-
+    pub async fn io_loop(&self, sender: Sender<(String, Message)>) {
         let addr = self.remote_addr.to_string();
         debug!(addr = addr, "start client io_loop");
 
@@ -133,7 +125,7 @@ impl Client {
                 result = conn.read_parse(self.opt.get().client_read_timeout) => {
                     match result{
                         Ok(msg)=>{
-                            match tx.send(msg).await{
+                            match sender.send((self.remote_addr.to_string(),msg)).await{
                                 Ok(())=>{
                                     info!(addr = addr, "send msg to tsuixuq success");
                                     continue
@@ -167,94 +159,12 @@ impl Client {
                         error!(addr = addr, "write msg err: {e:?}");
                     }
                 }
-
-                // 处理从链接中收到的msg
-                msg_opt = rx.recv() => {
-                    if msg_opt.is_none(){
-                        continue;
-                    }
-                    let msg = msg_opt.unwrap();
-                    let (resp,passed) = self.validate(&msg);
-                    if !passed{
-                        let _ = self.send_msg(resp.unwrap()).await;
-                    }
-
-                    let client_guard = guard.clone();
-                    match msg.action() {
-                        ACTION_FIN => self.fin(msg).await,
-                        ACTION_RDY => self.rdy(msg).await,
-                        ACTION_REQ => self.req(msg).await,
-                        ACTION_PUB => self.publish(msg).await,
-                        ACTION_NOP => self.nop(msg).await,
-                        ACTION_TOUCH => self.touch(msg).await,
-                        ACTION_SUB => self.sub(msg,client_guard).await,
-                        ACTION_CLS =>self.cls(msg).await,
-                        ACTION_AUTH => self.auth(msg).await,
-                        _ => unreachable!(),
-                    }
-                }
             }
         }
     }
-
-    fn validate(&self, msg: &Message) -> (Option<Message>, bool) {
-        match msg.validate(u8::MAX, u64::MAX) {
-            Ok(_) => {}
-            Err(e) => match msg.clone() {
-                Message::Null => todo!(),
-                Message::V1(mut v1) => {
-                    v1.head.set_flag_resq(true);
-                    v1.head.set_reject_code(e.code);
-                    warn!("{e}");
-                    return (Some(Message::V1(v1)), false);
-                }
-            },
-        }
-
-        (None, true)
-    }
-
-    //============================ Handle Action ==============================//
-    pub async fn fin(&self, msg: Message) {}
-
-    pub async fn rdy(&self, msg: Message) {}
-
-    pub async fn publish(&self, msg: Message) {
-        let daemon = self.tsuixuq.get_mut();
-        let _ = daemon.send_message(msg).await;
-    }
-    pub async fn req(&self, msg: Message) {}
-
-    pub async fn nop(&self, msg: Message) {}
-
-    pub async fn touch(&self, msg: Message) {}
-
-    pub async fn sub(&self, msg: Message, guard: Guard<Self>) {
-        info!("订阅消息  msg = {msg:?}");
-        let topic_name = msg.get_topic();
-        let chan_name = msg.get_channel();
-
-        let tsuixuq = self.tsuixuq.clone();
-        let daemon = tsuixuq.get_mut();
-        let topic = daemon
-            .get_or_create_topic(topic_name)
-            .expect("get topic err");
-        let chan = topic.get_mut().get_create_mut_channel(chan_name);
-
-        info!("将client设置到channel中");
-        chan.get_mut()
-            .set_client(self.remote_addr.to_string(), guard);
-        info!("将client设置到channel中  成功");
-    }
-
-    pub async fn cls(&self, msg: Message) {}
-
-    pub async fn auth(&self, msg: Message) {}
-    //============================ Handle Action ==============================//
 }
 
-pub async fn io_loop(guard: Guard<Client>) {
+pub async fn io_loop(guard: Guard<Client>, sender: Sender<(String, Message)>) {
     let client = guard.get();
-    let new_guard = guard.clone();
-    client.io_loop(new_guard).await;
+    client.io_loop(sender).await;
 }

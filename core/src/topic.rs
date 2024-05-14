@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::Name;
 use std::collections::HashMap;
+use tokio::sync::mpsc::Sender;
 
 pub struct Topic {
     name: Name,
@@ -32,9 +33,10 @@ impl Topic {
         };
 
         // 每个topic默认有个default的channel
-        topic
-            .channels
-            .insert("default".to_string(), Guard::new(Channel::new("default")));
+        topic.channels.insert(
+            "default".to_string(),
+            Guard::new(Channel::new(topic.name.as_str(), "default")),
+        );
 
         topic
     }
@@ -43,10 +45,15 @@ impl Topic {
         Guard::new(self)
     }
 
-    pub async fn send_msg(&mut self, msg: Message) -> Result<()> {
+    pub async fn send_msg(
+        &mut self,
+        sender: Sender<(String, Message)>,
+        msg: Message,
+    ) -> Result<()> {
         let mut iter = self.channels.iter();
         while let Some((_chan_name, chan)) = iter.next() {
-            chan.get_mut().send_msg(msg.clone()).await?;
+            let sender_clone = sender.clone();
+            chan.get_mut().send_msg(sender_clone, msg.clone()).await?;
         }
         Ok(())
     }
@@ -63,7 +70,7 @@ impl Topic {
         let chan = self
             .channels
             .entry(chan_name.to_owned())
-            .or_insert_with(|| Channel::new(chan_name).builder());
+            .or_insert_with(|| Channel::new(self.name.as_str(), chan_name).builder());
 
         chan.clone()
     }

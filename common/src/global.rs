@@ -4,7 +4,10 @@ use lazy_static::*;
 use parking_lot::Mutex;
 use snowflake::SnowflakeIdBucket;
 use std::{cell::UnsafeCell, sync::Arc};
-use tokio::sync::broadcast::{self, Receiver, Sender};
+use tokio::sync::{
+    broadcast::{self, Receiver, Sender},
+    mpsc::error::SendError,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 pub struct Channel {
+    topic_name: Name,
     name: Name,
 
     ephemeral: bool,
@@ -23,9 +24,10 @@ unsafe impl Sync for Channel {}
 unsafe impl Send for Channel {}
 
 impl Channel {
-    pub fn new(name: &str) -> Self {
+    pub fn new(topic_name: &str, name: &str) -> Self {
         let (tx, rx) = mpsc::channel(10000);
         Channel {
+            topic_name: Name::new(topic_name),
             name: Name::new(name),
             ephemeral: false,
             msg_sender: tx,
@@ -40,12 +42,12 @@ impl Channel {
         Guard::new(self)
     }
 
-    pub fn set_client(&self, addr: String, client_guard: Guard<Client>) {
+    pub fn set_client(&self, addr: &str, client_guard: Guard<Client>) {
         let mut rw = self.clients.write();
-        rw.insert(addr, client_guard);
+        rw.insert(addr.to_string(), client_guard);
     }
 
-    pub async fn send_msg(&self, msg: Message) -> Result<()> {
+    pub async fn send_msg(&self, sender: Sender<(String, Message)>, msg: Message) -> Result<()> {
         let rg = self.clients.read();
         let mut iter = rg.iter();
         while let Some((_addr, client)) = iter.next() {

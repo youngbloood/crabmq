@@ -7,6 +7,7 @@ use clap::Parser;
 use common::global::Guard;
 use config::{Config, File};
 use std::collections::HashMap;
+use tokio::sync::mpsc::Sender;
 use tracing::Level;
 use tracing_appender::rolling::{daily, hourly, minutely, never, RollingFileAppender};
 
@@ -189,10 +190,14 @@ impl Tsuixuq {
         Ok(topic.clone())
     }
 
-    pub async fn send_message(&mut self, msg: Message) -> Result<()> {
+    pub async fn send_message(
+        &mut self,
+        sender: Sender<(String, Message)>,
+        msg: Message,
+    ) -> Result<()> {
         let topic_name = msg.get_topic();
         let topic = self.get_or_create_topic(topic_name)?;
-        topic.get_mut().send_msg(msg).await?;
+        topic.get_mut().send_msg(sender, msg).await?;
         Ok(())
     }
 
