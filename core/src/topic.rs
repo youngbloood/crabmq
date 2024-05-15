@@ -1,9 +1,10 @@
-use crate::channel::Channel;
-use crate::message::Message;
+use crate::message::{Message, MessageUnitHeap};
+use crate::{channel::Channel, message::MessageUnit};
 use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::Name;
-use std::collections::HashMap;
+use parking_lot::RwLock;
+use std::collections::{BinaryHeap, HashMap};
 use tokio::sync::mpsc::Sender;
 
 pub struct Topic {
@@ -13,6 +14,9 @@ pub struct Topic {
 
     pub_num: u64, // publisher的数量
     sub_num: u64, // subscriber的数量
+
+    persist_filename: String,
+    defer_heap: MessageUnitHeap,
 
     ephemeral: bool,
 
@@ -30,6 +34,8 @@ impl Topic {
             message_bytes: 0,
             pub_num: 0,
             sub_num: 0,
+            persist_filename: "".to_string(),
+            defer_heap: MessageUnitHeap::new(""),
         };
 
         // 每个topic默认有个default的channel
@@ -48,13 +54,26 @@ impl Topic {
     pub async fn send_msg(
         &mut self,
         sender: Sender<(String, Message)>,
-        msg: Message,
+        addr: &str,
+        mut msg: Message,
     ) -> Result<()> {
         let mut iter = self.channels.iter();
         while let Some((_chan_name, chan)) = iter.next() {
+            match &mut msg {
+                Message::Null => unreachable!(),
+                Message::V1(ref mut v1) => {
+                    let mut bodys_iter = v1.bodys.list.iter_mut();
+                    while let Some(body) = bodys_iter.next() {
+                        // TODO: 处理各种body
+                    }
+                }
+            }
             let sender_clone = sender.clone();
             chan.get_mut().send_msg(sender_clone, msg.clone()).await?;
         }
+
+        let _ = msg.reset_body();
+        let _ = sender.send((addr.to_string(), msg)).await;
         Ok(())
     }
 

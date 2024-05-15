@@ -4,6 +4,7 @@ pub mod conn;
 mod disk_queue;
 pub mod error;
 pub mod message;
+mod metadata;
 pub mod protocol;
 mod service;
 mod tcp;

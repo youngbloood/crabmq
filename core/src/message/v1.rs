@@ -1,12 +1,12 @@
 use crate::{error::*, protocol::*};
+use anyhow::Result;
 use std::result::Result as StdResult;
-
 // 一个标准的消息体
 #[derive(Debug)]
 pub struct MessageV1 {
     remote_addr: String,
     pub head: ProtocolHead,
-    bodys: ProtocolBodys,
+    pub bodys: ProtocolBodys,
 }
 
 impl MessageV1 {
@@ -51,9 +51,10 @@ impl MessageV1 {
         self.head.action()
     }
 
-    pub fn post_fill(&mut self) {
-        self.head.post_fill();
-        self.bodys.post_fill();
+    pub fn init(&mut self) -> Result<()> {
+        self.head.init()?;
+        self.bodys.init()?;
+        Ok(())
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
@@ -69,5 +70,51 @@ impl MessageV1 {
         self.head.validate(max_msg_num)?;
         self.bodys.validate(max_msg_len)?;
         Ok(())
+    }
+
+    pub fn split(&self) -> Vec<MessageV1Unit> {
+        let mut list = vec![];
+        let mut iter = self.bodys.list.iter();
+        while let Some(body) = iter.next() {
+            let mut head = self.head.clone();
+            let _ = head.set_msg_num(1);
+            list.push(MessageV1Unit::with(head, body.clone()));
+        }
+        list
+    }
+}
+
+/**
+ * [`MessageV1Unit`]，由[`MessageV1`]切割而来
+ * 持久化到磁盘时使用该对象
+ */
+pub struct MessageV1Unit {
+    pub head: ProtocolHead,
+    pub body: ProtocolBody,
+}
+
+impl MessageV1Unit {
+    pub fn with(head: ProtocolHead, body: ProtocolBody) -> Self {
+        MessageV1Unit { head, body }
+    }
+}
+
+impl Eq for MessageV1Unit {}
+
+impl Ord for MessageV1Unit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.body.defer_time().cmp(&other.body.defer_time())
+    }
+}
+
+impl PartialEq for MessageV1Unit {
+    fn eq(&self, other: &Self) -> bool {
+        self.body.defer_time() == other.body.defer_time()
+    }
+}
+
+impl PartialOrd for MessageV1Unit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }

@@ -1,11 +1,15 @@
 use crate::error::*;
 use anyhow::{anyhow, Result};
-use bytes::{Bytes, BytesMut};
-use common::global;
+use bytes::{Buf, Bytes, BytesMut};
+use chrono::prelude::*;
+use common::global::{self, SNOWFLAKE};
 use rsbit::{BitFlagOperation, BitOperation};
-use std::result::Result as StdResult;
+use std::{
+    io::{BufRead, Read as _},
+    result::Result as StdResult,
+};
 use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub const SUPPORT_PROTOCOLS: [u8; 1] = [1];
 
@@ -54,6 +58,7 @@ pub const ACTION_CLS: u8 = 8;
 pub const ACTION_AUTH: u8 = 9;
 /**
 ### FIXED HEAD LENGTH(at least 6 bytes):
+* HEAD: 10 bytes:
 * 1st byte: action[fin, rdy, req, pub , mpub, dpub, nop, touch, sub, cls, auth]
 * 2nd byte: global flags:
 *           1bit: req flag: 0 represent is a req, 1 represent is a resp
@@ -70,10 +75,12 @@ pub const ACTION_AUTH: u8 = 9;
 * 6th byte: channel length.
 * 7th byte: token length.
 * 8th byte: reject code.
-* 9th bytes: extend bytes.
-* optional: topic value.
-* optional: channel value.
-* optional: token value.
+* 9-10th bytes: extend bytes.
+*
+* optional:
+*           topic value.
+*           channel value.
+*           token value.
 */
 #[derive(Debug)]
 pub struct ProtocolHead {
@@ -105,6 +112,17 @@ impl ProtocolHead {
             token: String::new(),
             reject_code: 0,
         }
+    }
+
+    pub fn init(&mut self) -> Result<()> {
+        if self.topic.len() == 0 {
+            self.set_topic("default")?;
+        }
+        if self.channel.len() == 0 {
+            self.set_channel("default")?;
+        }
+
+        Ok(())
     }
 
     /// [`read_parse`] read the protocol head from reader.
@@ -145,6 +163,56 @@ impl ProtocolHead {
         self.set_token(token.as_str())?;
 
         Ok(())
+    }
+
+    /// [`parse_from`] read the protocol head from bts.
+    pub fn parse_from(bts: Bytes, offset: &mut u64) -> Result<Self> {
+        let mut head = ProtocolHead::new();
+        let mut reader = bts.reader();
+        // reader.consume(*offset as _);
+        if *offset != 0 {
+            let mut discard = Vec::with_capacity(*offset as _);
+            reader.read_exact(&mut discard)?;
+            drop(discard);
+        }
+        let mut buf = BytesMut::new();
+
+        // parse head
+        buf.resize(PROTOCOL_HEAD_LEN, 0);
+        reader.read_exact(&mut buf)?;
+        *offset += PROTOCOL_HEAD_LEN as u64;
+        head.set_head(
+            buf.to_vec()
+                .try_into()
+                .expect("convert BytesMut to array failed"),
+        );
+        debug!("parse topic name");
+
+        // parse topic name
+        buf.resize(head.topic_len() as usize, 0);
+        reader.read_exact(&mut buf)?;
+        *offset += head.topic_len() as u64;
+        let topic: String = String::from_utf8(buf.to_vec()).expect("illigal topic name");
+        head.set_topic(topic.as_str())?;
+
+        debug!("parse channel name");
+
+        // parse channel name
+        buf.resize(head.channel_len() as usize, 0);
+        reader.read_exact(&mut buf)?;
+        *offset += head.channel_len() as u64;
+        let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
+        head.set_channel(channel.as_str())?;
+
+        debug!("parse token");
+        // parse token
+        buf.resize(head.token_len() as usize, 0);
+        reader.read_exact(&mut buf)?;
+        *offset += head.token_len() as u64;
+        let token = String::from_utf8(buf.to_vec()).expect("illigal token value");
+        head.set_token(token.as_str())?;
+
+        Ok(head)
     }
 
     pub fn clone(&self) -> Self {
@@ -214,20 +282,6 @@ impl ProtocolHead {
         result.extend(self.token.as_bytes());
 
         result
-    }
-
-    /// fill the null value after the parse
-    pub fn post_fill(&mut self) {
-        if SUPPORT_ACTIONS.contains(&self.head[0]) {
-            if self.topic_len() == 0 {
-                let _ = self.set_topic("default");
-            }
-            if self.channel_len() == 0 {
-                let _ = self.set_channel("default");
-            }
-        } else {
-            warn!("illigal action");
-        }
     }
 
     pub fn set_head(&mut self, head: [u8; PROTOCOL_HEAD_LEN]) -> &mut Self {
@@ -409,7 +463,7 @@ impl ProtocolHead {
 #[derive(Debug)]
 pub struct ProtocolBodys {
     sid: i64, // 标识一批次的message
-    list: Vec<ProtocolBody>,
+    pub list: Vec<ProtocolBody>,
 }
 
 impl ProtocolBodys {
@@ -418,6 +472,20 @@ impl ProtocolBodys {
             list: Vec::new(),
             sid: global::SNOWFLAKE.get_id(),
         }
+    }
+
+    pub fn init(&mut self) -> Result<()> {
+        if self.sid == 0 {
+            self.sid = SNOWFLAKE.get_id();
+        }
+        let mut iter = self.list.iter_mut();
+        while let Some(pb) = iter.next() {
+            if pb.id_len() == 0 {
+                pb.with_id(SNOWFLAKE.get_id().to_string().as_str())?;
+            }
+        }
+
+        Ok(())
     }
 
     /// [`read_parse`] read the protocol bodys from reader.
@@ -473,10 +541,6 @@ impl ProtocolBodys {
         Ok(())
     }
 
-    pub fn get(&self) -> &Vec<ProtocolBody> {
-        &self.list
-    }
-
     pub fn len(&self) -> usize {
         self.list.len()
     }
@@ -507,14 +571,6 @@ impl ProtocolBodys {
         self.list.pop()
     }
 
-    /// fill the null value after the parse
-    pub fn post_fill(&mut self) {
-        self.list.iter_mut().for_each(|pb| {
-            pb.set_sid(self.sid);
-            pb.post_fill();
-        })
-    }
-
     pub fn validate(&self, max_msg_len: u64) -> StdResult<(), ProtocolError> {
         let mut iter = self.list.iter();
         while let Some(pb) = iter.next() {
@@ -527,15 +583,18 @@ impl ProtocolBodys {
 }
 /**
 ### Every body has the same structure:
+* head: 10 bytes:
 * 1st byte: flag:
 *           1bit: is defer: true is defer message.
 *           1bit: is a ack message: true represent this message is a ack.
 *           1bit: is persist immediately: if true, the message will persist to disk right now.
 *           1bit: is delete: true mean the message will be deleted before consumed.(must with MSG_ID)（优先级高于is ready）
 *           1bit: is not ready: false mean the message can't be consumed, true mean the message can be consumes.(must with MSG_ID)
+*           1bit: has consumed?: used to as a flag in disk.
 *           left 3bits: extend
 * 2nd byte: ID-LENGTH
 * 3-10th bytes: BODY-LENGTH(8 bytes)
+*
 * optional:
 *           8byte defer time.
 *           id value(length determine by ID-LENGTH)
@@ -561,6 +620,64 @@ impl ProtocolBody {
         }
     }
 
+    /// [`parse_from`] read the protocol bodys from bts.
+    pub fn parse_from(bts: Bytes, offset: &mut u64) -> Result<Self> {
+        let mut reader = bts.reader();
+        // reader.consume(*offset as _);
+        if *offset != 0 {
+            let mut discard = Vec::with_capacity(*offset as _);
+            reader.read_exact(&mut discard)?;
+            drop(discard);
+        }
+
+        let mut pb = ProtocolBody::new();
+        let mut buf = BytesMut::new();
+
+        // parse protocol body head
+        buf.resize(PROTOCOL_BODY_HEAD_LEN, 0);
+        reader.read_exact(&mut buf)?;
+        *offset += PROTOCOL_BODY_HEAD_LEN as u64;
+        pb.with_head(
+            buf.to_vec()
+                .try_into()
+                .expect("convert to protocol body head failed"),
+        );
+
+        // parse defer time
+        if pb.is_defer() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf)?;
+            *offset += 8;
+            let defer_time = u64::from_be_bytes(
+                buf.to_vec()
+                    .try_into()
+                    .expect("convert to defer time failed"),
+            );
+            pb.with_defer_time(defer_time);
+        }
+
+        // parse id
+        let id_len = pb.id_len();
+        if id_len != 0 {
+            buf.resize(id_len as usize, 0);
+            reader.read_exact(&mut buf)?;
+            *offset += id_len as u64;
+            let id = String::from_utf8(buf.to_vec()).expect("illigal id value");
+            pb.with_id(id.as_str())?;
+        }
+        // parse body
+        let body_len = pb.body_len();
+        if body_len != 0 {
+            buf.resize(body_len as usize, 0);
+            reader.read_exact(&mut buf)?;
+            *offset += body_len as u64;
+            let bts: Bytes = Bytes::copy_from_slice(buf.as_ref());
+            pb.with_body(bts)?;
+        }
+
+        Ok(pb)
+    }
+
     pub fn clone(&self) -> Self {
         let mut pb = Self::new();
         pb.with_head(self.head);
@@ -582,19 +699,6 @@ impl ProtocolBody {
         result
     }
 
-    /// fill the null value after the parse
-    pub fn post_fill(&mut self) {
-        if self.id.len() != 0 && self.id_len() != 0 {
-            return;
-        }
-        let id = global::SNOWFLAKE.get_id().to_string();
-        let _ = self.with_id(id.as_str());
-    }
-    // pub fn clone(&self) -> Self {
-    //     let new_pb = Self::new();
-    //     new_pb.head
-    // }
-
     pub fn set_sid(&mut self, sid: i64) {
         self.sid = sid;
     }
@@ -602,6 +706,10 @@ impl ProtocolBody {
     pub fn with_head(&mut self, head: [u8; PROTOCOL_BODY_HEAD_LEN]) -> &mut Self {
         self.head = head;
         self
+    }
+
+    pub fn defer_time(&self) -> u64 {
+        self.defer_time
     }
 
     pub fn is_defer(&self) -> bool {
@@ -702,7 +810,8 @@ impl ProtocolBody {
         if defer_time == 0 {
             return;
         }
-        self.defer_time = defer_time;
+        let dt = Local::now();
+        self.defer_time = dt.second() as u64 + defer_time;
         self.with_defer(true);
     }
 }

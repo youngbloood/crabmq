@@ -193,11 +193,12 @@ impl Tsuixuq {
     pub async fn send_message(
         &mut self,
         sender: Sender<(String, Message)>,
+        addr: &str,
         msg: Message,
     ) -> Result<()> {
         let topic_name = msg.get_topic();
         let topic = self.get_or_create_topic(topic_name)?;
-        topic.get_mut().send_msg(sender, msg).await?;
+        topic.get_mut().send_msg(sender, addr, msg).await?;
         Ok(())
     }
 

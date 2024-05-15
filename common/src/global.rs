@@ -3,7 +3,7 @@ use anyhow::*;
 use lazy_static::*;
 use parking_lot::Mutex;
 use snowflake::SnowflakeIdBucket;
-use std::{cell::UnsafeCell, sync::Arc};
+use std::{borrow::Borrow, cell::UnsafeCell, sync::Arc};
 use tokio::sync::{
     broadcast::{self, Receiver, Sender},
     mpsc::error::SendError,

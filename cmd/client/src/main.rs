@@ -139,7 +139,7 @@ impl Args {
 
         let mut msg = Message::with(head, bodys);
         msg.validate(u8::MAX, u64::MAX)?;
-        msg.post_fill();
+        // msg.post_fill();
         Ok(msg)
     }
 

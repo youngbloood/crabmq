@@ -6,7 +6,7 @@ use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{net::TcpListener, select};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub struct TcpServer {
     // 控制消息流入(从客户端流入MQ)
@@ -83,14 +83,19 @@ impl TcpServer {
                     if msg_opt.is_none(){
                         continue;
                     }
-                    let (addr, msg) = msg_opt.unwrap();
+                    let (addr,mut msg) = msg_opt.unwrap();
                     let (resp, passed) = self.validate(addr.as_str(), &msg);
                     if !passed {
                         let _ = self.out_sender.send((addr, resp.unwrap()));
                         continue;
                     }
+                    if let Err(e) = msg.init(){
+                        error!(addr = addr, "init msg error: {e}");
+                        continue;
+                    }
 
                     let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
+                    let addr = addr.as_str();
                     match msg.action() {
                         ACTION_FIN => self.fin(addr, msg).await,
                         ACTION_RDY => self.rdy(addr, msg).await,
@@ -141,21 +146,23 @@ impl TcpServer {
     }
 
     //============================ Handle Action ==============================//
-    pub async fn fin(&self, addr: String, msg: Message) {}
+    pub async fn fin(&self, addr: &str, msg: Message) {}
 
-    pub async fn rdy(&self, addr: String, msg: Message) {}
+    pub async fn rdy(&self, addr: &str, msg: Message) {}
 
-    pub async fn publish(&self, addr: String, msg: Message) {
+    pub async fn publish(&self, addr: &str, msg: Message) {
         let daemon = self.tsuixuq.get_mut();
-        let _ = daemon.send_message(self.out_sender.clone(), msg).await;
+        let _ = daemon
+            .send_message(self.out_sender.clone(), addr, msg)
+            .await;
     }
-    pub async fn req(&self, addr: String, msg: Message) {}
+    pub async fn req(&self, addr: &str, msg: Message) {}
 
-    pub async fn nop(&self, addr: String, msg: Message) {}
+    pub async fn nop(&self, addr: &str, msg: Message) {}
 
-    pub async fn touch(&self, addr: String, msg: Message) {}
+    pub async fn touch(&self, addr: &str, msg: Message) {}
 
-    pub async fn sub(&self, addr: String, msg: Message, guard: Guard<Client>) {
+    pub async fn sub(&self, addr: &str, msg: Message, guard: Guard<Client>) {
         let topic_name = msg.get_topic();
         let chan_name = msg.get_channel();
 
@@ -165,17 +172,17 @@ impl TcpServer {
             .get_or_create_topic(topic_name)
             .expect("get topic err");
         let chan = topic.get_mut().get_create_mut_channel(chan_name);
-        chan.get_mut().set_client(addr.as_str(), guard);
-        info!(
-            addr = addr.as_str(),
-            "sub topic: {topic_name}, channel: {chan_name}",
-        );
-        let _ = self.out_sender.send((addr, msg_with_resp(msg))).await;
+        chan.get_mut().set_client(addr, guard);
+        info!(addr = addr, "sub topic: {topic_name}, channel: {chan_name}",);
+        let _ = self
+            .out_sender
+            .send((addr.to_string(), msg_with_resp(msg)))
+            .await;
     }
 
-    pub async fn cls(&self, addr: String, msg: Message) {}
+    pub async fn cls(&self, addr: &str, msg: Message) {}
 
-    pub async fn auth(&self, addr: String, msg: Message) {}
+    pub async fn auth(&self, addr: &str, msg: Message) {}
     //============================ Handle Action ==============================//
 }
 
