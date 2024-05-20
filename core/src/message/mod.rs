@@ -10,7 +10,6 @@ use tokio::{
     fs::{write, File},
     io::AsyncReadExt,
 };
-pub mod sub;
 pub mod v1;
 
 #[derive(Debug)]
@@ -252,7 +251,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_message_unit_heap_persist() {
-        let mut muh = MessageUnitHeap::new("./message_unit_persist");
+        let mut muh = MessageUnitHeap::new("../target/message_unit_persist");
         assert_eq!(muh.peek().is_none(), true);
 
         for i in 0..10 {
@@ -300,7 +299,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_message_unit_heap_load() {
-        let mut muh = MessageUnitHeap::new("./message_unit_persist");
+        let mut muh = MessageUnitHeap::new("../target/message_unit_persist");
         let r = muh.load().await;
         assert_eq!(r.is_ok(), true);
         println!("muh = {muh:?}");
