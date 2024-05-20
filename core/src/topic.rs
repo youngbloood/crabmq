@@ -3,7 +3,6 @@ use crate::{channel::Channel, message::MessageUnit};
 use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::Name;
-use parking_lot::RwLock;
 use std::collections::{BinaryHeap, HashMap};
 use tokio::sync::mpsc::Sender;
 
@@ -62,8 +61,16 @@ impl Topic {
             match &mut msg {
                 Message::Null => unreachable!(),
                 Message::V1(ref mut v1) => {
+                    let head = v1.head.clone();
                     let mut bodys_iter = v1.bodys.list.iter_mut();
                     while let Some(body) = bodys_iter.next() {
+                        if body.is_defer() {
+                            let mu = MessageUnit::with(head.clone(), body.clone());
+                            self.defer_heap.push(mu);
+                        }
+                        if body.is_ack() {}
+                        if body.is_persist() {}
+
                         // TODO: 处理各种body
                     }
                 }

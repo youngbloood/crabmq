@@ -3,12 +3,13 @@ use crate::{
     error::ProtocolError,
     protocol::{ProtocolBody, ProtocolBodys, ProtocolHead},
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use common::global::Guard;
-use parking_lot::RwLock;
-use std::{collections::BinaryHeap, result::Result as StdResult};
-use tokio::fs::{read, write};
+use std::{collections::BinaryHeap, pin::Pin, result::Result as StdResult};
+use tokio::{
+    fs::{write, File},
+    io::AsyncReadExt,
+};
 pub mod sub;
 pub mod v1;
 
@@ -35,7 +36,7 @@ impl Message {
             Message::V1(ref mut v1) => {
                 let mut iter = v1.bodys.list.iter_mut();
                 while let Some(body) = iter.next() {
-                    body.with_body(Bytes::new());
+                    let _ = body.with_body(Bytes::new());
                 }
                 Ok(())
             }
@@ -106,7 +107,7 @@ impl Message {
     }
 }
 
-#[derive(Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum MessageUnit {
     Null,
     V1(MessageV1Unit),
@@ -132,9 +133,9 @@ impl MessageUnit {
         }
     }
 
-    pub fn parse_from_file(bts: Bytes, offset: &mut u64) -> Result<Self> {
-        let head = ProtocolHead::parse_from(bts.clone(), offset)?;
-        let body = ProtocolBody::parse_from(bts.clone(), offset)?;
+    pub async fn parse_from_file<T: AsyncReadExt>(fd: &mut Pin<&mut T>) -> Result<Self> {
+        let head = ProtocolHead::parse_from(fd).await?;
+        let body = ProtocolBody::parse_from(fd).await?;
         Ok(Self::with(head, body))
     }
 }
@@ -179,6 +180,7 @@ impl MessageUnit {
  * [`MessageUnitHeap`] 延时消息的小根堆
  * [`start_offset`] 标识该文件从哪个位置开始读，为了提高性能，文件仅允许append，不允许删除
  */
+#[derive(Debug)]
 pub struct MessageUnitHeap {
     filename: String,
     start_offset: u64, // 起始位置的offset
@@ -197,14 +199,23 @@ impl MessageUnitHeap {
     }
 
     pub async fn load(&mut self) -> Result<()> {
-        let content = read(self.filename.as_str()).await?;
-        let bts = Bytes::from_iter(content);
-
-        let mut offset = 0_u64;
-        while offset != bts.len() as u64 {
-            println!("offset = {offset}");
-            let mu = MessageUnit::parse_from_file(bts.clone(), &mut offset)?;
-            self.inner.push(mu);
+        let mut fd = File::open(self.filename.as_str()).await?;
+        let mut pfd = Pin::new(&mut fd);
+        loop {
+            match MessageUnit::parse_from_file(&mut pfd).await {
+                Ok(mu) => match mu {
+                    MessageUnit::Null => todo!(),
+                    MessageUnit::V1(mu) => {
+                        self.inner.push(MessageUnit::V1(mu));
+                    }
+                },
+                Err(e) => {
+                    if e.to_string().contains("eof") {
+                        break;
+                    }
+                    return Err(anyhow!(e));
+                }
+            }
         }
 
         Ok(())
@@ -242,17 +253,46 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_unit_heap_persist() {
         let mut muh = MessageUnitHeap::new("./message_unit_persist");
+        assert_eq!(muh.peek().is_none(), true);
+
         for i in 0..10 {
             let mut head = ProtocolHead::new();
+            // 设置版本
             assert_eq!(head.set_version(1).is_ok(), true);
-            let mut body = ProtocolBody::new();
-            assert_eq!(body.with_id(i.to_string().as_str()).is_ok(), true);
+            // 设置msg_num
+            assert_eq!(head.set_msg_num(1).is_ok(), true);
+            assert_eq!(head.set_topic(format!("topic{i}").as_str()).is_ok(), true);
             assert_eq!(
-                body.with_body(Bytes::from_iter(format!("{i}").bytes()))
+                head.set_channel(format!("channel{i}").as_str()).is_ok(),
+                true
+            );
+            assert_eq!(head.set_token(format!("token{i}").as_str()).is_ok(), true);
+
+            head.set_channel_ephemeral(true)
+                .set_topic_ephemeral(true)
+                .set_heartbeat(true);
+            head.set_reject_code(101);
+
+            let mut body = ProtocolBody::new();
+            // 设置id
+            assert_eq!(body.with_id((i + 1000).to_string().as_str()).is_ok(), true);
+            body.with_ack(true)
+                .with_defer_time(1000)
+                .with_not_ready(false)
+                .with_persist(true);
+            assert_eq!(
+                body.with_body(Bytes::from_iter(format!("2000{i}").bytes()))
                     .is_ok(),
                 true
             );
             muh.push(MessageUnit::with(head, body));
+        }
+
+        match muh.peek().unwrap() {
+            MessageUnit::Null => todo!(),
+            MessageUnit::V1(v1) => {
+                println!("defer_time = {}", v1.body.defer_time());
+            }
         }
 
         assert_eq!(muh.persist().await.is_ok(), true);
@@ -261,9 +301,8 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_unit_heap_load() {
         let mut muh = MessageUnitHeap::new("./message_unit_persist");
-
-        if let Err(e) = muh.load().await {
-            panic!("{e}");
-        }
+        let r = muh.load().await;
+        assert_eq!(r.is_ok(), true);
+        println!("muh = {muh:?}");
     }
 }

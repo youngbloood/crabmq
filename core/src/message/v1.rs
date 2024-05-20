@@ -88,6 +88,7 @@ impl MessageV1 {
  * [`MessageV1Unit`]，由[`MessageV1`]切割而来
  * 持久化到磁盘时使用该对象
  */
+#[derive(Debug)]
 pub struct MessageV1Unit {
     pub head: ProtocolHead,
     pub body: ProtocolBody,

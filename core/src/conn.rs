@@ -1,6 +1,6 @@
 use anyhow::Result;
 use common::util::execute_timeout;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, pin::Pin};
 use tokio::{
     io::AsyncWriteExt,
     net::{
@@ -38,7 +38,8 @@ impl Conn {
     // 循环
     pub async fn read_parse(&mut self, timeout: u64) -> Result<Message> {
         let mut head = ProtocolHead::new();
-        execute_timeout::<()>(head.read_parse(&mut self.reader), timeout).await?;
+        let mut reader = Pin::new(&mut self.reader);
+        execute_timeout::<()>(head.read_parse(&mut reader), timeout).await?;
         let mut bodys = ProtocolBodys::new();
         execute_timeout::<()>(bodys.read_parse(&mut self.reader, head.msg_num()), timeout).await?;
 

@@ -117,7 +117,7 @@ impl Args {
             body.with_ack(msg.ack)
                 .with_delete(msg.delete)
                 .with_persist(msg.persist)
-                .with_ready(msg.not_ready)
+                .with_not_ready(msg.not_ready)
                 .with_defer_time(msg.defer);
 
             if let Some(body_str) = msg.body.as_ref() {

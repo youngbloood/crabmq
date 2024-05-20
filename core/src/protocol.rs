@@ -1,13 +1,10 @@
 use crate::error::*;
 use anyhow::{anyhow, Result};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use chrono::prelude::*;
 use common::global::{self, SNOWFLAKE};
 use rsbit::{BitFlagOperation, BitOperation};
-use std::{
-    io::{BufRead, Read as _},
-    result::Result as StdResult,
-};
+use std::{fmt::Debug, pin::Pin, result::Result as StdResult};
 use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
 use tracing::debug;
 
@@ -82,13 +79,30 @@ pub const ACTION_AUTH: u8 = 9;
 *           channel value.
 *           token value.
 */
-#[derive(Debug)]
 pub struct ProtocolHead {
     head: [u8; PROTOCOL_HEAD_LEN],
     topic: String,
     channel: String,
     token: String,
-    reject_code: u8,
+    // reject_code: u8,
+}
+
+impl Debug for ProtocolHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolHead")
+            .field("head:req", &self.is_req())
+            .field("head:topic-ephemeral", &self.topic_ephemeral())
+            .field("head:channel-ephemeral", &self.channel_ephemeral())
+            .field("head:heartbeat", &self.heartbeat())
+            .field("head:reject", &self.reject())
+            .field("head:reject-code", &self.reject_code())
+            .field("protocol-version", &self.version())
+            .field("msg-number", &self.msg_num())
+            .field("topic-name", &self.topic)
+            .field("channel-name", &self.channel)
+            .field("token", &self.token)
+            .finish()
+    }
 }
 
 impl Default for ProtocolHead {
@@ -98,7 +112,6 @@ impl Default for ProtocolHead {
             topic: Default::default(),
             channel: Default::default(),
             token: Default::default(),
-            reject_code: 0,
         }
     }
 }
@@ -110,7 +123,6 @@ impl ProtocolHead {
             topic: String::new(),
             channel: String::new(),
             token: String::new(),
-            reject_code: 0,
         }
     }
 
@@ -125,8 +137,15 @@ impl ProtocolHead {
         Ok(())
     }
 
+    /// [`parse_from`] read the protocol head from bts.
+    pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
+        let mut head = ProtocolHead::new();
+        head.read_parse(fd).await?;
+        return Ok(head);
+    }
+
     /// [`read_parse`] read the protocol head from reader.
-    pub async fn read_parse(&mut self, reader: &mut OwnedReadHalf) -> Result<()> {
+    pub async fn read_parse(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         // let mut ph: ProtocolHead = ProtocolHead::new();
         let mut buf = BytesMut::new();
 
@@ -163,56 +182,6 @@ impl ProtocolHead {
         self.set_token(token.as_str())?;
 
         Ok(())
-    }
-
-    /// [`parse_from`] read the protocol head from bts.
-    pub fn parse_from(bts: Bytes, offset: &mut u64) -> Result<Self> {
-        let mut head = ProtocolHead::new();
-        let mut reader = bts.reader();
-        // reader.consume(*offset as _);
-        if *offset != 0 {
-            let mut discard = Vec::with_capacity(*offset as _);
-            reader.read_exact(&mut discard)?;
-            drop(discard);
-        }
-        let mut buf = BytesMut::new();
-
-        // parse head
-        buf.resize(PROTOCOL_HEAD_LEN, 0);
-        reader.read_exact(&mut buf)?;
-        *offset += PROTOCOL_HEAD_LEN as u64;
-        head.set_head(
-            buf.to_vec()
-                .try_into()
-                .expect("convert BytesMut to array failed"),
-        );
-        debug!("parse topic name");
-
-        // parse topic name
-        buf.resize(head.topic_len() as usize, 0);
-        reader.read_exact(&mut buf)?;
-        *offset += head.topic_len() as u64;
-        let topic: String = String::from_utf8(buf.to_vec()).expect("illigal topic name");
-        head.set_topic(topic.as_str())?;
-
-        debug!("parse channel name");
-
-        // parse channel name
-        buf.resize(head.channel_len() as usize, 0);
-        reader.read_exact(&mut buf)?;
-        *offset += head.channel_len() as u64;
-        let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
-        head.set_channel(channel.as_str())?;
-
-        debug!("parse token");
-        // parse token
-        buf.resize(head.token_len() as usize, 0);
-        reader.read_exact(&mut buf)?;
-        *offset += head.token_len() as u64;
-        let token = String::from_utf8(buf.to_vec()).expect("illigal token value");
-        head.set_token(token.as_str())?;
-
-        Ok(head)
     }
 
     pub fn clone(&self) -> Self {
@@ -326,6 +295,11 @@ impl ProtocolHead {
 
     pub fn channel_ephemeral(&self) -> bool {
         self.head[1].is_1(5)
+    }
+
+    pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
+        self.set_head_flag(1, 4, hb);
+        self
     }
 
     pub fn heartbeat(&self) -> bool {
@@ -600,13 +574,28 @@ impl ProtocolBodys {
 *           id value(length determine by ID-LENGTH)
 *           body value(length determine by BODY-LENGTH)
 */
-#[derive(Debug)]
 pub struct ProtocolBody {
     head: [u8; PROTOCOL_BODY_HEAD_LEN],
     sid: i64,        // session_id: generate by ProtocolBodys
     defer_time: u64, // 8 bytes
     id: String,
     body: Bytes,
+}
+
+impl Debug for ProtocolBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolBody")
+            .field("is_defer", &self.is_defer())
+            .field("is_ack", &self.is_ack())
+            .field("is_persist", &self.is_persist())
+            .field("is_delete", &self.is_delete())
+            .field("is_not_ready", &self.is_not_ready())
+            .field("is_consumed", &self.is_consumed())
+            .field("defer_time", &self.defer_time)
+            .field("id", &self.id)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 impl ProtocolBody {
@@ -621,61 +610,55 @@ impl ProtocolBody {
     }
 
     /// [`parse_from`] read the protocol bodys from bts.
-    pub fn parse_from(bts: Bytes, offset: &mut u64) -> Result<Self> {
-        let mut reader = bts.reader();
-        // reader.consume(*offset as _);
-        if *offset != 0 {
-            let mut discard = Vec::with_capacity(*offset as _);
-            reader.read_exact(&mut discard)?;
-            drop(discard);
-        }
+    pub async fn parse_from<T: AsyncReadExt>(fd: &mut Pin<&mut T>) -> Result<Self> {
+        let mut pb = Self::new();
+        pb.read_parse(fd).await?;
+        Ok(pb)
+    }
 
-        let mut pb = ProtocolBody::new();
+    pub async fn read_parse<T: AsyncReadExt>(&mut self, fd: &mut Pin<&mut T>) -> Result<()> {
         let mut buf = BytesMut::new();
 
         // parse protocol body head
         buf.resize(PROTOCOL_BODY_HEAD_LEN, 0);
-        reader.read_exact(&mut buf)?;
-        *offset += PROTOCOL_BODY_HEAD_LEN as u64;
-        pb.with_head(
+        fd.read_exact(&mut buf).await?;
+        self.with_head(
             buf.to_vec()
                 .try_into()
                 .expect("convert to protocol body head failed"),
         );
 
         // parse defer time
-        if pb.is_defer() {
+        if self.is_defer() {
             buf.resize(8, 0);
-            reader.read_exact(&mut buf)?;
-            *offset += 8;
+            fd.read_exact(&mut buf).await?;
             let defer_time = u64::from_be_bytes(
                 buf.to_vec()
                     .try_into()
                     .expect("convert to defer time failed"),
             );
-            pb.with_defer_time(defer_time);
+            self.defer_time = defer_time;
         }
 
         // parse id
-        let id_len = pb.id_len();
+        let id_len = self.id_len();
         if id_len != 0 {
             buf.resize(id_len as usize, 0);
-            reader.read_exact(&mut buf)?;
-            *offset += id_len as u64;
+            fd.read_exact(&mut buf).await?;
             let id = String::from_utf8(buf.to_vec()).expect("illigal id value");
-            pb.with_id(id.as_str())?;
-        }
-        // parse body
-        let body_len = pb.body_len();
-        if body_len != 0 {
-            buf.resize(body_len as usize, 0);
-            reader.read_exact(&mut buf)?;
-            *offset += body_len as u64;
-            let bts: Bytes = Bytes::copy_from_slice(buf.as_ref());
-            pb.with_body(bts)?;
+            self.with_id(id.as_str())?;
         }
 
-        Ok(pb)
+        // parse body
+        let body_len = self.body_len();
+        if body_len != 0 {
+            buf.resize(body_len as usize, 0);
+            fd.read_exact(&mut buf).await?;
+            let bts: Bytes = Bytes::copy_from_slice(buf.as_ref());
+            self.with_body(bts)?;
+        }
+
+        Ok(())
     }
 
     pub fn clone(&self) -> Self {
@@ -692,8 +675,12 @@ impl ProtocolBody {
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut result = vec![];
         result.extend(&self.head);
-        result.extend(self.defer_time.to_be_bytes());
-        result.extend(self.id.as_bytes());
+        if self.defer_time != 0 {
+            result.extend(self.defer_time.to_be_bytes());
+        }
+        if self.id.len() != 0 {
+            result.extend(self.id.as_bytes());
+        }
         result.extend(self.body.as_ref().into_iter());
 
         result
@@ -761,11 +748,15 @@ impl ProtocolBody {
         self
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub fn is_not_ready(&self) -> bool {
         self.head[0].is_1(3)
     }
 
-    pub fn with_ready(&mut self, ready: bool) -> &mut Self {
+    pub fn is_consumed(&self) -> bool {
+        self.head[0].is_1(2)
+    }
+
+    pub fn with_not_ready(&mut self, ready: bool) -> &mut Self {
         self.set_flag(0, 3, ready);
         self
     }
@@ -806,12 +797,13 @@ impl ProtocolBody {
         Ok(())
     }
 
-    pub fn with_defer_time(&mut self, defer_time: u64) {
+    pub fn with_defer_time(&mut self, defer_time: u64) -> &mut Self {
         if defer_time == 0 {
-            return;
+            return self;
         }
         let dt = Local::now();
-        self.defer_time = dt.second() as u64 + defer_time;
+        self.defer_time = dt.timestamp() as u64 + defer_time;
         self.with_defer(true);
+        self
     }
 }
