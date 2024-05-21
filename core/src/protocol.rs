@@ -578,7 +578,7 @@ pub struct ProtocolBody {
     head: [u8; PROTOCOL_BODY_HEAD_LEN],
     sid: i64,        // session_id: generate by ProtocolBodys
     defer_time: u64, // 8 bytes
-    id: String,
+    pub id: String,
     body: Bytes,
 }
 
@@ -607,6 +607,17 @@ impl ProtocolBody {
             id: String::new(),
             body: Bytes::new(),
         }
+    }
+
+    pub fn calc_len(&self) -> usize {
+        let mut length = PROTOCOL_BODY_HEAD_LEN;
+        if self.is_defer() {
+            length += 8;
+        }
+        length += self.id_len() as usize;
+        length += self.body_len() as usize;
+
+        length
     }
 
     /// [`parse_from`] read the protocol bodys from bts.

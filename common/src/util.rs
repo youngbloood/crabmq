@@ -1,4 +1,9 @@
-use std::time::Duration;
+use std::{
+    env::var,
+    fs::{self, File},
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{anyhow, Result};
 use futures::Future;
@@ -25,41 +30,49 @@ pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u
     };
 }
 
-// use parking_lot::RwLock;
-// use std::{borrow::BorrowMut, cell::UnsafeCell};
+pub fn check_and_create_dir(dir: &str) -> Result<()> {
+    let dir_path = Path::new(dir);
+    if !dir_path.exists() {
+        fs::create_dir(dir_path)?;
+    } else if dir_path.is_file() {
+        let parent = dir_path.parent().unwrap();
+        return Err(anyhow!(
+            "has exist the same file in dir: {}",
+            parent.to_str().unwrap()
+        ));
+    }
 
-// pub struct AtomicValue<T> {
-//     mutex: RwLock<()>,
-//     inner: UnsafeCell<T>,
-// }
+    Ok(())
+}
 
-// impl<T> AtomicValue<T>
-// where
-//     T: Default + Copy,
-// {
-//     pub fn new(t: T) -> Self {
-//         AtomicValue {
-//             mutex: RwLock::new(()),
-//             inner: UnsafeCell::new(t),
-//         }
-//     }
+pub fn check_and_create_filename(filename: &str) -> Result<()> {
+    let path = Path::new(filename);
+    if !path.exists() {
+        File::create(path)?;
+    } else if !path.is_file() {
+        let parent = path.parent().unwrap();
+        return Err(anyhow!(
+            "has exist the same file in dir: {}",
+            parent.to_str().unwrap()
+        ));
+    }
 
-//     pub fn load(&self) -> T {
-//         self.mutex.read();
-//         let c = *self.inner.get_mut().cl;
-//         c
-//     }
+    Ok(())
+}
 
-//     pub fn store(&mut self, v: T) -> T {
-//         self.mutex.write();
-//         let old_v = self.inner.into_inner();
-//         self.inner = UnsafeCell::new(v);
+pub fn check_exist(path: &str) -> bool {
+    let p = Path::new(path);
+    return p.exists();
+}
 
-//         old_v
-//     }
-
-//     pub fn action(&mut self, mut callback: impl FnMut(&mut T)) {
-//         self.mutex.write();
-//         callback(self.inner.get_mut());
-//     }
-// }
+pub fn is_debug() -> bool {
+    let v = var("FOR_DEBUG").unwrap_or_default();
+    match v.to_lowercase().as_str() {
+        "t" | "true" | "1" | "on" | "open" => {
+            return true;
+        }
+        _ => {
+            return false;
+        }
+    }
+}

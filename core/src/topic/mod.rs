@@ -1,10 +1,14 @@
-use crate::message::{Message, MessageUnitHeap};
-use crate::{channel::Channel, message::MessageUnit};
+pub mod message_manager;
+
+use crate::channel::Channel;
+use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::Name;
-use std::collections::{BinaryHeap, HashMap};
+use std::{collections::HashMap, path::Path};
 use tokio::sync::mpsc::Sender;
+
+use self::message_manager::MessageManager;
 
 pub struct Topic {
     name: Name,
@@ -14,8 +18,7 @@ pub struct Topic {
     pub_num: u64, // publisher的数量
     sub_num: u64, // subscriber的数量
 
-    persist_filename: String,
-    defer_heap: MessageUnitHeap,
+    disk: MessageManager,
 
     ephemeral: bool,
 
@@ -33,8 +36,7 @@ impl Topic {
             message_bytes: 0,
             pub_num: 0,
             sub_num: 0,
-            persist_filename: "".to_string(),
-            defer_heap: MessageUnitHeap::new(""),
+            disk: MessageManager::new(Path::new("").join(name), 100000, 1000000),
         };
 
         // 每个topic默认有个default的channel
@@ -64,10 +66,7 @@ impl Topic {
                     let head = v1.head.clone();
                     let mut bodys_iter = v1.bodys.list.iter_mut();
                     while let Some(body) = bodys_iter.next() {
-                        if body.is_defer() {
-                            let mu = MessageUnit::with(head.clone(), body.clone());
-                            self.defer_heap.push(mu);
-                        }
+                        self.disk.push(body.clone()).await?;
                         if body.is_ack() {}
                         if body.is_persist() {}
 
