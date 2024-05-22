@@ -1,18 +1,18 @@
+use super::{calc_cache_length, gen_filename, MetaManager};
 use crate::{
     message::Message,
-    protocol::{ProtocolBody, ProtocolBodys, ProtocolHead},
+    protocol::{ProtocolBody, ProtocolHead},
 };
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use std::{
     collections::{HashMap, HashSet},
     fs::{read_to_string, write},
+    path::Path,
     pin::Pin,
     vec,
 };
 use tokio::{fs::File, io::AsyncSeekExt};
-
-use super::{calc_cache_length, gen_filename, MetaManager};
 
 pub struct DeferMessageMeta {
     read_start: usize,
@@ -40,13 +40,18 @@ impl MetaManager for DeferMessageMeta {
         }
     }
 
-    fn consume(&mut self) -> Result<()> {
-        self.list.pop();
-        self.read_start -= 1;
+    fn consume(&mut self, _dir: &str) -> Result<()> {
+        if self.list.len() == 0 {
+            return Ok(());
+        }
+        self.list.remove(0);
+        if self.read_start != 0 {
+            self.read_start -= 1;
+        }
         Ok(())
     }
 
-    async fn read_to_cache(&mut self) -> Result<Vec<Message>> {
+    async fn read_to_cache(&mut self, dir: &str) -> Result<Vec<Message>> {
         // 查出所有的factor
         let cache_length = calc_cache_length(self.list.len() as _);
         self.read_end = cache_length;
@@ -55,11 +60,13 @@ impl MetaManager for DeferMessageMeta {
         wait.iter().for_each(|u| {
             file_set.insert(u.factor);
         });
+
         // 使用factor打开文件句柄
+        let parent = Path::new(dir);
         let mut file_map = HashMap::new();
         let mut iter = file_set.iter();
         while let Some(f) = iter.next() {
-            let filename = gen_filename(*f);
+            let filename = parent.join(gen_filename(*f));
             let fd = File::open(filename).await?;
             file_map.insert(f, fd);
         }

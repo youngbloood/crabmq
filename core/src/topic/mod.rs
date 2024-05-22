@@ -164,7 +164,12 @@ async fn topic_loop(guard: Guard<Topic>) {
                 }
                 let msg = msg_opt.unwrap();
                 guard.get().channels.iter().for_each(|(_, chan)| {
-                    chan.get().send_msg(sender.clone(), msg.clone());
+                    let chan_guard = chan.clone();
+                    let sender_clone = sender.clone();
+                    let msg_clone = msg.clone();
+                    tokio::spawn(async move{
+                            let _ = chan_guard.get().send_msg(sender_clone, msg_clone).await;
+                        });
                 });
             }
         }

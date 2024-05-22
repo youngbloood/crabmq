@@ -78,7 +78,7 @@ pub async fn build_disk_queue(
 }
 
 fn calc_cache_length(all_len: usize) -> usize {
-    let mut get_num = 0;
+    let get_num: usize;
     if all_len < 100 {
         get_num = all_len;
     } else if all_len >= 100 && all_len < 10_000 {
@@ -94,13 +94,15 @@ fn calc_cache_length(all_len: usize) -> usize {
 /// Load cache message from disk. In order to pop message from disk quickly.
 async fn load_cache(guard: Guard<MessageQueueDisk>) {
     let sender = guard.get_mut().tx.clone();
+    let instant_dir = guard.get().instant.dir.to_str().unwrap();
+    let defer_dir = guard.get().instant.dir.to_str().unwrap();
     loop {
         select! {
             _ = CANCEL_TOKEN.cancelled() => {
                 return ;
             }
 
-            defer_cache = guard.get_mut().defer.meta.read_to_cache() => {
+            defer_cache = guard.get_mut().defer.meta.read_to_cache(defer_dir) => {
                 match defer_cache{
                     Ok(list) => {
                         let mut iter = list.iter();
@@ -114,7 +116,7 @@ async fn load_cache(guard: Guard<MessageQueueDisk>) {
                 }
             }
 
-            defer_cache = guard.get_mut().instant.meta.read_to_cache() => {
+            defer_cache = guard.get_mut().instant.meta.read_to_cache(instant_dir) => {
                 match defer_cache{
                     Ok(list) => {
                         let mut iter = list.iter();
@@ -230,6 +232,8 @@ where
                 id,
                 msg.defer_time(),
             ));
+        } else {
+            self.meta.update((0, 0, 0, "", 1));
         }
         self.writer.push(msg);
         Ok(())
@@ -423,8 +427,8 @@ impl MessageDisk {
 
 trait MetaManager {
     fn new() -> Self;
-    fn consume(&mut self) -> Result<()>;
-    async fn read_to_cache(&mut self) -> Result<Vec<Message>>;
+    fn consume(&mut self, dir: &str) -> Result<()>;
+    async fn read_to_cache(&mut self, dir: &str) -> Result<Vec<Message>>;
     fn load(&mut self, filename: &str) -> Result<()>;
     fn update(&mut self, args: (u64, u64, u64, &str, u64));
     fn persist(&self, filename: &str) -> Result<()>;
@@ -441,7 +445,10 @@ pub mod tests {
     use crate::{
         message::Message,
         protocol::{ProtocolBody, ProtocolHead},
-        topic::message_manager::MessageQueue as _,
+        topic::message_manager::{
+            disk::{defer::DeferMessageMeta, instant::InstantMessageMeta, MetaManager as _},
+            MessageQueue as _,
+        },
     };
     use bytes::Bytes;
     use std::path::Path;
@@ -494,6 +501,22 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn test_message_manager_push_defer_consume() {
+        let mut mm = load_mm().await;
+        if let Err(e) = mm.defer.meta.consume(mm.defer.dir.to_str().unwrap()) {
+            panic!("{e:?}");
+        }
+        if let Err(e) = mm.defer.meta.persist(
+            Path::new(mm.defer.dir.to_str().unwrap())
+                .join(DeferMessageMeta::meta_filename(""))
+                .to_str()
+                .unwrap(),
+        ) {
+            panic!("{e:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_message_manager_push_instant_and_persist() {
         let mut mm = load_mm().await;
         let mut head = ProtocolHead::new();
@@ -512,6 +535,22 @@ pub mod tests {
         }
 
         if let Err(e) = mm.persist().await {
+            panic!("{e:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_push_instant_consume() {
+        let mut mm = load_mm().await;
+        if let Err(e) = mm.instant.meta.consume(mm.instant.dir.to_str().unwrap()) {
+            panic!("{e:?}");
+        }
+        if let Err(e) = mm.instant.meta.persist(
+            Path::new(mm.instant.dir.to_str().unwrap())
+                .join(InstantMessageMeta::meta_filename(""))
+                .to_str()
+                .unwrap(),
+        ) {
             panic!("{e:?}");
         }
     }

@@ -1,18 +1,19 @@
+use super::{calc_cache_length, gen_filename, MetaManager};
 use crate::{
     message::Message,
     protocol::{ProtocolBody, ProtocolHead},
 };
 use anyhow::{anyhow, Result};
+use common::util::check_exist;
 use futures::executor::block_on;
 use std::{
     fs::{read_to_string, write},
     os::unix::fs::MetadataExt,
+    path::Path,
     pin::Pin,
     vec,
 };
 use tokio::{fs::File, io::AsyncSeekExt};
-
-use super::{calc_cache_length, gen_filename, MetaManager};
 
 pub struct InstantMessageMeta {
     /// 从disk解析
@@ -40,25 +41,32 @@ pub struct InstantMessageMetaUnit {
 }
 
 impl InstantMessageMeta {
-    async fn read_next(&mut self) -> Result<(ProtocolBody, bool)> {
+    async fn read_next(&mut self, dir: &str) -> Result<(Option<Message>, bool)> {
         let mut read_factor = self.now.factor;
-        let mut fd = File::open(gen_filename(read_factor)).await?;
+        let parent = Path::new(dir);
+        println!("read_factor = {:?}", parent.join(gen_filename(read_factor)));
+
+        let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
         let metadata = fd.metadata().await?;
         let mut offset = self.now.offset;
         let mut rolling = false;
+        println!("size = {}", metadata.size());
         if metadata.size() == self.now.offset {
             read_factor += 1;
+            let next_filename = parent.join(gen_filename(read_factor));
+            if !check_exist(next_filename.to_str().unwrap()) {
+                return Ok((None, rolling));
+            }
             rolling = true;
-            fd = File::open(gen_filename(read_factor)).await?;
+            fd = File::open(next_filename.to_str().unwrap()).await?;
             offset = 0;
         }
-        fd.seek(std::io::SeekFrom::Start(offset as _));
-
+        fd.seek(std::io::SeekFrom::Start(offset as _)).await?;
         let mut fdp = Pin::new(&mut fd);
-        match ProtocolBody::parse_from(&mut fdp).await {
-            Ok(msg) => Ok((msg, rolling)),
-            Err(e) => return Err(anyhow!(e)),
-        }
+        let head = ProtocolHead::parse_from(&mut fdp).await?;
+        let body = ProtocolBody::parse_from(&mut fdp).await?;
+
+        Ok((Some(Message::with_one(head, body)), rolling))
     }
 }
 
@@ -71,44 +79,65 @@ impl MetaManager for InstantMessageMeta {
         }
     }
 
-    fn consume(&mut self) -> Result<()> {
-        let (next_msg, rolling) = block_on(self.read_next())?;
+    fn consume(&mut self, dir: &str) -> Result<()> {
+        let (next_msg, rolling) = block_on(self.read_next(dir))?;
+        println!("next_msg = {next_msg:?}");
+        println!("rolling = {rolling:?}");
         if rolling {
             self.now.factor += 1;
             self.now.offset = 0;
         } else {
-            self.now.offset += next_msg.calc_len() as u64;
+            if let Some(nm) = next_msg.as_ref() {
+                self.now.offset += nm.calc_len() as u64;
+            }
         }
-        self.now.left_num -= 1;
-
-        self.read_num += 1;
+        if self.now.left_num != 0 {
+            self.now.left_num -= 1;
+        }
+        if next_msg.is_some() {
+            self.read_num += 1;
+        }
 
         Ok(())
     }
 
-    async fn read_to_cache(&mut self) -> Result<Vec<Message>> {
+    async fn read_to_cache(&mut self, dir: &str) -> Result<Vec<Message>> {
         let mut read_factor = self.now.factor;
-        let mut fd = File::open(gen_filename(read_factor)).await?;
-        fd.seek(std::io::SeekFrom::Start(self.now.offset as _));
+        let parent = Path::new(dir);
+        let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
+        fd.seek(std::io::SeekFrom::Start(self.now.offset as _))
+            .await?;
         let mut fdp = Pin::new(&mut fd);
         let mut list = vec![];
         self.read_num = calc_cache_length(self.now.left_num as _);
         while self.read_num != 0 {
-            self.read_num -= 1;
-
-            let head: ProtocolHead = ProtocolHead::parse_from(&mut fdp).await?;
+            let head: ProtocolHead;
+            match ProtocolHead::parse_from(&mut fdp).await {
+                Ok(h) => head = h,
+                Err(e) => {
+                    if e.to_string().contains("eof") {
+                        read_factor += 1;
+                        fd = File::open(parent.join(gen_filename(read_factor))).await?;
+                        fdp = Pin::new(&mut fd);
+                        continue;
+                    } else {
+                        return Err(anyhow!(e));
+                    }
+                }
+            }
             match ProtocolBody::parse_from(&mut fdp).await {
                 Ok(body) => list.push(Message::with_one(head, body)),
                 Err(e) => {
                     if e.to_string().contains("eof") {
                         read_factor += 1;
-                        fd = File::open(gen_filename(read_factor)).await?;
+                        fd = File::open(parent.join(gen_filename(read_factor))).await?;
                         fdp = Pin::new(&mut fd);
                     } else {
                         return Err(anyhow!(e));
                     }
                 }
             }
+            self.read_num -= 1;
         }
 
         Ok(list)
@@ -120,8 +149,8 @@ impl MetaManager for InstantMessageMeta {
 
     fn persist(&self, filename: &str) -> Result<()> {
         let content = format!(
-            "{}\n{}\n{}\n{}",
-            self.now.msg_num, self.now.factor, self.now.offset, self.now.length
+            "{},{},{},{},{}",
+            self.now.msg_num, self.now.left_num, self.now.factor, self.now.offset, self.now.length
         );
         write(filename, content)?;
         Ok(())
@@ -132,22 +161,32 @@ impl MetaManager for InstantMessageMeta {
         if content.len() == 0 {
             return Ok(());
         }
-        let lines: Vec<&str> = content.split('\n').collect();
-        if lines.len() < 3 {
+        let lines: Vec<&str> = content.split(',').collect();
+        if lines.len() < 5 {
             return Err(anyhow!("not standard instant meta file"));
         }
-        self.now.factor = lines
+        self.now.msg_num = lines
             .get(0)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse msg_num failed");
+        self.now.left_num = lines
+            .get(1)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse left_num failed");
+        self.now.factor = lines
+            .get(2)
             .unwrap()
             .parse::<u64>()
             .expect("parse factor failed");
         self.now.offset = lines
-            .get(1)
+            .get(3)
             .unwrap()
             .parse::<u64>()
             .expect("parse offset failed");
         self.now.length = lines
-            .get(2)
+            .get(4)
             .unwrap()
             .parse::<u64>()
             .expect("parse length failed");
@@ -166,5 +205,6 @@ impl MetaManager for InstantMessageMeta {
             self.now.length = args.2;
         }
         self.now.msg_num += args.4;
+        self.now.left_num += args.4;
     }
 }
