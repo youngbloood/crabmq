@@ -3,7 +3,7 @@ pub mod v1;
 use self::v1::MessageV1;
 use crate::{
     error::ProtocolError,
-    protocol::{ProtocolBodys, ProtocolHead},
+    protocol::{ProtocolBody, ProtocolBodys, ProtocolHead},
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -39,9 +39,16 @@ impl Message {
         }
     }
 
-    pub fn with(head: ProtocolHead, body: ProtocolBodys) -> Self {
+    pub fn with(head: ProtocolHead, bodys: ProtocolBodys) -> Self {
         match head.version() {
-            1 => return Message::V1(MessageV1::with(head, body)),
+            1 => return Message::V1(MessageV1::with(head, bodys)),
+            _ => return Message::Null,
+        }
+    }
+
+    pub fn with_one(head: ProtocolHead, body: ProtocolBody) -> Self {
+        match head.version() {
+            1 => return Message::V1(MessageV1::with_one(head, body)),
             _ => return Message::Null,
         }
     }
@@ -56,6 +63,25 @@ impl Message {
     pub fn get_topic(&self) -> &str {
         match self {
             Self::V1(v1) => return v1.get_topic(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn topic_ephemeral(&self) -> bool {
+        match self {
+            Self::V1(v1) => return v1.head.topic_ephemeral(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn is_defer(&self) -> bool {
+        match self {
+            Self::V1(v1) => {
+                if v1.bodys.list.len() == 0 {
+                    return false;
+                }
+                return v1.bodys.list.get(0).unwrap().is_defer();
+            }
             _ => unreachable!(),
         }
     }
@@ -84,6 +110,49 @@ impl Message {
     pub fn validate(&self, max_msg_num: u8, max_msg_len: u64) -> StdResult<(), ProtocolError> {
         match self {
             Self::V1(v1) => return Ok(v1.validate(max_msg_num, max_msg_len)?),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn calc_len(&self) -> usize {
+        match self {
+            Self::V1(v1) => {
+                let mut size = v1.head.calc_len();
+                v1.bodys.list.iter().for_each(|body| {
+                    size += body.calc_len();
+                });
+                size
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::V1(v1) => v1.bodys.list.get(0).unwrap().id.as_str(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn defer_time(&self) -> u64 {
+        match self {
+            Self::V1(v1) => v1.bodys.list.get(0).unwrap().defer_time(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn split(&self) -> Vec<Message> {
+        match self {
+            Self::V1(v1) => {
+                let mut list = vec![];
+                v1.bodys.list.iter().for_each(|pb| {
+                    let head = v1.head.clone();
+                    let body = pb.clone();
+                    let msg = MessageV1::with_one(head, body);
+                    list.push(Message::V1(msg));
+                });
+                list
+            }
             _ => unreachable!(),
         }
     }

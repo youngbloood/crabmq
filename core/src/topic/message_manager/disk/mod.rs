@@ -1,36 +1,147 @@
-use crate::protocol::ProtocolBody;
+pub mod defer;
+pub mod instant;
+
+use self::{defer::DeferMessageMeta, instant::InstantMessageMeta};
+use super::{MessageManager, MessageQueue};
+use crate::{
+    message::Message,
+    protocol::{ProtocolBody, ProtocolHead},
+};
 use anyhow::{anyhow, Result};
-use bytes::BytesMut;
-use common::util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug};
+use common::{
+    global::{Guard, CANCEL_TOKEN},
+    util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug},
+};
 use parking_lot::RwLock;
 use std::{
-    cmp::Ordering,
-    fs::{self, read_to_string, write},
+    fs::{self},
     path::PathBuf,
     pin::Pin,
     vec,
 };
 use tokio::{
     fs::{File, OpenOptions},
-    io::AsyncWriteExt,
+    io::AsyncWriteExt as _,
+    select,
+    sync::mpsc::{self, Receiver, Sender},
 };
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
-pub struct MessageManager {
+pub struct MessageQueueDisk {
     dir: PathBuf,
 
-    instant: Manager<ImmediateMessageMeta>,
+    instant: Manager<InstantMessageMeta>,
 
     defer: Manager<DeferMessageMeta>,
+
+    tx: Sender<Message>,
+    rx: Receiver<Message>,
+    cancel: CancellationToken,
 }
 
-impl MessageManager {
+unsafe impl Send for MessageQueueDisk {}
+unsafe impl Sync for MessageQueueDisk {}
+
+impl MessageQueue for MessageQueueDisk {
+    async fn push(&mut self, msg: Message) -> Result<()> {
+        if msg.is_defer() {
+            self.defer.push(msg).await?;
+            return Ok(());
+        }
+        self.instant.push(msg).await?;
+        Ok(())
+    }
+
+    async fn pop(&mut self) -> Option<Message> {
+        self.rx.recv().await
+    }
+
+    fn stop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+pub async fn build_disk_queue(
+    dir: PathBuf,
+    max_msg_num_per_file: u64,
+    max_size_per_file: u64,
+) -> Result<MessageManager> {
+    let mut disk_queue = MessageQueueDisk::new(dir, max_msg_num_per_file, max_size_per_file);
+    disk_queue.load().await?;
+
+    let guard: Guard<MessageQueueDisk> = Guard::new(disk_queue);
+    let guard_ret = guard.clone();
+    tokio::spawn(load_cache(guard));
+
+    Ok(MessageManager::new(None, Some(guard_ret)))
+}
+
+fn calc_cache_length(all_len: usize) -> usize {
+    let mut get_num = 0;
+    if all_len < 100 {
+        get_num = all_len;
+    } else if all_len >= 100 && all_len < 10_000 {
+        get_num = 100 + all_len / 100;
+    } else if all_len >= 10_000 && all_len < 100_000 {
+        get_num = 1000 + all_len / 1000;
+    } else {
+        get_num = 10000 + all_len / 10_000;
+    }
+    get_num
+}
+
+/// Load cache message from disk. In order to pop message from disk quickly.
+async fn load_cache(guard: Guard<MessageQueueDisk>) {
+    let sender = guard.get_mut().tx.clone();
+    loop {
+        select! {
+            _ = CANCEL_TOKEN.cancelled() => {
+                return ;
+            }
+
+            defer_cache = guard.get_mut().defer.meta.read_to_cache() => {
+                match defer_cache{
+                    Ok(list) => {
+                        let mut iter = list.iter();
+                        while let Some(m) = iter.next(){
+                            let _ = sender.send(m.clone()).await;
+                        }
+                    }
+                    Err(e) => {
+
+                    }
+                }
+            }
+
+            defer_cache = guard.get_mut().instant.meta.read_to_cache() => {
+                match defer_cache{
+                    Ok(list) => {
+                        let mut iter = list.iter();
+                        while let Some(m) = iter.next(){
+                            let _ = sender.send(m.clone()).await;
+                        }
+                    }
+                    Err(e) => {
+
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl MessageQueueDisk {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         let parent = dir.clone();
-        MessageManager {
+        let (tx, rx) = mpsc::channel(1000);
+        MessageQueueDisk {
             dir: dir,
+            tx,
+            rx,
             instant: Manager::new(
                 parent.join("instant"),
-                ImmediateMessageMeta::new(),
+                InstantMessageMeta::new(),
                 max_msg_num_per_file,
                 max_size_per_file,
             ),
@@ -40,6 +151,7 @@ impl MessageManager {
                 max_msg_num_per_file,
                 max_size_per_file,
             ),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -48,19 +160,6 @@ impl MessageManager {
         self.instant.load().await?;
         self.defer.load().await?;
         Ok(())
-    }
-
-    pub async fn push(&mut self, msg: ProtocolBody) -> Result<()> {
-        if msg.is_defer() {
-            self.defer.push(msg).await?;
-            return Ok(());
-        }
-        self.instant.push(msg).await?;
-        Ok(())
-    }
-
-    pub fn read(&mut self) -> Option<ProtocolBody> {
-        None
     }
 
     pub async fn persist(&mut self) -> Result<()> {
@@ -113,7 +212,7 @@ where
         }
     }
 
-    pub async fn push(&mut self, msg: ProtocolBody) -> Result<()> {
+    pub async fn push(&mut self, msg: Message) -> Result<()> {
         if self.writer.msg_num >= self.max_msg_num_per_file
             || self.writer.msg_size + msg.calc_len() as u64 > self.max_size_per_file
         {
@@ -123,7 +222,7 @@ where
         }
 
         if msg.is_defer() {
-            let id = msg.id.as_str();
+            let id = msg.id();
             self.meta.update((
                 self.factor,
                 self.writer.msg_size,
@@ -136,7 +235,7 @@ where
         Ok(())
     }
 
-    pub fn read(&mut self) -> Option<ProtocolBody> {
+    pub fn read(&mut self) -> Option<Message> {
         None
     }
 
@@ -145,16 +244,12 @@ where
         self.writer = MessageDisk::new();
         self.writer.filename = self
             .dir
-            .join(self.gen_filename())
+            .join(gen_filename(self.factor))
             .to_str()
             .unwrap()
             .to_string();
         check_and_create_filename(self.writer.filename.as_str())?;
         Ok(())
-    }
-
-    fn gen_filename(&self) -> String {
-        format!("{:0>15}", self.factor)
     }
 
     pub async fn load(&mut self) -> Result<()> {
@@ -168,6 +263,8 @@ where
         // u64::MAX: 922_3372_0368_5477_5807
         let mut max_factor = 0_u64;
         let mut file_iter = rd.into_iter();
+
+        let mut cant_parse = vec![];
         while let Some(entry) = file_iter.next() {
             let de = entry?;
             let filename = de.file_name().into_string().unwrap();
@@ -179,14 +276,20 @@ where
                     }
                 }
                 // 可能是其他文件，忽略掉
-                Err(_) => continue,
+                Err(_) => {
+                    cant_parse.push(filename);
+                }
             }
         }
+        if cant_parse.len() != 0 {
+            warn!("files[{cant_parse:?}] not standard message file, ignore them.")
+        }
+
         self.factor = max_factor;
 
         self.writer.filename = self
             .dir
-            .join(self.gen_filename())
+            .join(gen_filename(self.factor))
             .to_str()
             .unwrap()
             .to_string();
@@ -212,7 +315,7 @@ pub struct MessageDisk {
     filename: String,
     msg_size: u64,
     msg_num: u64,
-    msgs: RwLock<Vec<ProtocolBody>>,
+    msgs: RwLock<Vec<Message>>,
 
     fd: Option<RwLock<File>>,
 }
@@ -228,7 +331,7 @@ impl MessageDisk {
         }
     }
 
-    pub fn push(&mut self, msg: ProtocolBody) {
+    pub fn push(&mut self, msg: Message) {
         self.msg_size += msg.calc_len() as u64;
         self.msg_num += 1;
         let mut rg = self.msgs.write();
@@ -256,12 +359,26 @@ impl MessageDisk {
         let fd = self.fd.as_mut().unwrap().get_mut();
         let mut pfd = Pin::new(fd);
         loop {
+            let head: ProtocolHead;
+            match ProtocolHead::parse_from(&mut pfd).await {
+                Ok(h) => {
+                    self.msg_size += h.calc_len() as u64;
+                    head = h;
+                }
+                Err(e) => {
+                    if e.to_string().contains("eof") {
+                        break;
+                    }
+                    return Err(anyhow!(e));
+                }
+            }
             match ProtocolBody::parse_from(&mut pfd).await {
-                Ok(pb) => {
-                    self.msg_size += pb.calc_len() as u64;
+                Ok(body) => {
+                    self.msg_size += body.calc_len() as u64;
                     self.msg_num += 1;
                     if is_debug() {
-                        println!("pb = {pb:?}");
+                        let msg = Message::with_one(head, body);
+                        println!("msg = {msg:?}");
                     }
                     // 不push到msgs中
                 }
@@ -306,171 +423,26 @@ impl MessageDisk {
 
 trait MetaManager {
     fn new() -> Self;
+    fn consume(&mut self) -> Result<()>;
+    async fn read_to_cache(&mut self) -> Result<Vec<Message>>;
     fn load(&mut self, filename: &str) -> Result<()>;
     fn update(&mut self, args: (u64, u64, u64, &str, u64));
     fn persist(&self, filename: &str) -> Result<()>;
     fn meta_filename(prefix: &str) -> String;
 }
 
-pub struct ImmediateMessageMeta {
-    factor: u64,
-    offset: u64,
-    length: u64,
-}
-
-impl MetaManager for ImmediateMessageMeta {
-    fn new() -> Self {
-        ImmediateMessageMeta {
-            factor: 0,
-            offset: 0,
-            length: 0,
-        }
-    }
-
-    fn meta_filename(prefix: &str) -> String {
-        format!("{prefix}meta")
-    }
-
-    fn persist(&self, filename: &str) -> Result<()> {
-        let content = format!("{}\n{}\n{}", self.factor, self.offset, self.length);
-        write(filename, content)?;
-        Ok(())
-    }
-
-    fn load(&mut self, filename: &str) -> Result<()> {
-        let content = read_to_string(filename)?;
-        if content.len() == 0 {
-            return Ok(());
-        }
-        let lines: Vec<&str> = content.split('\n').collect();
-        if lines.len() < 3 {
-            return Err(anyhow!("not standard instant meta file"));
-        }
-        self.factor = lines
-            .get(0)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse factor failed");
-        self.offset = lines
-            .get(1)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse offset failed");
-        self.length = lines
-            .get(2)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse length failed");
-
-        Ok(())
-    }
-
-    fn update(&mut self, args: (u64, u64, u64, &str, u64)) {
-        self.factor = args.0;
-        self.offset = args.1;
-        self.length = args.2;
-    }
-}
-
-pub struct DeferMessageMeta {
-    list: Vec<DeferMessageMetaUnit>,
-}
-
-#[derive(Default)]
-struct DeferMessageMetaUnit {
-    factor: u64,
-    offset: u64,
-    length: u64,
-    id: String,
-    defer_time: u64,
-}
-
-impl MetaManager for DeferMessageMeta {
-    fn new() -> Self {
-        DeferMessageMeta { list: vec![] }
-    }
-
-    fn meta_filename(prefix: &str) -> String {
-        format!("{prefix}meta")
-    }
-
-    fn persist(&self, filename: &str) -> Result<()> {
-        let mut content = BytesMut::new();
-        let mut iter = self.list.iter();
-        while let Some(unit) = iter.next() {
-            content.extend(
-                format!(
-                    "{},{},{},{},{}\n",
-                    unit.factor, unit.offset, unit.length, unit.id, unit.defer_time
-                )
-                .as_bytes(),
-            );
-        }
-        write(filename, content)?;
-
-        Ok(())
-    }
-
-    fn load(&mut self, filename: &str) -> Result<()> {
-        let content = read_to_string(filename)?;
-        if content.len() == 0 {
-            return Ok(());
-        }
-        let lines: Vec<&str> = content.split('\n').collect();
-        let mut iter = lines.iter();
-        while let Some(line) = iter.next() {
-            if line.len() == 0 {
-                continue;
-            }
-            let cells: Vec<&str> = line.split(",").collect();
-            if cells.len() < 5 {
-                return Err(anyhow!("not standard defer meta file"));
-            }
-            let mut unit: DeferMessageMetaUnit = DeferMessageMetaUnit::default();
-            unit.factor = cells
-                .get(0)
-                .unwrap()
-                .parse::<u64>()
-                .expect("parse factor failed");
-            unit.offset = cells
-                .get(1)
-                .unwrap()
-                .parse::<u64>()
-                .expect("parse offset failed");
-            unit.length = cells
-                .get(2)
-                .unwrap()
-                .parse::<u64>()
-                .expect("parse length failed");
-            unit.id = cells.get(3).unwrap().to_string();
-            unit.defer_time = cells
-                .get(4)
-                .unwrap()
-                .parse::<u64>()
-                .expect("parse length failed");
-            self.list.push(unit);
-        }
-
-        Ok(())
-    }
-
-    fn update(&mut self, args: (u64, u64, u64, &str, u64)) {
-        let mut unit = DeferMessageMetaUnit::default();
-        unit.factor = args.0;
-        unit.offset = args.1;
-        unit.length = args.2;
-        unit.id = args.3.to_string();
-        unit.defer_time = args.4;
-
-        self.list.push(unit);
-        self.list.sort_by_key(|u| u.defer_time);
-    }
+pub fn gen_filename(factor: u64) -> String {
+    format!("{:0>15}", factor)
 }
 
 #[cfg(test)]
 pub mod tests {
-    use super::MessageManager;
-    use crate::protocol::ProtocolBody;
+    use super::MessageQueueDisk;
+    use crate::{
+        message::Message,
+        protocol::{ProtocolBody, ProtocolHead},
+        topic::message_manager::MessageQueue as _,
+    };
     use bytes::Bytes;
     use std::path::Path;
 
@@ -480,9 +452,9 @@ pub mod tests {
         println!("{c}");
     }
 
-    async fn load_mm() -> MessageManager {
+    async fn load_mm() -> MessageQueueDisk {
         let p: &Path = Path::new("../target");
-        let mut mm = MessageManager::new(p.join("message"), 10, 299);
+        let mut mm = MessageQueueDisk::new(p.join("message"), 10, 299);
         match mm.load().await {
             Ok(_) => mm,
             Err(e) => panic!("{e:?}"),
@@ -497,6 +469,8 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_manager_push_defer_and_persist() {
         let mut mm = load_mm().await;
+        let mut head = ProtocolHead::new();
+        let _ = head.set_version(1).expect("set version failed");
 
         for i in 0..10 {
             let mut body = ProtocolBody::new();
@@ -511,7 +485,7 @@ pub mod tests {
                     .is_ok(),
                 true
             );
-            let _ = mm.push(body).await;
+            let _ = mm.push(Message::with_one(head.clone(), body)).await;
         }
 
         if let Err(e) = mm.persist().await {
@@ -522,7 +496,8 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_manager_push_instant_and_persist() {
         let mut mm = load_mm().await;
-
+        let mut head = ProtocolHead::new();
+        let _ = head.set_version(1).expect("set version failed");
         for i in 0..10 {
             let mut body = ProtocolBody::new();
             // 设置id
@@ -533,7 +508,7 @@ pub mod tests {
                     .is_ok(),
                 true
             );
-            let _ = mm.push(body).await;
+            let _ = mm.push(Message::with_one(head.clone(), body)).await;
         }
 
         if let Err(e) = mm.persist().await {

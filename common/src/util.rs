@@ -66,7 +66,7 @@ pub fn check_exist(path: &str) -> bool {
 }
 
 pub fn is_debug() -> bool {
-    let v = var("FOR_DEBUG").unwrap_or_default();
+    let v: String = var("FOR_DEBUG").unwrap_or_default();
     match v.to_lowercase().as_str() {
         "t" | "true" | "1" | "on" | "open" => {
             return true;

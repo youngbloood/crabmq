@@ -2,15 +2,24 @@ pub mod message_manager;
 
 use crate::channel::Channel;
 use crate::message::Message;
+use crate::protocol::ProtocolHead;
+use crate::tsuixuq::TsuixuqOption;
 use anyhow::{anyhow, Result};
-use common::global::Guard;
+use common::global::{Guard, CANCEL_TOKEN};
 use common::Name;
+use futures::executor::block_on;
 use std::{collections::HashMap, path::Path};
+use tokio::select;
 use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
 
-use self::message_manager::MessageManager;
+use self::message_manager::disk::build_disk_queue;
+use self::message_manager::dummy::build_dummy_queue;
+use self::message_manager::{MessageManager, MessageQueue};
 
 pub struct Topic {
+    opt: Guard<TsuixuqOption>,
+
     name: Name,
     message_count: u64, // 消息的数量
     message_bytes: u64, // 消息的大小
@@ -18,25 +27,50 @@ pub struct Topic {
     pub_num: u64, // publisher的数量
     sub_num: u64, // subscriber的数量
 
-    disk: MessageManager,
+    queue: MessageManager,
 
     ephemeral: bool,
 
+    sender: Sender<(String, Message)>,
+
     channels: HashMap<String, Guard<Channel>>,
+
+    cancel: CancellationToken,
+}
+
+impl Drop for Topic {
+    fn drop(&mut self) {
+        self.queue.stop();
+        self.cancel.cancel();
+    }
 }
 
 impl Topic {
-    pub fn new(name: &str) -> Self {
+    pub fn new(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Self> {
+        let mut queue: MessageManager;
+        if ephemeral {
+            queue = build_dummy_queue(10);
+        } else {
+            queue = block_on(build_disk_queue(
+                Path::new(opt.get().message_dir.as_str()).join(name),
+                opt.get().max_num_per_file,
+                opt.get().max_size_per_file,
+            ))?;
+        }
+
         let n = Name::new(name);
         let mut topic = Topic {
+            opt,
             name: n,
-            ephemeral: false,
+            ephemeral,
             channels: HashMap::new(),
             message_count: 0,
             message_bytes: 0,
             pub_num: 0,
             sub_num: 0,
-            disk: MessageManager::new(Path::new("").join(name), 100000, 1000000),
+            queue: queue,
+            cancel: CancellationToken::new(),
+            sender: todo!(),
         };
 
         // 每个topic默认有个default的channel
@@ -45,7 +79,7 @@ impl Topic {
             Guard::new(Channel::new(topic.name.as_str(), "default")),
         );
 
-        topic
+        Ok(topic)
     }
 
     pub fn builder(self: Self) -> Guard<Self> {
@@ -58,28 +92,15 @@ impl Topic {
         addr: &str,
         mut msg: Message,
     ) -> Result<()> {
-        let mut iter = self.channels.iter();
-        while let Some((_chan_name, chan)) = iter.next() {
-            match &mut msg {
-                Message::Null => unreachable!(),
-                Message::V1(ref mut v1) => {
-                    let head = v1.head.clone();
-                    let mut bodys_iter = v1.bodys.list.iter_mut();
-                    while let Some(body) = bodys_iter.next() {
-                        self.disk.push(body.clone()).await?;
-                        if body.is_ack() {}
-                        if body.is_persist() {}
-
-                        // TODO: 处理各种body
-                    }
-                }
-            }
-            let sender_clone = sender.clone();
-            chan.get_mut().send_msg(sender_clone, msg.clone()).await?;
+        let msg_list = msg.split();
+        let mut iter = msg_list.iter();
+        while let Some(msg) = iter.next() {
+            // TODO: 处理各种body
+            self.queue.push(msg.clone()).await?;
+            // if body.is_ack() {}
+            // if body.is_persist() {}
         }
 
-        let _ = msg.reset_body();
-        let _ = sender.send((addr.to_string(), msg)).await;
         Ok(())
     }
 
@@ -120,6 +141,32 @@ impl Topic {
 
         while let Some((_addr, chan)) = iter.next() {
             chan.get_mut().delete_channel(chan_name)
+        }
+    }
+}
+
+async fn topic_loop(guard: Guard<Topic>) {
+    let sender = guard.get().sender.clone();
+
+    loop {
+        select! {
+            _ = CANCEL_TOKEN.cancelled() => {
+                return;
+            }
+
+            _ = guard.get().cancel.cancelled() => {
+                return ;
+            }
+
+            msg_opt = guard.get().queue.pop() => {
+                if msg_opt.is_none(){
+                    continue;
+                }
+                let msg = msg_opt.unwrap();
+                guard.get().channels.iter().for_each(|(_, chan)| {
+                    chan.get().send_msg(sender.clone(), msg.clone());
+                });
+            }
         }
     }
 }

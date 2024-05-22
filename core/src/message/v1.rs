@@ -27,6 +27,17 @@ impl MessageV1 {
         }
     }
 
+    pub fn with_one(mut head: ProtocolHead, body: ProtocolBody) -> Self {
+        let _ = head.set_msg_num(1);
+        let mut bodys = ProtocolBodys::new();
+        bodys.push(body);
+        MessageV1 {
+            head,
+            bodys,
+            remote_addr: "".to_string(),
+        }
+    }
+
     pub fn set_remote_addr(&mut self, remote_add: &str) {
         self.remote_addr = remote_add.to_string();
     }

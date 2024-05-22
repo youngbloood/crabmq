@@ -126,6 +126,14 @@ impl ProtocolHead {
         }
     }
 
+    pub fn calc_len(&self) -> usize {
+        let mut size = PROTOCOL_HEAD_LEN;
+        size += self.topic.len();
+        size += self.channel.len();
+        size += self.token.len();
+        size
+    }
+
     pub fn init(&mut self) -> Result<()> {
         if self.topic.len() == 0 {
             self.set_topic("default")?;

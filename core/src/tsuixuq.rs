@@ -95,6 +95,19 @@ pub struct TsuixuqOption {
     #[arg(long = "client-write-timeout-count", default_value_t = 3)]
     /// 一个client写入数据超时次数，超过该次数会断开链接
     pub client_write_timeout_count: u64,
+
+    #[arg(long = "message_dir", default_value = "./message")]
+    /// message默认存放的位置
+    pub message_dir: String,
+
+    /// max_num_per_file * 100 约等于 10G
+    #[arg(long = "max_num_per_file", default_value_t = 107374180)]
+    /// 每个文件最多存放消息数量
+    pub max_num_per_file: u64,
+
+    #[arg(long = "max_size_per_file", default_value_t = 10737418240)]
+    /// 每个文件最多存放消息大小(Byte)，默认5G
+    pub max_size_per_file: u64,
 }
 
 impl TsuixuqOption {
@@ -174,20 +187,25 @@ impl Tsuixuq {
         }
     }
 
-    pub fn get_or_create_topic(&mut self, topic_name: &str) -> Result<Guard<Topic>> {
+    pub fn get_or_create_topic(
+        &mut self,
+        topic_name: &str,
+        ephemeral: bool,
+    ) -> Result<Guard<Topic>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
             && topics_len >= (self.opt.get().topic_num_in_tsuixuq as _)
         {
-            return Err(anyhow!("exceed upperlimit of topic"));
+            return Err(anyhow!("exceed upper limit of topic"));
         }
 
-        let topic = self
-            .topics
-            .entry(topic_name.to_string())
-            .or_insert_with(|| Topic::new(topic_name).builder());
+        if !self.topics.contains_key(topic_name) {
+            let topic = Topic::new(self.opt.clone(), topic_name, ephemeral)?.builder();
+            self.topics.insert(topic_name.to_string(), topic.clone());
+            return Ok(topic.clone());
+        }
 
-        Ok(topic.clone())
+        Ok(self.topics.get(topic_name).unwrap().clone())
     }
 
     pub async fn send_message(
@@ -197,19 +215,19 @@ impl Tsuixuq {
         msg: Message,
     ) -> Result<()> {
         let topic_name = msg.get_topic();
-        let topic = self.get_or_create_topic(topic_name)?;
+        let topic = self.get_or_create_topic(topic_name, msg.topic_ephemeral())?;
         topic.get_mut().send_msg(sender, addr, msg).await?;
         Ok(())
     }
 
-    pub fn get_topic_channel(
-        &mut self,
-        topic_name: &str,
-        chan_name: &str,
-    ) -> Result<Guard<Channel>> {
-        let topic = self.get_or_create_topic(topic_name)?;
-        Ok(topic.get_mut().get_mut_channel(chan_name)?)
-    }
+    // pub fn get_topic_channel(
+    //     &mut self,
+    //     topic_name: &str,
+    //     chan_name: &str,
+    // ) -> Result<Guard<Channel>> {
+    //     let topic = self.get_or_create_topic(topic_name)?;
+    //     Ok(topic.get_mut().get_mut_channel(chan_name)?)
+    // }
 
     pub async fn delete_client_from_channel(&mut self, chan_name: &str) {
         let mut iter = self.topics.iter_mut();

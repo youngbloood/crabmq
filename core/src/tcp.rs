@@ -169,7 +169,7 @@ impl TcpServer {
         let tsuixuq = self.tsuixuq.clone();
         let daemon = tsuixuq.get_mut();
         let topic = daemon
-            .get_or_create_topic(topic_name)
+            .get_or_create_topic(topic_name, msg.topic_ephemeral())
             .expect("get topic err");
         let chan = topic.get_mut().get_create_mut_channel(chan_name);
         chan.get_mut().set_client(addr, guard);
