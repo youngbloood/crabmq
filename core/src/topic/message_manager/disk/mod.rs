@@ -13,12 +13,7 @@ use common::{
     util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug},
 };
 use parking_lot::RwLock;
-use std::{
-    fs::{self},
-    path::PathBuf,
-    pin::Pin,
-    vec,
-};
+use std::{fs, path::PathBuf, pin::Pin, vec};
 use tokio::{
     fs::{File, OpenOptions},
     io::AsyncWriteExt as _,
@@ -27,6 +22,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+const SPLIT_UNIT: char = '\n';
+const SPLIT_CELL: char = ',';
 
 pub struct MessageQueueDisk {
     dir: PathBuf,
@@ -94,15 +92,14 @@ fn calc_cache_length(all_len: usize) -> usize {
 /// Load cache message from disk. In order to pop message from disk quickly.
 async fn load_cache(guard: Guard<MessageQueueDisk>) {
     let sender = guard.get_mut().tx.clone();
-    let instant_dir = guard.get().instant.dir.to_str().unwrap();
-    let defer_dir = guard.get().instant.dir.to_str().unwrap();
+
     loop {
         select! {
             _ = CANCEL_TOKEN.cancelled() => {
                 return ;
             }
 
-            defer_cache = guard.get_mut().defer.meta.read_to_cache(defer_dir) => {
+            defer_cache = guard.get_mut().defer.meta.read_to_cache() => {
                 match defer_cache{
                     Ok(list) => {
                         let mut iter = list.iter();
@@ -116,7 +113,7 @@ async fn load_cache(guard: Guard<MessageQueueDisk>) {
                 }
             }
 
-            defer_cache = guard.get_mut().instant.meta.read_to_cache(instant_dir) => {
+            defer_cache = guard.get_mut().instant.meta.read_to_cache() => {
                 match defer_cache{
                     Ok(list) => {
                         let mut iter = list.iter();
@@ -137,19 +134,20 @@ impl MessageQueueDisk {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         let parent = dir.clone();
         let (tx, rx) = mpsc::channel(1000);
+
         MessageQueueDisk {
             dir: dir,
             tx,
             rx,
             instant: Manager::new(
                 parent.join("instant"),
-                InstantMessageMeta::new(),
+                InstantMessageMeta::new(parent.join("instant").to_str().unwrap()),
                 max_msg_num_per_file,
                 max_size_per_file,
             ),
             defer: Manager::new(
                 parent.join("defer"),
-                DeferMessageMeta::new(),
+                DeferMessageMeta::new(parent.join("defer").to_str().unwrap()),
                 max_msg_num_per_file,
                 max_size_per_file,
             ),
@@ -239,7 +237,7 @@ where
         Ok(())
     }
 
-    pub fn read(&mut self) -> Option<Message> {
+    pub async fn read(&mut self) -> Option<Message> {
         None
     }
 
@@ -258,16 +256,12 @@ where
 
     pub async fn load(&mut self) -> Result<()> {
         check_and_create_dir(self.dir.to_str().unwrap())?;
-        let dir = self.dir.join(&self.prefix);
-        let metafilename = T::meta_filename(dir.to_str().unwrap());
-        check_and_create_filename(metafilename.as_str())?;
-        self.meta.load(metafilename.as_str())?;
+        self.meta.load()?;
 
         let rd = fs::read_dir(self.dir.to_str().unwrap())?;
         // u64::MAX: 922_3372_0368_5477_5807
         let mut max_factor = 0_u64;
         let mut file_iter = rd.into_iter();
-
         let mut cant_parse = vec![];
         while let Some(entry) = file_iter.next() {
             let de = entry?;
@@ -281,16 +275,17 @@ where
                 }
                 // 可能是其他文件，忽略掉
                 Err(_) => {
-                    cant_parse.push(filename);
+                    let fname = self.dir.join(filename);
+                    cant_parse.push(fname.to_str().unwrap().to_string());
                 }
             }
         }
         if cant_parse.len() != 0 {
-            warn!("files[{cant_parse:?}] not standard message file, ignore them.")
+            warn!("files{cant_parse:?} not standard message file, ignore them.")
         }
 
+        // 初始化Manager.factor和Manager.writer，为下次写入消息时发生文件滚动做准备
         self.factor = max_factor;
-
         self.writer.filename = self
             .dir
             .join(gen_filename(self.factor))
@@ -307,8 +302,7 @@ where
 
     pub async fn persist(&mut self) -> Result<()> {
         let dir = self.dir.join(&self.prefix);
-        let metafilename = T::meta_filename(dir.to_str().unwrap());
-        self.meta.persist(metafilename.as_str())?;
+        self.meta.persist()?;
         self.writer.persist(dir.to_str().unwrap()).await?;
         Ok(())
     }
@@ -426,13 +420,13 @@ impl MessageDisk {
 }
 
 trait MetaManager {
-    fn new() -> Self;
-    fn consume(&mut self, dir: &str) -> Result<()>;
-    async fn read_to_cache(&mut self, dir: &str) -> Result<Vec<Message>>;
-    fn load(&mut self, filename: &str) -> Result<()>;
+    fn new(dir: &str) -> Self;
+    async fn consume(&mut self) -> Result<()>;
+    async fn read_to_cache(&mut self) -> Result<Vec<Message>>;
+    fn load(&mut self) -> Result<()>;
     fn update(&mut self, args: (u64, u64, u64, &str, u64));
-    fn persist(&self, filename: &str) -> Result<()>;
-    fn meta_filename(prefix: &str) -> String;
+    fn persist(&self) -> Result<()>;
+    fn meta_filename(&self) -> String;
 }
 
 pub fn gen_filename(factor: u64) -> String {
@@ -454,9 +448,13 @@ pub mod tests {
     use std::path::Path;
 
     #[test]
-    fn test_1() {
-        let c = format!("{:0>15}", 111);
-        println!("{c}");
+    fn test_factor_file() {
+        let filename = format!("{:0>15}", 111);
+        assert_eq!(filename, "000000000000111");
+    }
+
+    fn init_log() {
+        let _ = tracing_subscriber::fmt::try_init();
     }
 
     async fn load_mm() -> MessageQueueDisk {
@@ -474,10 +472,10 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_manager_push_defer_and_persist() {
+    async fn test_message_manager_defer_push_and_persist() {
         let mut mm = load_mm().await;
         let mut head = ProtocolHead::new();
-        let _ = head.set_version(1).expect("set version failed");
+        assert_eq!(head.set_version(1).is_ok(), true);
 
         for i in 0..10 {
             let mut body = ProtocolBody::new();
@@ -492,35 +490,78 @@ pub mod tests {
                     .is_ok(),
                 true
             );
-            let _ = mm.push(Message::with_one(head.clone(), body)).await;
+            assert_eq!(
+                mm.push(Message::with_one(head.clone(), body)).await.is_ok(),
+                true
+            );
         }
 
-        if let Err(e) = mm.persist().await {
-            panic!("{e:?}");
-        }
+        assert_eq!(mm.persist().await.is_ok(), true);
     }
 
     #[tokio::test]
-    async fn test_message_manager_push_defer_consume() {
+    async fn test_message_manager_defer_consume() {
+        init_log();
         let mut mm = load_mm().await;
-        if let Err(e) = mm.defer.meta.consume(mm.defer.dir.to_str().unwrap()) {
-            panic!("{e:?}");
-        }
-        if let Err(e) = mm.defer.meta.persist(
-            Path::new(mm.defer.dir.to_str().unwrap())
-                .join(DeferMessageMeta::meta_filename(""))
-                .to_str()
-                .unwrap(),
-        ) {
-            panic!("{e:?}");
-        }
+        let pre = mm.defer.meta.list.len();
+        assert_eq!(mm.defer.meta.consume().await.is_ok(), true);
+        let post = mm.defer.meta.list.len();
+        assert_eq!(post + 1, pre);
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_defer_read_to_cache() {
+        init_log();
+        let mut mm = load_mm().await;
+
+        assert_eq!(mm.defer.meta.read_to_cache().await.is_ok(), true);
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_defer_read_to_cache_repeat() {
+        init_log();
+        let mut mm = load_mm().await;
+
+        assert_eq!(mm.defer.meta.read_to_cache().await.is_ok(), true);
+
+        let cache = mm.defer.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len(), 0);
+
+        let cache = mm.defer.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_defer_read_to_cache_and_consume() {
+        init_log();
+        let mut mm = load_mm().await;
+
+        assert_eq!(mm.defer.meta.read_to_cache().await.is_ok(), true);
+
+        // consume 1条消息，read_to_cache时会再加载额外1条消息（前提是至少还有1条消息未被消费）
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        let cache = mm.defer.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len() <= 1, true);
+
+        // consume 5条消息，read_to_cache时会再加载额外5条消息（前提是至少还有5条消息未被消费）
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        let cache = mm.defer.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len() <= 5, true)
     }
 
     #[tokio::test]
     async fn test_message_manager_push_instant_and_persist() {
         let mut mm = load_mm().await;
         let mut head = ProtocolHead::new();
-        let _ = head.set_version(1).expect("set version failed");
+        assert_eq!(head.set_version(1).is_ok(), true);
         for i in 0..10 {
             let mut body = ProtocolBody::new();
             // 设置id
@@ -531,27 +572,71 @@ pub mod tests {
                     .is_ok(),
                 true
             );
-            let _ = mm.push(Message::with_one(head.clone(), body)).await;
+
+            assert_eq!(
+                mm.push(Message::with_one(head.clone(), body)).await.is_ok(),
+                true
+            );
         }
 
-        if let Err(e) = mm.persist().await {
-            panic!("{e:?}");
-        }
+        assert_eq!(mm.persist().await.is_ok(), true);
     }
 
     #[tokio::test]
     async fn test_message_manager_push_instant_consume() {
+        init_log();
         let mut mm = load_mm().await;
-        if let Err(e) = mm.instant.meta.consume(mm.instant.dir.to_str().unwrap()) {
-            panic!("{e:?}");
-        }
-        if let Err(e) = mm.instant.meta.persist(
-            Path::new(mm.instant.dir.to_str().unwrap())
-                .join(InstantMessageMeta::meta_filename(""))
-                .to_str()
-                .unwrap(),
-        ) {
-            panic!("{e:?}");
-        }
+        let pre = mm.instant.meta.now.left_num;
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        let post = mm.instant.meta.now.left_num;
+        assert_eq!(post + 1, pre);
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_instant_read_to_cache() {
+        init_log();
+        let mut mm = load_mm().await;
+
+        assert_eq!(mm.instant.meta.read_to_cache().await.is_ok(), true);
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_instant_read_to_cach_repeat() {
+        init_log();
+        let mut mm = load_mm().await;
+
+        assert_eq!(mm.instant.meta.read_to_cache().await.is_ok(), true);
+        let cache = mm.instant.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len(), 0);
+        let cache = mm.instant.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_message_manager_instant_read_to_cache_and_consume() {
+        init_log();
+        let mut mm = load_mm().await;
+
+        assert_eq!(mm.instant.meta.read_to_cache().await.is_ok(), true);
+
+        // consume 1条消息，read_to_cache时会再加载额外1条消息（前提是至少还有1条消息未被消费）
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.persist().is_ok(), true);
+        let cache = mm.instant.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len() <= 1, true);
+
+        // consume 5条消息，read_to_cache时会再加载额外5条消息（前提是至少还有5条消息未被消费）
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
+        assert_eq!(mm.instant.meta.persist().is_ok(), true);
+        let cache = mm.instant.meta.read_to_cache().await;
+        assert_eq!(cache.is_ok(), true);
+        assert_eq!(cache.unwrap().len() <= 5, true);
     }
 }

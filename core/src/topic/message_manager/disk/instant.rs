@@ -1,11 +1,10 @@
-use super::{calc_cache_length, gen_filename, MetaManager};
+use super::{calc_cache_length, gen_filename, MetaManager, SPLIT_CELL};
 use crate::{
     message::Message,
     protocol::{ProtocolBody, ProtocolHead},
 };
 use anyhow::{anyhow, Result};
-use common::util::check_exist;
-use futures::executor::block_on;
+use common::util::{check_and_create_filename, check_exist};
 use std::{
     fs::{read_to_string, write},
     os::unix::fs::MetadataExt,
@@ -16,12 +15,14 @@ use std::{
 use tokio::{fs::File, io::AsyncSeekExt};
 
 pub struct InstantMessageMeta {
+    dir: String,
+
     /// 从disk解析
-    now: InstantMessageMetaUnit,
+    pub now: InstantMessageMetaUnit,
 
-    read_start_pos: Option<InstantMessageMetaUnit>,
+    pub read_start_pos: Option<InstantMessageMetaUnit>,
 
-    read_num: usize,
+    pub read_num: usize,
 }
 
 #[derive(Default)]
@@ -40,17 +41,65 @@ pub struct InstantMessageMetaUnit {
     pub length: u64,
 }
 
+impl InstantMessageMetaUnit {
+    fn format(&self) -> String {
+        format!(
+            "{},{},{},{},{}",
+            self.msg_num, self.left_num, self.factor, self.offset, self.length
+        )
+    }
+
+    fn parse_from(&mut self, filename: &str) -> Result<()> {
+        let content = read_to_string(filename)?;
+        if content.len() == 0 {
+            return Ok(());
+        }
+        let lines: Vec<&str> = content.split(SPLIT_CELL).collect();
+        if lines.len() < 5 {
+            return Err(anyhow!("not standard instant meta file"));
+        }
+        self.msg_num = lines
+            .get(0)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse msg_num failed");
+        self.left_num = lines
+            .get(1)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse left_num failed");
+        self.factor = lines
+            .get(2)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse factor failed");
+        self.offset = lines
+            .get(3)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse offset failed");
+        self.length = lines
+            .get(4)
+            .unwrap()
+            .parse::<u64>()
+            .expect("parse length failed");
+
+        Ok(())
+    }
+}
+
 impl InstantMessageMeta {
-    async fn read_next(&mut self, dir: &str) -> Result<(Option<Message>, bool)> {
-        let mut read_factor = self.now.factor;
+    async fn read_next(&mut self) -> Result<(Option<Message>, bool)> {
+        let dir = self.dir.as_str();
         let parent = Path::new(dir);
-        println!("read_factor = {:?}", parent.join(gen_filename(read_factor)));
+        let mut read_factor = self.now.factor;
 
         let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
         let metadata = fd.metadata().await?;
         let mut offset = self.now.offset;
         let mut rolling = false;
-        println!("size = {}", metadata.size());
+
+        // 当前offset已经位于文件末，该滚动寻找下一个文件的消息
         if metadata.size() == self.now.offset {
             read_factor += 1;
             let next_filename = parent.join(gen_filename(read_factor));
@@ -71,18 +120,17 @@ impl InstantMessageMeta {
 }
 
 impl MetaManager for InstantMessageMeta {
-    fn new() -> Self {
+    fn new(dir: &str) -> Self {
         InstantMessageMeta {
+            dir: dir.to_string(),
             now: InstantMessageMetaUnit::default(),
             read_start_pos: None,
             read_num: 0,
         }
     }
 
-    fn consume(&mut self, dir: &str) -> Result<()> {
-        let (next_msg, rolling) = block_on(self.read_next(dir))?;
-        println!("next_msg = {next_msg:?}");
-        println!("rolling = {rolling:?}");
+    async fn consume(&mut self) -> Result<()> {
+        let (next_msg, rolling) = self.read_next().await?;
         if rolling {
             self.now.factor += 1;
             self.now.offset = 0;
@@ -101,15 +149,18 @@ impl MetaManager for InstantMessageMeta {
         Ok(())
     }
 
-    async fn read_to_cache(&mut self, dir: &str) -> Result<Vec<Message>> {
+    async fn read_to_cache(&mut self) -> Result<Vec<Message>> {
+        if self.read_num == 0 {
+            return Ok(vec![]);
+        }
         let mut read_factor = self.now.factor;
-        let parent = Path::new(dir);
+        let parent = Path::new(self.dir.as_str());
         let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
         fd.seek(std::io::SeekFrom::Start(self.now.offset as _))
             .await?;
         let mut fdp = Pin::new(&mut fd);
         let mut list = vec![];
-        self.read_num = calc_cache_length(self.now.left_num as _);
+
         while self.read_num != 0 {
             let head: ProtocolHead;
             match ProtocolHead::parse_from(&mut fdp).await {
@@ -143,53 +194,22 @@ impl MetaManager for InstantMessageMeta {
         Ok(list)
     }
 
-    fn meta_filename(prefix: &str) -> String {
-        format!("{prefix}meta")
+    fn meta_filename(&self) -> String {
+        let parent = Path::new(self.dir.as_str());
+        parent.join("meta").to_str().unwrap().to_string()
     }
 
-    fn persist(&self, filename: &str) -> Result<()> {
-        let content = format!(
-            "{},{},{},{},{}",
-            self.now.msg_num, self.now.left_num, self.now.factor, self.now.offset, self.now.length
-        );
-        write(filename, content)?;
+    fn persist(&self) -> Result<()> {
+        let content = self.now.format();
+        write(self.meta_filename(), content)?;
         Ok(())
     }
 
-    fn load(&mut self, filename: &str) -> Result<()> {
-        let content = read_to_string(filename)?;
-        if content.len() == 0 {
-            return Ok(());
-        }
-        let lines: Vec<&str> = content.split(',').collect();
-        if lines.len() < 5 {
-            return Err(anyhow!("not standard instant meta file"));
-        }
-        self.now.msg_num = lines
-            .get(0)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse msg_num failed");
-        self.now.left_num = lines
-            .get(1)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse left_num failed");
-        self.now.factor = lines
-            .get(2)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse factor failed");
-        self.now.offset = lines
-            .get(3)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse offset failed");
-        self.now.length = lines
-            .get(4)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse length failed");
+    fn load(&mut self) -> Result<()> {
+        let filename = self.meta_filename();
+        check_and_create_filename(filename.as_str())?;
+        self.now.parse_from(filename.as_str())?;
+        self.read_num = calc_cache_length(self.now.left_num as _);
 
         Ok(())
     }
