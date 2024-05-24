@@ -23,6 +23,7 @@ pub fn write_instant_to_cache(guard: Guard<InstantMessageMeta>, sender: Sender<M
                 result = guard.get_mut().next() => {
                     match result {
                         Ok((msg_opt,_)) => {
+                             // TODO: 这里的消息写到InstantMessageMeta自身缓存中，可以多缓存消息数量，提高性能
                             if let Some(msg) = msg_opt {
                                 let _ = sender.send(msg).await;
                             }

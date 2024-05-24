@@ -2,6 +2,7 @@ use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_CEL
 use crate::message::Message;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
+use chrono::Local;
 use common::global::Guard;
 use common::{global::CANCEL_TOKEN, util::check_and_create_filename};
 use parking_lot::RwLock;
@@ -23,20 +24,18 @@ pub fn write_defer_to_cache(guard: Guard<DeferMessageMeta>, sender: Sender<Messa
                 _ = CANCEL_TOKEN.cancelled() => {
                     return;
                 }
+
                 result = guard.get_mut().next() => {
                     match result {
                         Ok(msg_opt) => {
                             if let Some(msg) = msg_opt {
-                                let cache = &mut guard.get_mut().cache;
-                                let mut has_black = false;
-                                let mut ticker = interval(Duration::from_secs(5));
-                                while !has_black{
+                                // TODO: 这里的消息写到DeferMessageMeta自身缓存中，可以多缓存消息数量，提高性能
+                                let defer_time = msg.defer_time() - Local::now().timestamp() as u64;
+                                if defer_time > 0 {
+                                    let mut ticker = interval(Duration::from_secs(defer_time));
                                     ticker.tick().await;
-                                    if cache.len()!=cache.capacity(){
-                                        has_black=true;
-                                    }
+                                    let _ = sender.send(msg).await;
                                 }
-                                cache.push(msg);
                             }
                         }
                         Err(_) => todo!(),

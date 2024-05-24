@@ -17,52 +17,19 @@ use common::{
     util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug},
 };
 use parking_lot::RwLock;
-use std::{fs, path::PathBuf, pin::Pin, vec};
+use std::{fs, path::PathBuf, pin::Pin, time::Duration, vec};
 use tokio::{
     fs::{File, OpenOptions},
-    io::AsyncWriteExt as _,
+    io::{AsyncSeekExt, AsyncWriteExt as _},
     select,
     sync::mpsc::{self, Receiver, Sender},
+    time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
-
-pub struct MessageQueueDisk {
-    dir: PathBuf,
-
-    instant: Manager<InstantMessageMeta>,
-
-    defer: Manager<DeferMessageMeta>,
-
-    tx: Sender<Message>,
-    rx: Receiver<Message>,
-    cancel: CancellationToken,
-}
-
-unsafe impl Send for MessageQueueDisk {}
-unsafe impl Sync for MessageQueueDisk {}
-
-impl MessageQueue for MessageQueueDisk {
-    async fn push(&mut self, msg: Message) -> Result<()> {
-        if msg.is_defer() {
-            self.defer.push(msg).await?;
-            return Ok(());
-        }
-        self.instant.push(msg).await?;
-        Ok(())
-    }
-
-    async fn pop(&mut self) -> Option<Message> {
-        self.rx.recv().await
-    }
-
-    fn stop(&mut self) {
-        self.cancel.cancel();
-    }
-}
 
 pub async fn build_disk_queue(
     dir: PathBuf,
@@ -100,6 +67,7 @@ async fn load_cache(guard: Guard<MessageQueueDisk>) {
     write_defer_to_cache(guard.get().defer.meta.clone(), tx.clone());
     write_instant_to_cache(guard.get().instant.meta.clone(), tx.clone());
 
+    let mut ticker = interval(Duration::from_millis(guard.get().persist_period));
     loop {
         select! {
             _ = CANCEL_TOKEN.cancelled() => {
@@ -108,10 +76,69 @@ async fn load_cache(guard: Guard<MessageQueueDisk>) {
 
             msg_opt = rx.recv() => {
                 if let Some(msg) = msg_opt {
-                    guard.get_mut().push(msg).await;
+                    let _ = guard.get().push_to_cache(msg).await;
+                }
+            }
+
+            _ = ticker.tick() => {
+                let _ = guard.get().send_persist_singal().await;
+            }
+
+            _ = guard.get_mut().recv_persist_singal() => {
+                if let Err(e) = guard.get_mut().persist().await{
+                    eprintln!("persist MessageQueueDisk err: {e:?}");
                 }
             }
         }
+    }
+}
+
+pub struct MessageQueueDisk {
+    dir: PathBuf,
+    instant: Manager<InstantMessageMeta>,
+    defer: Manager<DeferMessageMeta>,
+
+    tx: Sender<Message>,
+    rx: Receiver<Message>,
+
+    /// 持久化因子
+    persist_factor: u64,
+    persist_factor_now: u64,
+
+    /// 持久化周期，单位：ms
+    persist_period: u64,
+
+    persist_singal_tx: Sender<()>,
+    persist_singla_rx: Receiver<()>,
+
+    cancel: CancellationToken,
+}
+
+unsafe impl Send for MessageQueueDisk {}
+unsafe impl Sync for MessageQueueDisk {}
+
+impl MessageQueue for MessageQueueDisk {
+    async fn push(&mut self, msg: Message) -> Result<()> {
+        self.persist_factor_now += 1;
+        if self.persist_factor_now > self.persist_factor {
+            self.persist_factor_now = 0;
+            let _ = self.send_persist_singal().await;
+        }
+        if msg.is_defer() {
+            self.defer.push(msg).await?;
+            return Ok(());
+        }
+        self.instant.push(msg).await?;
+        println!("push msg ");
+        Ok(())
+    }
+
+    async fn pop(&mut self) -> Option<Message> {
+        self.rx.recv().await
+    }
+
+    fn stop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -119,7 +146,7 @@ impl MessageQueueDisk {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         let parent = dir.clone();
         let (tx, rx) = mpsc::channel(1000);
-
+        let (singal_tx, singal_rx) = mpsc::channel(1);
         MessageQueueDisk {
             dir: dir,
             tx,
@@ -137,7 +164,17 @@ impl MessageQueueDisk {
                 max_size_per_file,
             ),
             cancel: CancellationToken::new(),
+            persist_factor: 0,
+            persist_factor_now: 0,
+            persist_period: 0,
+            persist_singal_tx: singal_tx,
+            persist_singla_rx: singal_rx,
         }
+    }
+
+    async fn push_to_cache(&self, msg: Message) -> Result<()> {
+        self.tx.send(msg).await?;
+        Ok(())
     }
 
     pub async fn load(&mut self) -> Result<()> {
@@ -147,8 +184,19 @@ impl MessageQueueDisk {
         Ok(())
     }
 
+    pub async fn send_persist_singal(&self) -> Result<()> {
+        self.persist_singal_tx.send(()).await?;
+        Ok(())
+    }
+
+    pub async fn recv_persist_singal(&mut self) -> Option<()> {
+        self.persist_singla_rx.recv().await
+    }
+
     pub async fn persist(&mut self) -> Result<()> {
+        info!("1111 instant");
         self.instant.persist().await?;
+        info!("2222 defer");
         self.defer.persist().await?;
         Ok(())
     }
@@ -201,8 +249,7 @@ where
         if self.writer.msg_num >= self.max_msg_num_per_file
             || self.writer.msg_size + msg.calc_len() as u64 > self.max_size_per_file
         {
-            let dir = self.dir.join(&self.prefix);
-            self.writer.persist(dir.to_str().unwrap()).await?;
+            self.writer.persist().await?;
             self.rorate()?;
         }
 
@@ -286,9 +333,8 @@ where
     }
 
     pub async fn persist(&mut self) -> Result<()> {
-        let dir = self.dir.join(&self.prefix);
         self.meta.get_mut().persist()?;
-        self.writer.persist(dir.to_str().unwrap()).await?;
+        self.writer.persist().await?;
         Ok(())
     }
 }
@@ -296,10 +342,18 @@ where
 /// 普通消息，一个消息对应一个文件
 pub struct MessageDisk {
     filename: String,
+
+    /// 写入的位置offset
+    offset: u64,
+    /// 当前文件的消息大小
     msg_size: u64,
+    /// 当前文件消息数量
     msg_num: u64,
+
+    /// push来的消存放在内存中
     msgs: RwLock<Vec<Message>>,
 
+    /// 持久化文件的句柄
     fd: Option<RwLock<File>>,
 }
 
@@ -309,6 +363,7 @@ impl MessageDisk {
             filename: String::new(),
             msg_size: 0,
             msg_num: 0,
+            offset: 0,
             msgs: RwLock::new(vec![]),
             fd: None,
         }
@@ -346,6 +401,7 @@ impl MessageDisk {
             match ProtocolHead::parse_from(&mut pfd).await {
                 Ok(h) => {
                     self.msg_size += h.calc_len() as u64;
+                    self.offset = self.msg_size;
                     head = h;
                 }
                 Err(e) => {
@@ -358,6 +414,7 @@ impl MessageDisk {
             match ProtocolBody::parse_from(&mut pfd).await {
                 Ok(body) => {
                     self.msg_size += body.calc_len() as u64;
+                    self.offset = self.msg_size;
                     self.msg_num += 1;
                     if is_debug() {
                         let msg = Message::with_one(head, body);
@@ -377,25 +434,28 @@ impl MessageDisk {
         Ok(())
     }
 
-    pub async fn persist(&mut self, dir: &str) -> Result<()> {
-        {
-            let rg = self.msgs.read();
-            if rg.len() == 0 {
-                return Ok(());
-            }
-        }
+    pub async fn persist(&mut self) -> Result<()> {
         self.init_fd().await?;
 
         let mut wg = self.msgs.write();
+        if wg.len() == 0 {
+            return Ok(());
+        }
         let mut iter = wg.iter();
 
         let mut bts = vec![];
         while let Some(mu) = iter.next() {
-            bts.append(&mut mu.as_bytes());
+            bts.extend(mu.as_bytes());
         }
 
         match self.fd.as_ref() {
-            Some(fd) => fd.write().write(&bts).await?,
+            Some(fd) => {
+                let mut fwg = fd.write();
+                // TODO: 在指定位置写入
+                fwg.seek(std::io::SeekFrom::Start(self.offset)).await?;
+                fwg.write(&bts).await?;
+                self.offset = self.msg_size;
+            }
             None => return Err(anyhow!("not found file handler")),
         };
         wg.clear();
@@ -485,6 +545,7 @@ pub mod tests {
     async fn load_mm() -> MessageQueueDisk {
         let p: &Path = Path::new("../target");
         let mut mm = MessageQueueDisk::new(p.join("message"), 10, 299);
+        mm.persist_factor = 10000;
         match mm.load().await {
             Ok(_) => mm,
             Err(e) => panic!("{e:?}"),
@@ -499,10 +560,11 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_manager_defer_push_and_persist() {
         let mut mm = load_mm().await;
+        println!("load success");
         let mut head = ProtocolHead::new();
         assert_eq!(head.set_version(1).is_ok(), true);
 
-        for i in 0..200 {
+        for i in 0..30 {
             let mut body = ProtocolBody::new();
             // 设置id
             assert_eq!(body.with_id((i + 1000).to_string().as_str()).is_ok(), true);
@@ -519,6 +581,9 @@ pub mod tests {
                 mm.push(Message::with_one(head.clone(), body)).await.is_ok(),
                 true
             );
+            if i / 3 == 0 {
+                assert_eq!(mm.persist().await.is_ok(), true);
+            }
         }
 
         assert_eq!(mm.persist().await.is_ok(), true);
