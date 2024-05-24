@@ -13,10 +13,12 @@ use futures::executor::block_on;
 use inquire::Text;
 use std::env::args;
 use tokio::fs;
+use tokio::net::unix::SocketAddr;
 use tokio::net::TcpSocket;
 use tokio::select;
 use tokio::signal;
 use tokio::sync::mpsc;
+use tracing::info;
 
 const DEFAULT_NAME: &str = "default";
 
@@ -188,6 +190,7 @@ async fn main() -> Result<()> {
     }
     let first = args.nth(1);
     let target = first.as_ref().unwrap().as_str();
+    println!("connect to {target}");
 
     let socket = TcpSocket::new_v4()?;
     let stream = socket.connect(target.parse().unwrap()).await?;

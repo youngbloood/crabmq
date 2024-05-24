@@ -1,7 +1,7 @@
 pub mod disk;
 pub mod dummy;
 
-use crate::{message::Message, protocol::ProtocolBody};
+use crate::message::Message;
 use anyhow::Result;
 use common::global::Guard;
 
@@ -19,7 +19,10 @@ pub trait MessageQueue: Send + Sync {
 }
 
 pub struct MessageManager {
+    /// dummy 和 disk互斥
     dummy: Option<Guard<MessageQueueDummy>>,
+
+    /// dummy 和 disk互斥
     disk: Option<Guard<MessageQueueDisk>>,
 }
 
@@ -28,7 +31,10 @@ impl MessageManager {
         dummy: Option<Guard<MessageQueueDummy>>,
         disk: Option<Guard<MessageQueueDisk>>,
     ) -> Self {
-        MessageManager { dummy, disk }
+        if dummy.is_some() {
+            return MessageManager { dummy, disk: None };
+        }
+        MessageManager { dummy: None, disk }
     }
 
     pub async fn push(&self, msg: Message) -> Result<()> {

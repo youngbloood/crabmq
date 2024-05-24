@@ -1,13 +1,17 @@
 pub mod defer;
 pub mod instant;
 
-use self::{defer::DeferMessageMeta, instant::InstantMessageMeta};
+use self::{
+    defer::{write_defer_to_cache, DeferMessageMeta},
+    instant::{write_instant_to_cache, InstantMessageMeta},
+};
 use super::{MessageManager, MessageQueue};
 use crate::{
     message::Message,
     protocol::{ProtocolBody, ProtocolHead},
 };
 use anyhow::{anyhow, Result};
+use chrono::Local;
 use common::{
     global::{Guard, CANCEL_TOKEN},
     util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug},
@@ -91,7 +95,10 @@ fn calc_cache_length(all_len: usize) -> usize {
 
 /// Load cache message from disk. In order to pop message from disk quickly.
 async fn load_cache(guard: Guard<MessageQueueDisk>) {
-    let sender = guard.get_mut().tx.clone();
+    let (tx, mut rx) = mpsc::channel(1000);
+
+    write_defer_to_cache(guard.get().defer.meta.clone(), tx.clone());
+    write_instant_to_cache(guard.get().instant.meta.clone(), tx.clone());
 
     loop {
         select! {
@@ -99,31 +106,9 @@ async fn load_cache(guard: Guard<MessageQueueDisk>) {
                 return ;
             }
 
-            defer_cache = guard.get_mut().defer.meta.read_to_cache() => {
-                match defer_cache{
-                    Ok(list) => {
-                        let mut iter = list.iter();
-                        while let Some(m) = iter.next(){
-                            let _ = sender.send(m.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-
-                    }
-                }
-            }
-
-            defer_cache = guard.get_mut().instant.meta.read_to_cache() => {
-                match defer_cache{
-                    Ok(list) => {
-                        let mut iter = list.iter();
-                        while let Some(m) = iter.next(){
-                            let _ = sender.send(m.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-
-                    }
+            msg_opt = rx.recv() => {
+                if let Some(msg) = msg_opt {
+                    guard.get_mut().push(msg).await;
                 }
             }
         }
@@ -180,7 +165,7 @@ pub struct Manager<T: MetaManager> {
     factor: u64,
 
     /// 读取消息位置(读取的位置)
-    meta: T,
+    meta: Guard<T>,
 
     /// 每个文件最大消息数量
     max_msg_num_per_file: u64,
@@ -204,7 +189,7 @@ where
             dir,
             prefix: String::new(),
             factor: 0,
-            meta: t,
+            meta: Guard::new(t),
             max_msg_num_per_file,
             max_size_per_file,
             read_pool: Vec::new(),
@@ -223,7 +208,7 @@ where
 
         if msg.is_defer() {
             let id = msg.id();
-            self.meta.update((
+            self.meta.get_mut().update((
                 self.factor,
                 self.writer.msg_size,
                 msg.calc_len() as _,
@@ -231,7 +216,7 @@ where
                 msg.defer_time(),
             ));
         } else {
-            self.meta.update((0, 0, 0, "", 1));
+            self.meta.get_mut().update((0, 0, 0, "", 1));
         }
         self.writer.push(msg);
         Ok(())
@@ -256,7 +241,7 @@ where
 
     pub async fn load(&mut self) -> Result<()> {
         check_and_create_dir(self.dir.to_str().unwrap())?;
-        self.meta.load()?;
+        self.meta.get_mut().load()?;
 
         let rd = fs::read_dir(self.dir.to_str().unwrap())?;
         // u64::MAX: 922_3372_0368_5477_5807
@@ -302,7 +287,7 @@ where
 
     pub async fn persist(&mut self) -> Result<()> {
         let dir = self.dir.join(&self.prefix);
-        self.meta.persist()?;
+        self.meta.get_mut().persist()?;
         self.writer.persist(dir.to_str().unwrap()).await?;
         Ok(())
     }
@@ -419,10 +404,9 @@ impl MessageDisk {
     }
 }
 
-trait MetaManager {
+trait MetaManager: Sync + Send {
     fn new(dir: &str) -> Self;
     async fn consume(&mut self) -> Result<()>;
-    async fn read_to_cache(&mut self) -> Result<Vec<Message>>;
     fn load(&mut self) -> Result<()>;
     fn update(&mut self, args: (u64, u64, u64, &str, u64));
     fn persist(&self) -> Result<()>;
@@ -433,16 +417,57 @@ pub fn gen_filename(factor: u64) -> String {
     format!("{:0>15}", factor)
 }
 
+struct FileHandler {
+    fd: File,
+
+    /// 最后使用的时间戳
+    last: u64,
+}
+
+impl FileHandler {
+    pub fn new(fd: File) -> Self {
+        FileHandler {
+            fd,
+            last: Local::now().timestamp() as u64,
+        }
+    }
+
+    pub async fn parse_message(&mut self) -> Result<(Option<Message>, bool)> {
+        let head: ProtocolHead;
+        let mut rolling = false;
+        let mut fdp = Pin::new(&mut self.fd);
+        match ProtocolHead::parse_from(&mut fdp).await {
+            Ok(h) => head = h,
+            Err(e) => {
+                if e.to_string().contains("eof") {
+                    rolling = true;
+                    return Ok((None, rolling));
+                } else {
+                    return Err(anyhow!(e));
+                }
+            }
+        }
+        match ProtocolBody::parse_from(&mut fdp).await {
+            Ok(body) => return Ok((Some(Message::with_one(head, body)), rolling)),
+            Err(e) => {
+                if e.to_string().contains("eof") {
+                    rolling = true;
+                } else {
+                    return Err(anyhow!(e));
+                }
+            }
+        }
+        return Ok((None, rolling));
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::MessageQueueDisk;
     use crate::{
         message::Message,
         protocol::{ProtocolBody, ProtocolHead},
-        topic::message_manager::{
-            disk::{defer::DeferMessageMeta, instant::InstantMessageMeta, MetaManager as _},
-            MessageQueue as _,
-        },
+        topic::message_manager::{disk::MetaManager as _, MessageQueue as _},
     };
     use bytes::Bytes;
     use std::path::Path;
@@ -477,7 +502,7 @@ pub mod tests {
         let mut head = ProtocolHead::new();
         assert_eq!(head.set_version(1).is_ok(), true);
 
-        for i in 0..10 {
+        for i in 0..200 {
             let mut body = ProtocolBody::new();
             // 设置id
             assert_eq!(body.with_id((i + 1000).to_string().as_str()).is_ok(), true);
@@ -502,59 +527,11 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_manager_defer_consume() {
         init_log();
-        let mut mm = load_mm().await;
-        let pre = mm.defer.meta.list.len();
-        assert_eq!(mm.defer.meta.consume().await.is_ok(), true);
-        let post = mm.defer.meta.list.len();
+        let mm = load_mm().await;
+        let pre = mm.defer.meta.get().list.len();
+        assert_eq!(mm.defer.meta.get_mut().consume().await.is_ok(), true);
+        let post = mm.defer.meta.get().list.len();
         assert_eq!(post + 1, pre);
-    }
-
-    #[tokio::test]
-    async fn test_message_manager_defer_read_to_cache() {
-        init_log();
-        let mut mm = load_mm().await;
-
-        assert_eq!(mm.defer.meta.read_to_cache().await.is_ok(), true);
-    }
-
-    #[tokio::test]
-    async fn test_message_manager_defer_read_to_cache_repeat() {
-        init_log();
-        let mut mm = load_mm().await;
-
-        assert_eq!(mm.defer.meta.read_to_cache().await.is_ok(), true);
-
-        let cache = mm.defer.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len(), 0);
-
-        let cache = mm.defer.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_message_manager_defer_read_to_cache_and_consume() {
-        init_log();
-        let mut mm = load_mm().await;
-
-        assert_eq!(mm.defer.meta.read_to_cache().await.is_ok(), true);
-
-        // consume 1条消息，read_to_cache时会再加载额外1条消息（前提是至少还有1条消息未被消费）
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        let cache = mm.defer.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len() <= 1, true);
-
-        // consume 5条消息，read_to_cache时会再加载额外5条消息（前提是至少还有5条消息未被消费）
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        let cache = mm.defer.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len() <= 5, true)
     }
 
     #[tokio::test]
@@ -585,58 +562,10 @@ pub mod tests {
     #[tokio::test]
     async fn test_message_manager_push_instant_consume() {
         init_log();
-        let mut mm = load_mm().await;
-        let pre = mm.instant.meta.now.left_num;
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        let post = mm.instant.meta.now.left_num;
+        let mm = load_mm().await;
+        let pre = mm.instant.meta.get().now.left_num;
+        assert_eq!(mm.instant.meta.get_mut().consume().await.is_ok(), true);
+        let post = mm.instant.meta.get().now.left_num;
         assert_eq!(post + 1, pre);
-    }
-
-    #[tokio::test]
-    async fn test_message_manager_instant_read_to_cache() {
-        init_log();
-        let mut mm = load_mm().await;
-
-        assert_eq!(mm.instant.meta.read_to_cache().await.is_ok(), true);
-    }
-
-    #[tokio::test]
-    async fn test_message_manager_instant_read_to_cach_repeat() {
-        init_log();
-        let mut mm = load_mm().await;
-
-        assert_eq!(mm.instant.meta.read_to_cache().await.is_ok(), true);
-        let cache = mm.instant.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len(), 0);
-        let cache = mm.instant.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_message_manager_instant_read_to_cache_and_consume() {
-        init_log();
-        let mut mm = load_mm().await;
-
-        assert_eq!(mm.instant.meta.read_to_cache().await.is_ok(), true);
-
-        // consume 1条消息，read_to_cache时会再加载额外1条消息（前提是至少还有1条消息未被消费）
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.persist().is_ok(), true);
-        let cache = mm.instant.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len() <= 1, true);
-
-        // consume 5条消息，read_to_cache时会再加载额外5条消息（前提是至少还有5条消息未被消费）
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.consume().await.is_ok(), true);
-        assert_eq!(mm.instant.meta.persist().is_ok(), true);
-        let cache = mm.instant.meta.read_to_cache().await;
-        assert_eq!(cache.is_ok(), true);
-        assert_eq!(cache.unwrap().len() <= 5, true);
     }
 }

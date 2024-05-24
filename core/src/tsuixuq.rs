@@ -23,7 +23,7 @@ pub struct TsuixuqOption {
     #[arg(long = "log-filename", default_value = "")]
     pub log_filename: String,
 
-    #[arg(long = "log-level", default_value = "debug")]
+    #[arg(long = "log-level", default_value = "trace")]
     pub log_level: String,
 
     #[arg(long = "log-rolling", default_value = "")]
@@ -136,9 +136,8 @@ impl TsuixuqOption {
 
     pub fn init_log(&self) -> Result<()> {
         // 初始化并设置日志格式
-        let suber = tracing_subscriber::fmt()
-            .with_max_level(self.get_log_level())
-            .with_ansi(false);
+        let suber = tracing_subscriber::fmt().with_max_level(self.get_log_level());
+        // .with_ansi(false);
 
         if self.log_dir.len() == 0 && self.log_filename.len() == 0 {
             suber.init();

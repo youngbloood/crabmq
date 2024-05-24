@@ -1,18 +1,39 @@
-use super::{calc_cache_length, gen_filename, MetaManager, SPLIT_CELL};
-use crate::{
-    message::Message,
-    protocol::{ProtocolBody, ProtocolHead},
-};
+use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_CELL};
+use crate::message::Message;
 use anyhow::{anyhow, Result};
-use common::util::{check_and_create_filename, check_exist};
+use common::{
+    global::{Guard, CANCEL_TOKEN},
+    util::{check_and_create_filename, check_exist},
+};
 use std::{
     fs::{read_to_string, write},
     os::unix::fs::MetadataExt,
     path::Path,
-    pin::Pin,
-    vec,
 };
-use tokio::{fs::File, io::AsyncSeekExt};
+use tokio::{fs::File, io::AsyncSeekExt, select, sync::mpsc::Sender};
+
+pub fn write_instant_to_cache(guard: Guard<InstantMessageMeta>, sender: Sender<Message>) {
+    // 查出所有的factor
+    tokio::spawn(async move {
+        loop {
+            select! {
+                _ = CANCEL_TOKEN.cancelled() => {
+                    return;
+                }
+                result = guard.get_mut().next() => {
+                    match result {
+                        Ok((msg_opt,_)) => {
+                            if let Some(msg) = msg_opt {
+                                let _ = sender.send(msg).await;
+                            }
+                        }
+                        Err(_) => todo!(),
+                    }
+                }
+            }
+        }
+    });
+}
 
 pub struct InstantMessageMeta {
     dir: String,
@@ -89,7 +110,7 @@ impl InstantMessageMetaUnit {
 }
 
 impl InstantMessageMeta {
-    async fn read_next(&mut self) -> Result<(Option<Message>, bool)> {
+    async fn next(&mut self) -> Result<(Option<Message>, bool)> {
         let dir = self.dir.as_str();
         let parent = Path::new(dir);
         let mut read_factor = self.now.factor;
@@ -97,25 +118,25 @@ impl InstantMessageMeta {
         let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
         let metadata = fd.metadata().await?;
         let mut offset = self.now.offset;
-        let mut rolling = false;
 
         // 当前offset已经位于文件末，该滚动寻找下一个文件的消息
         if metadata.size() == self.now.offset {
             read_factor += 1;
             let next_filename = parent.join(gen_filename(read_factor));
             if !check_exist(next_filename.to_str().unwrap()) {
-                return Ok((None, rolling));
+                return Ok((None, false));
             }
-            rolling = true;
             fd = File::open(next_filename.to_str().unwrap()).await?;
             offset = 0;
         }
-        fd.seek(std::io::SeekFrom::Start(offset as _)).await?;
-        let mut fdp = Pin::new(&mut fd);
-        let head = ProtocolHead::parse_from(&mut fdp).await?;
-        let body = ProtocolBody::parse_from(&mut fdp).await?;
 
-        Ok((Some(Message::with_one(head, body)), rolling))
+        let mut handler = FileHandler::new(fd);
+        handler
+            .fd
+            .seek(std::io::SeekFrom::Start(offset as _))
+            .await?;
+
+        handler.parse_message().await
     }
 }
 
@@ -130,7 +151,7 @@ impl MetaManager for InstantMessageMeta {
     }
 
     async fn consume(&mut self) -> Result<()> {
-        let (next_msg, rolling) = self.read_next().await?;
+        let (next_msg, rolling) = self.next().await?;
         if rolling {
             self.now.factor += 1;
             self.now.offset = 0;
@@ -147,51 +168,6 @@ impl MetaManager for InstantMessageMeta {
         }
 
         Ok(())
-    }
-
-    async fn read_to_cache(&mut self) -> Result<Vec<Message>> {
-        if self.read_num == 0 {
-            return Ok(vec![]);
-        }
-        let mut read_factor = self.now.factor;
-        let parent = Path::new(self.dir.as_str());
-        let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
-        fd.seek(std::io::SeekFrom::Start(self.now.offset as _))
-            .await?;
-        let mut fdp = Pin::new(&mut fd);
-        let mut list = vec![];
-
-        while self.read_num != 0 {
-            let head: ProtocolHead;
-            match ProtocolHead::parse_from(&mut fdp).await {
-                Ok(h) => head = h,
-                Err(e) => {
-                    if e.to_string().contains("eof") {
-                        read_factor += 1;
-                        fd = File::open(parent.join(gen_filename(read_factor))).await?;
-                        fdp = Pin::new(&mut fd);
-                        continue;
-                    } else {
-                        return Err(anyhow!(e));
-                    }
-                }
-            }
-            match ProtocolBody::parse_from(&mut fdp).await {
-                Ok(body) => list.push(Message::with_one(head, body)),
-                Err(e) => {
-                    if e.to_string().contains("eof") {
-                        read_factor += 1;
-                        fd = File::open(parent.join(gen_filename(read_factor))).await?;
-                        fdp = Pin::new(&mut fd);
-                    } else {
-                        return Err(anyhow!(e));
-                    }
-                }
-            }
-            self.read_num -= 1;
-        }
-
-        Ok(list)
     }
 
     fn meta_filename(&self) -> String {

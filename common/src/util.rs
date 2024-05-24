@@ -33,7 +33,7 @@ pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u
 pub fn check_and_create_dir(dir: &str) -> Result<()> {
     let dir_path = Path::new(dir);
     if !dir_path.exists() {
-        fs::create_dir(dir_path)?;
+        fs::create_dir_all(dir_path).expect("create {dir} failed");
     } else if dir_path.is_file() {
         let parent = dir_path.parent().unwrap();
         return Err(anyhow!(

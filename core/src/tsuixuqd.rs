@@ -30,7 +30,7 @@ impl Tsuixuqd {
             r1 =  tokio::spawn(Self::serve_tcp(
                 self.opt.clone(),
                 self.tsuixuq.clone(),
-            ))=>{
+            )) => {
                 match r1{
                     Ok(v)=>{
                         if let Err(e)=v{

@@ -26,7 +26,7 @@ pub struct TcpServer {
 impl TcpServer {
     pub fn new(
         opt: Guard<TsuixuqOption>,
-        mut tcp_listener: TcpListener,
+        tcp_listener: TcpListener,
         tsuixuq: Guard<Tsuixuq>,
     ) -> Self {
         let (in_tx, in_rx) = mpsc::channel(10000);
@@ -46,13 +46,16 @@ impl TcpServer {
     }
 
     pub async fn serve(&mut self) {
+        info!("start tcp serve");
         loop {
             select! {
                 _ = CANCEL_TOKEN.cancelled() => {
+                    info!("recieve global cancelled");
                     return
                 }
 
                 handle = self.tcp_listener.accept() => {
+                    info!("accept a tcp handler");
                     match handle{
                         Ok((socket,addr)) => {
                             info!("recieve connection from {addr:?}");
@@ -80,6 +83,7 @@ impl TcpServer {
 
                 // 处理从客户端收到的消息
                 msg_opt = self.in_recver.recv() => {
+                    info!("recieve a message from in_recver");
                     if msg_opt.is_none(){
                         continue;
                     }
@@ -112,13 +116,15 @@ impl TcpServer {
 
                 // 处理响应至客户端的消息
                 msg_opt = self.out_recver.recv() => {
-                   let (addr,msg) = msg_opt.unwrap();
-                   let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
-                   let _ = client_guard.get_mut().send_msg(msg).await;
+                    info!("recieve a message from out_recver");
+                    let (addr,msg) = msg_opt.unwrap();
+                    let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
+                    let _ = client_guard.get_mut().send_msg(msg).await;
                 }
 
                 // 删除收到的client
                 addr = CLIENT_DROP_GUARD.recv() => {
+                    info!("drop client message");
                     let address = addr.as_str();
                     self.clients.remove(addr.as_str());
                     self.tsuixuq.get_mut().delete_client_from_channel(addr.as_str()).await;

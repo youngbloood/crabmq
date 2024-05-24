@@ -3,6 +3,7 @@ use clap::Parser;
 use common::global::{self, Guard};
 use core::{tsuixuq::TsuixuqOption, tsuixuqd::Tsuixuqd};
 use tokio::{select, signal};
+use tracing::Level;
 
 #[derive(Parser, Debug)]
 pub struct Config {

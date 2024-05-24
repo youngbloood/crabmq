@@ -38,12 +38,15 @@ pub struct Topic {
     cancel: CancellationToken,
 }
 
-impl Drop for Topic {
-    fn drop(&mut self) {
-        self.queue.stop();
-        self.cancel.cancel();
-    }
-}
+// impl Drop for Topic<T>
+// where
+//     T: MessageQueue,
+// {
+//     fn drop(&mut self) {
+//         self.queue.stop();
+//         self.cancel.cancel();
+//     }
+// }
 
 impl Topic {
     pub fn new(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Self> {

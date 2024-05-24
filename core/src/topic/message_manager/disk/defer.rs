@@ -1,20 +1,51 @@
-use super::{calc_cache_length, gen_filename, MetaManager, SPLIT_CELL, SPLIT_UNIT};
-use crate::{
-    message::Message,
-    protocol::{ProtocolBody, ProtocolHead},
-};
+use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_CELL, SPLIT_UNIT};
+use crate::message::Message;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use common::util::check_and_create_filename;
+use common::global::Guard;
+use common::{global::CANCEL_TOKEN, util::check_and_create_filename};
+use parking_lot::RwLock;
+use std::time::Duration;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::{read_to_string, write},
     path::Path,
-    pin::Pin,
     vec,
 };
-use tokio::{fs::File, io::AsyncSeekExt};
-use tracing::debug;
+use tokio::time::interval;
+use tokio::{fs::File, io::AsyncSeekExt, select, sync::mpsc::Sender};
+
+pub fn write_defer_to_cache(guard: Guard<DeferMessageMeta>, sender: Sender<Message>) {
+    // 循环读取
+    tokio::spawn(async move {
+        loop {
+            select! {
+                _ = CANCEL_TOKEN.cancelled() => {
+                    return;
+                }
+                result = guard.get_mut().next() => {
+                    match result {
+                        Ok(msg_opt) => {
+                            if let Some(msg) = msg_opt {
+                                let cache = &mut guard.get_mut().cache;
+                                let mut has_black = false;
+                                let mut ticker = interval(Duration::from_secs(5));
+                                while !has_black{
+                                    ticker.tick().await;
+                                    if cache.len()!=cache.capacity(){
+                                        has_black=true;
+                                    }
+                                }
+                                cache.push(msg);
+                            }
+                        }
+                        Err(_) => todo!(),
+                    }
+                }
+            }
+        }
+    });
+}
 
 pub struct DeferMessageMeta {
     dir: String,
@@ -22,8 +53,12 @@ pub struct DeferMessageMeta {
     /// 读取的起始位置
     read_start: usize,
 
+    /// 缓存打开的msg文件句柄
+    cache_fds: RwLock<HashMap<String, FileHandler>>,
+
     /// 读取的长度
     read_length: usize,
+    cache: Vec<Message>,
 
     /// 剩余未消费消息的位置信息
     pub list: Vec<DeferMessageMetaUnit>,
@@ -73,8 +108,27 @@ impl DeferMessageMetaUnit {
             .unwrap()
             .parse::<u64>()
             .expect("parse length failed");
-
         Ok(unit)
+    }
+}
+
+impl DeferMessageMeta {
+    pub async fn next(&mut self) -> Result<Option<Message>> {
+        let u = self.list.get(self.read_start).unwrap();
+        let filename = gen_filename(u.factor);
+        let filename_str = gen_filename(u.factor);
+        let mut wg = self.cache_fds.write();
+        if !wg.contains_key(filename_str.as_str()) {
+            let fd = File::open(filename.as_str()).await?;
+            wg.insert(filename, FileHandler::new(fd));
+        }
+        let handler = wg.get_mut(filename_str.as_str()).unwrap();
+        handler.fd.seek(std::io::SeekFrom::Start(u.offset)).await?;
+        let (msg_opt, _) = handler.parse_message().await?;
+        if msg_opt.is_some() {
+            self.read_start += 1;
+        }
+        return Ok(msg_opt);
     }
 }
 
@@ -85,6 +139,8 @@ impl MetaManager for DeferMessageMeta {
             read_start: 0,
             read_length: 0,
             list: vec![],
+            cache: vec![],
+            cache_fds: RwLock::new(HashMap::new()),
         }
     }
 
@@ -99,49 +155,6 @@ impl MetaManager for DeferMessageMeta {
         }
 
         Ok(())
-    }
-
-    async fn read_to_cache(&mut self) -> Result<Vec<Message>> {
-        // 查出所有的factor
-        let cache_length = self.read_length;
-        debug!("read {cache_length} defer message to cache");
-        if cache_length == 0 {
-            return Ok(vec![]);
-        }
-        let wait = &self.list[self.read_start..self.read_start + cache_length];
-        let mut file_set = HashSet::new();
-        wait.iter().for_each(|u| {
-            file_set.insert(u.factor);
-        });
-
-        // 使用factor打开文件句柄
-        let parent = Path::new(self.dir.as_str());
-        let mut file_map = HashMap::new();
-        let mut iter = file_set.iter();
-        while let Some(f) = iter.next() {
-            let filename = parent.join(gen_filename(*f));
-            let fd = File::open(filename).await?;
-            file_map.insert(f, fd);
-        }
-        // 遍历list并从file_map中拿到文件句柄解析数据
-        let mut iter = wait.iter();
-        let mut list = vec![];
-        while let Some(u) = iter.next() {
-            let fd = file_map.get_mut(&u.factor).unwrap();
-            fd.seek(std::io::SeekFrom::Start(u.offset)).await?;
-            let mut p = Pin::new(fd);
-
-            let head = ProtocolHead::parse_from(&mut p).await?;
-            let body = ProtocolBody::parse_from(&mut p).await?;
-
-            let msg = Message::with_one(head, body);
-            debug!("read to cache msg: {msg:?}");
-            list.push(msg);
-            self.read_length -= 1;
-        }
-        self.read_start = cache_length - 1;
-
-        Ok(list)
     }
 
     fn meta_filename(&self) -> String {
@@ -178,6 +191,7 @@ impl MetaManager for DeferMessageMeta {
             self.list.push(unit);
         }
         self.read_length = calc_cache_length(self.list.len());
+        // (self.cache_tx, self.cache_rx) = mpsc::channel(self.read_length);
         Ok(())
     }
 
