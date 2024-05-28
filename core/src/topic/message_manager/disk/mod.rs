@@ -1,5 +1,6 @@
 pub mod defer;
 pub mod instant;
+mod record;
 
 use self::{
     defer::{write_defer_to_cache, DeferMessageMeta},
@@ -11,22 +12,23 @@ use crate::{
     protocol::{ProtocolBody, ProtocolHead},
 };
 use anyhow::{anyhow, Result};
+use bytes::BytesMut;
 use chrono::Local;
 use common::{
     global::{Guard, CANCEL_TOKEN},
     util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug},
 };
 use parking_lot::RwLock;
-use std::{fs, path::PathBuf, pin::Pin, time::Duration, vec};
+use std::{fs, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration, vec};
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncSeekExt, AsyncWriteExt as _},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt as _},
     select,
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
@@ -35,13 +37,21 @@ pub async fn build_disk_queue(
     dir: PathBuf,
     max_msg_num_per_file: u64,
     max_size_per_file: u64,
+    persist_factor: u64,
+    persist_period: u64,
 ) -> Result<MessageManager> {
-    let mut disk_queue = MessageQueueDisk::new(dir, max_msg_num_per_file, max_size_per_file);
+    let mut disk_queue = MessageQueueDisk::new(
+        dir,
+        max_msg_num_per_file,
+        max_size_per_file,
+        persist_factor,
+        persist_period,
+    );
     disk_queue.load().await?;
 
     let guard: Guard<MessageQueueDisk> = Guard::new(disk_queue);
     let guard_ret = guard.clone();
-    tokio::spawn(load_cache(guard));
+    tokio::spawn(load_to_cache(guard));
 
     Ok(MessageManager::new(None, Some(guard_ret)))
 }
@@ -61,8 +71,8 @@ fn calc_cache_length(all_len: usize) -> usize {
 }
 
 /// Load cache message from disk. In order to pop message from disk quickly.
-async fn load_cache(guard: Guard<MessageQueueDisk>) {
-    let (tx, mut rx) = mpsc::channel(1000);
+async fn load_to_cache(guard: Guard<MessageQueueDisk>) {
+    let (tx, mut rx) = mpsc::channel(10);
 
     write_defer_to_cache(guard.get().defer.meta.clone(), tx.clone());
     write_instant_to_cache(guard.get().instant.meta.clone(), tx.clone());
@@ -129,7 +139,6 @@ impl MessageQueue for MessageQueueDisk {
             return Ok(());
         }
         self.instant.push(msg).await?;
-        println!("push msg ");
         Ok(())
     }
 
@@ -143,7 +152,13 @@ impl MessageQueue for MessageQueueDisk {
 }
 
 impl MessageQueueDisk {
-    pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
+    pub fn new(
+        dir: PathBuf,
+        max_msg_num_per_file: u64,
+        max_size_per_file: u64,
+        persist_factor: u64,
+        persist_period: u64,
+    ) -> Self {
         let parent = dir.clone();
         let (tx, rx) = mpsc::channel(1000);
         let (singal_tx, singal_rx) = mpsc::channel(1);
@@ -164,9 +179,9 @@ impl MessageQueueDisk {
                 max_size_per_file,
             ),
             cancel: CancellationToken::new(),
-            persist_factor: 0,
+            persist_factor,
             persist_factor_now: 0,
-            persist_period: 0,
+            persist_period,
             persist_singal_tx: singal_tx,
             persist_singla_rx: singal_rx,
         }
@@ -194,9 +209,7 @@ impl MessageQueueDisk {
     }
 
     pub async fn persist(&mut self) -> Result<()> {
-        info!("1111 instant");
         self.instant.persist().await?;
-        info!("2222 defer");
         self.defer.persist().await?;
         Ok(())
     }
@@ -206,13 +219,10 @@ pub struct Manager<T: MetaManager> {
     /// 消息存放目录
     dir: PathBuf,
 
-    /// 消息存放文件前缀
-    prefix: String,
-
     /// 文件rorate因子
     factor: u64,
 
-    /// 读取消息位置(读取的位置)
+    /// meta信息管理
     meta: Guard<T>,
 
     /// 每个文件最大消息数量
@@ -235,7 +245,6 @@ where
     pub fn new(dir: PathBuf, t: T, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         Manager {
             dir,
-            prefix: String::new(),
             factor: 0,
             meta: Guard::new(t),
             max_msg_num_per_file,
@@ -341,31 +350,38 @@ where
 
 /// 普通消息，一个消息对应一个文件
 pub struct MessageDisk {
+    /// 写入的文件
     filename: String,
 
-    /// 写入的位置offset
-    offset: u64,
-    /// 当前文件的消息大小
-    msg_size: u64,
-    /// 当前文件消息数量
-    msg_num: u64,
+    /// 校验文件中的消息是否合法
+    validate: bool,
+
+    /// 持久化文件的句柄
+    fd: Option<RwLock<File>>,
 
     /// push来的消存放在内存中
     msgs: RwLock<Vec<Message>>,
 
-    /// 持久化文件的句柄
-    fd: Option<RwLock<File>>,
+    /// 写入位置的offset
+    write_offset: u64,
+
+    /// 当前文件的消息大小（8byte）
+    msg_size: u64,
+
+    /// 当前文件消息数量（8byte）
+    msg_num: u64,
 }
 
 impl MessageDisk {
     pub fn new() -> Self {
         MessageDisk {
             filename: String::new(),
-            msg_size: 0,
+            msg_size: 8 + 8,
             msg_num: 0,
-            offset: 0,
+            write_offset: 16,
             msgs: RwLock::new(vec![]),
             fd: None,
+            validate: false,
         }
     }
 
@@ -385,7 +401,6 @@ impl MessageDisk {
             .read(true)
             .write(true)
             .create(true)
-            .append(true)
             .open(self.filename.as_str())
             .await?;
         self.fd = Some(RwLock::new(fd));
@@ -394,14 +409,42 @@ impl MessageDisk {
 
     pub async fn load(&mut self) -> Result<()> {
         self.init_fd().await?;
+        debug!("load from filename: {}", self.filename.as_str());
+
         let fd = self.fd.as_mut().unwrap().get_mut();
         let mut pfd = Pin::new(fd);
+
+        // load msg_size
+        let mut num_buf = BytesMut::new();
+        num_buf.resize(8, 0);
+        pfd.read_exact(&mut num_buf).await?;
+        self.msg_size = u64::from_be_bytes(
+            num_buf
+                .to_vec()
+                .try_into()
+                .expect("convert to u64 array failed"),
+        );
+
+        // load msg_num
+        num_buf.resize(8, 0);
+        pfd.read_exact(&mut num_buf).await?;
+        self.msg_num = u64::from_be_bytes(
+            num_buf
+                .to_vec()
+                .try_into()
+                .expect("convert to u64 array failed"),
+        );
+
+        self.write_offset = self.msg_size;
+
+        if !self.validate {
+            return Ok(());
+        }
+
         loop {
             let head: ProtocolHead;
             match ProtocolHead::parse_from(&mut pfd).await {
                 Ok(h) => {
-                    self.msg_size += h.calc_len() as u64;
-                    self.offset = self.msg_size;
                     head = h;
                 }
                 Err(e) => {
@@ -413,9 +456,6 @@ impl MessageDisk {
             }
             match ProtocolBody::parse_from(&mut pfd).await {
                 Ok(body) => {
-                    self.msg_size += body.calc_len() as u64;
-                    self.offset = self.msg_size;
-                    self.msg_num += 1;
                     if is_debug() {
                         let msg = Message::with_one(head, body);
                         println!("msg = {msg:?}");
@@ -435,13 +475,16 @@ impl MessageDisk {
     }
 
     pub async fn persist(&mut self) -> Result<()> {
-        self.init_fd().await?;
-
-        let mut wg = self.msgs.write();
-        if wg.len() == 0 {
-            return Ok(());
+        {
+            let msgs_rg = self.msgs.read();
+            if msgs_rg.len() == 0 {
+                return Ok(());
+            }
         }
-        let mut iter = wg.iter();
+
+        self.init_fd().await?;
+        let mut msgs_wg = self.msgs.write();
+        let mut iter = msgs_wg.iter();
 
         let mut bts = vec![];
         while let Some(mu) = iter.next() {
@@ -451,14 +494,26 @@ impl MessageDisk {
         match self.fd.as_ref() {
             Some(fd) => {
                 let mut fwg = fd.write();
-                // TODO: 在指定位置写入
-                fwg.seek(std::io::SeekFrom::Start(self.offset)).await?;
-                fwg.write(&bts).await?;
-                self.offset = self.msg_size;
+
+                // 写入msg_size
+                fwg.seek(SeekFrom::Start(0)).await?;
+                fwg.write_all(&self.msg_size.to_be_bytes()).await?;
+
+                // 写入msg_num
+                fwg.seek(SeekFrom::Start(8)).await?;
+                fwg.write_all(&self.msg_num.to_be_bytes()).await?;
+
+                // 在offset位置写入内存中的msgs
+                fwg.seek(SeekFrom::Start(self.write_offset)).await?;
+                fwg.write_all(&bts).await?;
+
+                fwg.sync_all().await?;
+
+                self.write_offset = self.msg_size;
             }
             None => return Err(anyhow!("not found file handler")),
         };
-        wg.clear();
+        msgs_wg.clear();
 
         Ok(())
     }
@@ -530,7 +585,13 @@ pub mod tests {
         topic::message_manager::{disk::MetaManager as _, MessageQueue as _},
     };
     use bytes::Bytes;
+    use common::util::{check_and_create_filename, random_str};
+    use rand::Rng;
     use std::path::Path;
+    use tokio::{
+        fs::OpenOptions,
+        io::{AsyncSeekExt, AsyncWriteExt},
+    };
 
     #[test]
     fn test_factor_file() {
@@ -544,7 +605,7 @@ pub mod tests {
 
     async fn load_mm() -> MessageQueueDisk {
         let p: &Path = Path::new("../target");
-        let mut mm = MessageQueueDisk::new(p.join("message"), 10, 299);
+        let mut mm = MessageQueueDisk::new(p.join("message"), 10, 299, 10, 30);
         mm.persist_factor = 10000;
         match mm.load().await {
             Ok(_) => mm,
@@ -554,7 +615,9 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_message_manager_load() {
-        load_mm().await;
+        let mm = load_mm().await;
+        println!("msg_size = {}", mm.instant.writer.msg_size);
+        println!("msg_num = {}", mm.instant.writer.msg_num);
     }
 
     #[tokio::test]
@@ -600,17 +663,23 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_manager_push_instant_and_persist() {
+    async fn test_message_manager_instant_push_and_persist() {
         let mut mm = load_mm().await;
         let mut head = ProtocolHead::new();
+        assert_eq!(head.set_channel("default").is_ok(), true);
+        assert_eq!(head.set_topic("default-topic").is_ok(), true);
         assert_eq!(head.set_version(1).is_ok(), true);
-        for i in 0..10 {
+        for i in 0..1 {
             let mut body = ProtocolBody::new();
             // 设置id
             assert_eq!(body.with_id((i + 1000).to_string().as_str()).is_ok(), true);
             body.with_ack(true).with_not_ready(false).with_persist(true);
+
+            let mut rng = rand::thread_rng();
+            let length = rng.gen_range(1..20);
+            let body_str = random_str(length as _);
             assert_eq!(
-                body.with_body(Bytes::from_iter(format!("2000000{i}").bytes()))
+                body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))
                     .is_ok(),
                 true
             );
@@ -625,12 +694,44 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_manager_push_instant_consume() {
+    async fn test_message_manager_instant_consume() {
         init_log();
         let mm = load_mm().await;
         let pre = mm.instant.meta.get().now.left_num;
         assert_eq!(mm.instant.meta.get_mut().consume().await.is_ok(), true);
         let post = mm.instant.meta.get().now.left_num;
         assert_eq!(post + 1, pre);
+    }
+
+    #[tokio::test]
+    async fn test_file_seek() {
+        let _ = check_and_create_filename("./test_file_seek");
+
+        let mut fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("./test_file_seek")
+            .await
+            .unwrap();
+        assert_eq!(
+            fd.write("abcdefghijklmnopqrstuvwxyz".as_bytes())
+                .await
+                .is_ok(),
+            true
+        );
+
+        assert_eq!(fd.flush().await.is_ok(), true);
+
+        assert_eq!(fd.seek(std::io::SeekFrom::Start(4)).await.is_ok(), true);
+        assert_eq!(fd.write("EFGH".as_bytes()).await.is_ok(), true);
+        assert_eq!(fd.flush().await.is_ok(), true);
+
+        assert_eq!(fd.seek(std::io::SeekFrom::Start(20)).await.is_ok(), true);
+        assert_eq!(fd.write("UVW".as_bytes()).await.is_ok(), true);
+        assert_eq!(fd.flush().await.is_ok(), true);
+
+        assert_eq!(fd.rewind().await.is_ok(), true);
+        assert_eq!(fd.write("ABC".as_bytes()).await.is_ok(), true);
+        assert_eq!(fd.flush().await.is_ok(), true);
     }
 }

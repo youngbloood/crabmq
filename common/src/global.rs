@@ -131,3 +131,74 @@ impl<T> Drop for Guard<T> {
         debug!("drop the guard of type: {type_name}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU64;
+
+    use super::Guard;
+    use futures::future::join_all;
+    use tokio::{self};
+
+    struct ConcurrentUnsafe {
+        a: u64,
+    }
+
+    struct ConcurrentSafe {
+        a: AtomicU64,
+    }
+
+    // unsafe impl Sync for SS {}
+    // unsafe impl Send for SS {}
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 20)]
+    async fn test_guard_concurrent() {
+        let num = 1_000_000_u64;
+        let guard_safe = Guard::new(ConcurrentSafe {
+            a: AtomicU64::new(0),
+        });
+        let guard_unsafe = Guard::new(ConcurrentUnsafe { a: 0 });
+
+        let mut handlers_safe = vec![];
+        let mut handlers_unsafe = vec![];
+        for i in 0..num {
+            let g_safe = guard_safe.clone();
+            handlers_safe.push(tokio::spawn(async move {
+                g_safe
+                    .get_mut()
+                    .a
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+            }));
+
+            let g_unsafe = guard_unsafe.clone();
+            handlers_unsafe.push(tokio::spawn(async move {
+                g_unsafe.get_mut().a += 1;
+            }));
+        }
+
+        let result_list_safe = join_all(handlers_safe).await;
+        for v in result_list_safe {
+            if let Err(e) = v {
+                eprintln!("safe: {e}");
+            }
+        }
+
+        let result_list_unsafe = join_all(handlers_unsafe).await;
+        for v in result_list_unsafe {
+            if let Err(e) = v {
+                eprintln!("unsafe: {e}");
+            }
+        }
+
+        assert_eq!(
+            guard_safe
+                .get()
+                .a
+                .load(std::sync::atomic::Ordering::Acquire)
+                == num,
+            true,
+        );
+
+        assert_eq!(guard_unsafe.get().a != num, true,)
+    }
+}

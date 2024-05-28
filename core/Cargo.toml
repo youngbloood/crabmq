@@ -23,3 +23,4 @@ parking_lot = { version = "0.12.2", features = ["send_guard"] }
 lazy_static = "1.4.0"
 chrono = "0.4.38"
 semver = "1.0.23"
+rand = { version = "0.8.5", features = ["std_rng"] }

@@ -1,6 +1,7 @@
-use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_CELL, SPLIT_UNIT};
+use super::record::MessageRecord;
+use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_UNIT};
 use crate::message::Message;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytes::BytesMut;
 use chrono::Local;
 use common::global::Guard;
@@ -59,61 +60,17 @@ pub struct DeferMessageMeta {
     read_length: usize,
     cache: Vec<Message>,
 
-    /// 剩余未消费消息的位置信息
-    pub list: Vec<DeferMessageMetaUnit>,
-}
-
-#[derive(Default)]
-pub struct DeferMessageMetaUnit {
-    factor: u64,
-    offset: u64,
-    length: u64,
-    id: String,
-    defer_time: u64,
-}
-
-impl DeferMessageMetaUnit {
-    pub fn format(&self) -> String {
-        format!(
-            "{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{}\n",
-            self.factor, self.offset, self.length, self.id, self.defer_time
-        )
-    }
-
-    pub fn parse_from(line: &str) -> Result<Self> {
-        let cells: Vec<&str> = line.split(SPLIT_CELL).collect();
-        if cells.len() < 5 {
-            return Err(anyhow!("not standard defer meta record"));
-        }
-        let mut unit: DeferMessageMetaUnit = DeferMessageMetaUnit::default();
-        unit.factor = cells
-            .get(0)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse factor failed");
-        unit.offset = cells
-            .get(1)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse offset failed");
-        unit.length = cells
-            .get(2)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse length failed");
-        unit.id = cells.get(3).unwrap().to_string();
-        unit.defer_time = cells
-            .get(4)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse length failed");
-        Ok(unit)
-    }
+    /// defer中，record记录在meta文件中，剩余未消费消息的位置信息
+    pub list: Vec<MessageRecord>,
 }
 
 impl DeferMessageMeta {
     pub async fn next(&mut self) -> Result<Option<Message>> {
-        let u = self.list.get(self.read_start).unwrap();
+        let read_start = self.list.get(self.read_start);
+        if read_start.is_none() {
+            return Ok(None);
+        }
+        let u = read_start.unwrap();
         let filename = gen_filename(u.factor);
         let filename_str = gen_filename(u.factor);
         let mut wg = self.cache_fds.write();
@@ -186,7 +143,7 @@ impl MetaManager for DeferMessageMeta {
             if line.len() == 0 {
                 continue;
             }
-            let unit = DeferMessageMetaUnit::parse_from(*line)?;
+            let unit = MessageRecord::parse_from(*line)?;
             self.list.push(unit);
         }
         self.read_length = calc_cache_length(self.list.len());
@@ -195,7 +152,7 @@ impl MetaManager for DeferMessageMeta {
     }
 
     fn update(&mut self, args: (u64, u64, u64, &str, u64)) {
-        let mut unit = DeferMessageMetaUnit::default();
+        let mut unit = MessageRecord::default();
         unit.factor = args.0;
         unit.offset = args.1;
         unit.length = args.2;

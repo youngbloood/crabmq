@@ -31,6 +31,7 @@ impl TcpServer {
     ) -> Self {
         let (in_tx, in_rx) = mpsc::channel(10000);
         let (out_tx, out_rx) = mpsc::channel(10000);
+        tsuixuq.get_mut().out_sender = Some(out_tx.clone());
         TcpServer {
             in_sender: in_tx,
             in_recver: in_rx,

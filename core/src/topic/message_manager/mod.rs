@@ -4,6 +4,7 @@ pub mod dummy;
 use crate::message::Message;
 use anyhow::Result;
 use common::global::Guard;
+use tracing::debug;
 
 use self::{disk::MessageQueueDisk, dummy::MessageQueueDummy};
 
@@ -38,6 +39,7 @@ impl MessageManager {
     }
 
     pub async fn push(&self, msg: Message) -> Result<()> {
+        debug!("push msg to MessageManager: {msg:?}");
         if let Some(guard) = self.dummy.as_ref() {
             guard.get_mut().push(msg.clone()).await?;
         }

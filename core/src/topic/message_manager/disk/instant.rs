@@ -1,4 +1,7 @@
-use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_CELL};
+use super::{
+    calc_cache_length, gen_filename, record::MessageRecordFile, FileHandler, MetaManager,
+    SPLIT_CELL,
+};
 use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::{
@@ -11,6 +14,7 @@ use std::{
     path::Path,
 };
 use tokio::{fs::File, io::AsyncSeekExt, select, sync::mpsc::Sender};
+use tracing::{error, info};
 
 pub fn write_instant_to_cache(guard: Guard<InstantMessageMeta>, sender: Sender<Message>) {
     // 查出所有的factor
@@ -20,15 +24,19 @@ pub fn write_instant_to_cache(guard: Guard<InstantMessageMeta>, sender: Sender<M
                 _ = CANCEL_TOKEN.cancelled() => {
                     return;
                 }
+
                 result = guard.get_mut().next() => {
                     match result {
                         Ok((msg_opt,_)) => {
                              // TODO: 这里的消息写到InstantMessageMeta自身缓存中，可以多缓存消息数量，提高性能
                             if let Some(msg) = msg_opt {
+                                info!("从instant获取到消息111:{msg:?}");
                                 let _ = sender.send(msg).await;
                             }
                         }
-                        Err(_) => todo!(),
+                        Err(e) => {
+                            error!("{e}");
+                        },
                     }
                 }
             }
@@ -39,15 +47,19 @@ pub fn write_instant_to_cache(guard: Guard<InstantMessageMeta>, sender: Sender<M
 pub struct InstantMessageMeta {
     dir: String,
 
-    /// 从disk解析
+    /// 内存中已经加载了的消息，因此从该位置继续加载
+    pub read_ptr: InstantMessageMetaUnit,
+
+    /// 读取的数量
+    pub read_num: usize,
+
+    /// 从disk解析：meta文件，消费的位置
     pub now: InstantMessageMetaUnit,
 
-    pub read_start_pos: Option<InstantMessageMetaUnit>,
-
-    pub read_num: usize,
+    /// instant消息的record文件
+    pub record: Option<MessageRecordFile>,
 }
 
-#[derive(Default)]
 pub struct InstantMessageMetaUnit {
     /// 总消息数量
     pub msg_num: u64,
@@ -61,6 +73,18 @@ pub struct InstantMessageMetaUnit {
     /// 剩余未消费消息的offset
     pub offset: u64,
     pub length: u64,
+}
+
+impl Default for InstantMessageMetaUnit {
+    fn default() -> Self {
+        Self {
+            msg_num: 0,
+            left_num: 0,
+            factor: 0,
+            offset: 16,
+            length: 0,
+        }
+    }
 }
 
 impl InstantMessageMetaUnit {
@@ -114,21 +138,23 @@ impl InstantMessageMeta {
     async fn next(&mut self) -> Result<(Option<Message>, bool)> {
         let dir = self.dir.as_str();
         let parent = Path::new(dir);
-        let mut read_factor = self.now.factor;
+        let mut read_factor = self.read_ptr.factor;
 
         let mut fd = File::open(parent.join(gen_filename(read_factor))).await?;
         let metadata = fd.metadata().await?;
-        let mut offset = self.now.offset;
+        let mut offset = self.read_ptr.offset;
+        let mut rolling = false;
 
         // 当前offset已经位于文件末，该滚动寻找下一个文件的消息
-        if metadata.size() == self.now.offset {
+        if metadata.size() == self.read_ptr.offset {
             read_factor += 1;
             let next_filename = parent.join(gen_filename(read_factor));
             if !check_exist(next_filename.to_str().unwrap()) {
                 return Ok((None, false));
             }
+            rolling = true;
             fd = File::open(next_filename.to_str().unwrap()).await?;
-            offset = 0;
+            offset = 16;
         }
 
         let mut handler = FileHandler::new(fd);
@@ -137,7 +163,20 @@ impl InstantMessageMeta {
             .seek(std::io::SeekFrom::Start(offset as _))
             .await?;
 
-        handler.parse_message().await
+        match handler.parse_message().await {
+            Ok((msg_opt, _rolling)) => {
+                if rolling {
+                    self.read_ptr.factor += 1;
+                    if msg_opt.is_some() {
+                        self.read_ptr.offset = 16 + msg_opt.as_ref().unwrap().calc_len() as u64;
+                    }
+                } else if msg_opt.is_some() {
+                    self.read_ptr.offset += msg_opt.as_ref().unwrap().calc_len() as u64;
+                }
+                return Ok((msg_opt, rolling));
+            }
+            Err(e) => return Err(anyhow!(e)),
+        }
     }
 }
 
@@ -146,8 +185,9 @@ impl MetaManager for InstantMessageMeta {
         InstantMessageMeta {
             dir: dir.to_string(),
             now: InstantMessageMetaUnit::default(),
-            read_start_pos: None,
+            read_ptr: InstantMessageMetaUnit::default(),
             read_num: 0,
+            record: None,
         }
     }
 
@@ -155,7 +195,7 @@ impl MetaManager for InstantMessageMeta {
         let (next_msg, rolling) = self.next().await?;
         if rolling {
             self.now.factor += 1;
-            self.now.offset = 0;
+            self.now.offset = 16;
         } else {
             if let Some(nm) = next_msg.as_ref() {
                 self.now.offset += nm.calc_len() as u64;
@@ -183,9 +223,10 @@ impl MetaManager for InstantMessageMeta {
     }
 
     fn load(&mut self) -> Result<()> {
-        let filename = self.meta_filename();
-        check_and_create_filename(filename.as_str())?;
-        self.now.parse_from(filename.as_str())?;
+        let metafile = self.meta_filename();
+        check_and_create_filename(metafile.as_str())?;
+        self.now.parse_from(metafile.as_str())?;
+        self.read_ptr.parse_from(metafile.as_str())?;
         self.read_num = calc_cache_length(self.now.left_num as _);
 
         Ok(())
@@ -203,5 +244,28 @@ impl MetaManager for InstantMessageMeta {
         }
         self.now.msg_num += args.4;
         self.now.left_num += args.4;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_instant_message_meta_next() {
+        let mut inst = InstantMessageMeta::new("../target/message/instant");
+        // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
+        println!("1111");
+        if let Err(e) = inst.load() {
+            panic!("{e}");
+        }
+
+        while let Ok((msg_opt, _)) = inst.next().await {
+            if msg_opt.is_none() {
+                break;
+            }
+            let msg = msg_opt.unwrap();
+            println!("msg = {msg:?}");
+        }
     }
 }

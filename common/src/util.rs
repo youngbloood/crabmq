@@ -1,13 +1,18 @@
+use anyhow::{anyhow, Result};
+use futures::Future;
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::{
     env::var,
     fs::{self, File},
     path::Path,
     time::Duration,
 };
-
-use anyhow::{anyhow, Result};
-use futures::Future;
 use tokio::{select, time::interval};
+
+const CAPITAL: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
+const NUMBER: &str = "0123456789";
 
 pub fn type_of<T>(_: T) -> &'static str {
     std::any::type_name::<T>()
@@ -19,15 +24,15 @@ pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u
     ticker.tick().await;
     select! {
         out = fut => {
-            if let Err(e) = out {
-                return Err(anyhow!(e));
+            match out {
+                Err(e) => Err(anyhow!(e)),
+                Ok(v) => Ok(v),
             }
-            return out;
         },
         _ = ticker.tick() => {
             return Err(anyhow!("execute timeout"));
         }
-    };
+    }
 }
 
 pub fn check_and_create_dir(dir: &str) -> Result<()> {
@@ -75,4 +80,13 @@ pub fn is_debug() -> bool {
             return false;
         }
     }
+}
+
+pub fn random_str(length: usize) -> String {
+    let result = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect();
+    result
 }

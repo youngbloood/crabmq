@@ -1,12 +1,16 @@
 use crate::channel::Channel;
 use crate::message::Message;
+use crate::topic::new_topic;
 use crate::topic::Topic;
 use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
 use common::global::Guard;
+use common::util::check_exist;
 use config::{Config, File};
 use std::collections::HashMap;
+use std::fs;
+use std::fs::File as StdFile;
 use tokio::sync::mpsc::Sender;
 use tracing::Level;
 use tracing_appender::rolling::{daily, hourly, minutely, never, RollingFileAppender};
@@ -96,18 +100,26 @@ pub struct TsuixuqOption {
     /// 一个client写入数据超时次数，超过该次数会断开链接
     pub client_write_timeout_count: u64,
 
-    #[arg(long = "message_dir", default_value = "./message")]
+    #[arg(long = "message-dir", default_value = "./message")]
     /// message默认存放的位置
     pub message_dir: String,
 
     /// max_num_per_file * 100 约等于 10G
-    #[arg(long = "max_num_per_file", default_value_t = 107374180)]
+    #[arg(long = "max-num-per-file", default_value_t = 107374180)]
     /// 每个文件最多存放消息数量
     pub max_num_per_file: u64,
 
-    #[arg(long = "max_size_per_file", default_value_t = 10737418240)]
+    #[arg(long = "max-size-per-file", default_value_t = 10737418240)]
     /// 每个文件最多存放消息大小(Byte)，默认5G
     pub max_size_per_file: u64,
+
+    #[arg(long = "persist-message-factor", default_value_t = 50)]
+    /// 每persist_message_factor条消息触发一次消息持久化至磁盘
+    pub persist_message_factor: u64,
+
+    #[arg(long = "persist-message-period", default_value_t = 50)]
+    /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
+    pub persist_message_period: u64,
 }
 
 impl TsuixuqOption {
@@ -173,17 +185,33 @@ impl TsuixuqOption {
 pub struct Tsuixuq {
     opt: Guard<TsuixuqOption>,
     topics: HashMap<String, Guard<Topic>>,
+    pub out_sender: Option<Sender<(String, Message)>>,
 }
 
 unsafe impl Sync for Tsuixuq {}
 unsafe impl Send for Tsuixuq {}
 
 impl Tsuixuq {
-    pub fn new(opt: Guard<TsuixuqOption>) -> Self {
-        Tsuixuq {
+    pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
+        let mut tsuixuq = Tsuixuq {
             opt,
             topics: HashMap::new(),
+            out_sender: None,
+        };
+
+        let message_dir = tsuixuq.opt.get().message_dir.as_str();
+        if !check_exist(message_dir) {
+            return Ok(tsuixuq);
         }
+        for entry in fs::read_dir(tsuixuq.opt.get().message_dir.as_str())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            tsuixuq.get_or_create_topic(entry.file_name().to_str().unwrap(), false)?;
+        }
+
+        Ok(tsuixuq)
     }
 
     pub fn get_or_create_topic(
@@ -199,7 +227,7 @@ impl Tsuixuq {
         }
 
         if !self.topics.contains_key(topic_name) {
-            let topic = Topic::new(self.opt.clone(), topic_name, ephemeral)?.builder();
+            let topic = new_topic(self.opt.clone(), topic_name, ephemeral)?;
             self.topics.insert(topic_name.to_string(), topic.clone());
             return Ok(topic.clone());
         }
@@ -209,13 +237,13 @@ impl Tsuixuq {
 
     pub async fn send_message(
         &mut self,
-        sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Message)>,
         addr: &str,
         msg: Message,
     ) -> Result<()> {
         let topic_name = msg.get_topic();
         let topic = self.get_or_create_topic(topic_name, msg.topic_ephemeral())?;
-        topic.get_mut().send_msg(sender, addr, msg).await?;
+        topic.get_mut().send_msg(out_sender, addr, msg).await?;
         Ok(())
     }
 

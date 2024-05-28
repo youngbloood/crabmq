@@ -2,20 +2,22 @@ pub mod message_manager;
 
 use crate::channel::Channel;
 use crate::message::Message;
-use crate::protocol::ProtocolHead;
 use crate::tsuixuq::TsuixuqOption;
 use anyhow::{anyhow, Result};
 use common::global::{Guard, CANCEL_TOKEN};
 use common::Name;
 use futures::executor::block_on;
+use std::time::Duration;
 use std::{collections::HashMap, path::Path};
 use tokio::select;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
+use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 use self::message_manager::disk::build_disk_queue;
 use self::message_manager::dummy::build_dummy_queue;
-use self::message_manager::{MessageManager, MessageQueue};
+use self::message_manager::MessageManager;
 
 pub struct Topic {
     opt: Guard<TsuixuqOption>,
@@ -30,8 +32,6 @@ pub struct Topic {
     queue: MessageManager,
 
     ephemeral: bool,
-
-    sender: Sender<(String, Message)>,
 
     channels: HashMap<String, Guard<Channel>>,
 
@@ -58,6 +58,8 @@ impl Topic {
                 Path::new(opt.get().message_dir.as_str()).join(name),
                 opt.get().max_num_per_file,
                 opt.get().max_size_per_file,
+                opt.get().persist_message_factor,
+                opt.get().persist_message_period,
             ))?;
         }
 
@@ -73,7 +75,6 @@ impl Topic {
             sub_num: 0,
             queue: queue,
             cancel: CancellationToken::new(),
-            sender: todo!(),
         };
 
         // 每个topic默认有个default的channel
@@ -91,11 +92,15 @@ impl Topic {
 
     pub async fn send_msg(
         &mut self,
-        sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Message)>,
         addr: &str,
         mut msg: Message,
     ) -> Result<()> {
-        let msg_list = msg.split();
+        let mut msg_resp = msg.clone();
+        msg_resp.set_resp()?;
+        out_sender.send((addr.to_string(), msg_resp)).await?;
+
+        let msg_list: Vec<Message> = msg.split();
         let mut iter = msg_list.iter();
         while let Some(msg) = iter.next() {
             // TODO: 处理各种body
@@ -148,9 +153,42 @@ impl Topic {
     }
 }
 
-async fn topic_loop(guard: Guard<Topic>) {
-    let sender = guard.get().sender.clone();
+pub fn new_topic(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Guard<Topic>> {
+    let guard = Guard::new(Topic::new(opt, name, ephemeral)?);
+    let guard_loop = guard.clone();
+    tokio::spawn(topic_loop(guard_loop));
+    Ok(guard)
+}
 
+/// [`topic_has_consumers`] means there is consumers connected and in channel, then will return.
+///
+/// Otherwise this function will be block until any consumer connected.
+pub async fn topic_has_consumers(topic: Guard<Topic>) {
+    let (notify_tx, notify_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(1));
+        loop {
+            select! {
+                _ = CANCEL_TOKEN.cancelled() => {
+                    return;
+                }
+
+                _ = ticker.tick() => {
+                    for (_, chan) in &topic.get().channels {
+                        let rg = chan.get().clients.read();
+                        if rg.len() != 0 {
+                            let _ = notify_tx.send(());
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let _ = notify_rx.await;
+}
+
+async fn topic_loop(guard: Guard<Topic>) {
     loop {
         select! {
             _ = CANCEL_TOKEN.cancelled() => {
@@ -165,13 +203,15 @@ async fn topic_loop(guard: Guard<Topic>) {
                 if msg_opt.is_none(){
                     continue;
                 }
+                // 等待topic下的channel有client接受时，才进行消息的发送
+                topic_has_consumers(guard.clone()).await;
+
                 let msg = msg_opt.unwrap();
                 guard.get().channels.iter().for_each(|(_, chan)| {
                     let chan_guard = chan.clone();
-                    let sender_clone = sender.clone();
                     let msg_clone = msg.clone();
                     tokio::spawn(async move{
-                            let _ = chan_guard.get().send_msg(sender_clone, msg_clone).await;
+                            let _ = chan_guard.get().send_msg( msg_clone).await;
                         });
                 });
             }

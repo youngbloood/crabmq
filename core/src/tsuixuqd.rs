@@ -13,11 +13,11 @@ pub struct Tsuixuqd {
 }
 
 impl Tsuixuqd {
-    pub fn new(opt: Guard<TsuixuqOption>) -> Self {
-        Tsuixuqd {
-            tsuixuq: Guard::new(Tsuixuq::new(opt.clone())),
+    pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
+        Ok(Tsuixuqd {
+            tsuixuq: Guard::new(Tsuixuq::new(opt.clone())?),
             opt,
-        }
+        })
     }
 
     pub fn init(&mut self) -> Result<()> {

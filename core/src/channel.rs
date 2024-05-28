@@ -17,7 +17,7 @@ pub struct Channel {
     msg_sender: Sender<Message>,
     msg_recver: Receiver<Message>,
 
-    clients: RwLock<HashMap<String, Guard<Client>>>,
+    pub clients: RwLock<HashMap<String, Guard<Client>>>,
 }
 
 unsafe impl Sync for Channel {}
@@ -47,7 +47,7 @@ impl Channel {
         rw.insert(addr.to_string(), client_guard);
     }
 
-    pub async fn send_msg(&self, sender: Sender<(String, Message)>, msg: Message) -> Result<()> {
+    pub async fn send_msg(&self, msg: Message) -> Result<()> {
         let rg = self.clients.read();
         let mut iter = rg.iter();
         while let Some((_addr, client)) = iter.next() {

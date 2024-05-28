@@ -3,7 +3,6 @@ use clap::Parser;
 use common::global::{self, Guard};
 use core::{tsuixuq::TsuixuqOption, tsuixuqd::Tsuixuqd};
 use tokio::{select, signal};
-use tracing::Level;
 
 #[derive(Parser, Debug)]
 pub struct Config {
@@ -19,7 +18,7 @@ async fn main() -> Result<()> {
     // 初始化日志subcriber
     opt.init_log()?;
 
-    let mut daemon = Tsuixuqd::new(Guard::new(opt));
+    let mut daemon = Tsuixuqd::new(Guard::new(opt))?;
     select! {
         result =  daemon.serve() => {
             if let Err(err) = result{
