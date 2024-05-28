@@ -71,14 +71,17 @@ impl DeferMessageMeta {
             return Ok(None);
         }
         let u = read_start.unwrap();
-        let filename = gen_filename(u.factor);
-        let filename_str = gen_filename(u.factor);
+        let parent = Path::new(self.dir.as_str());
+        let filename = parent.join(gen_filename(u.factor));
+        let filename_str = filename.to_str().unwrap();
+
         let mut wg = self.cache_fds.write();
-        if !wg.contains_key(filename_str.as_str()) {
-            let fd = File::open(filename.as_str()).await?;
-            wg.insert(filename, FileHandler::new(fd));
+        if !wg.contains_key(filename_str) {
+            let fd = File::open(filename_str).await?;
+            wg.insert(filename_str.to_string(), FileHandler::new(fd));
         }
-        let handler = wg.get_mut(filename_str.as_str()).unwrap();
+
+        let handler = wg.get_mut(filename_str).unwrap();
         handler.fd.seek(std::io::SeekFrom::Start(u.offset)).await?;
         let (msg_opt, _) = handler.parse_message().await?;
         if msg_opt.is_some() {
@@ -130,9 +133,9 @@ impl MetaManager for DeferMessageMeta {
     }
 
     fn load(&mut self) -> Result<()> {
-        let filename = self.meta_filename();
-        check_and_create_filename(filename.as_str())?;
-        let content = read_to_string(filename)?;
+        let metafile = self.meta_filename();
+        check_and_create_filename(metafile.as_str())?;
+        let content = read_to_string(metafile)?;
         if content.len() == 0 {
             return Ok(());
         }
@@ -147,7 +150,6 @@ impl MetaManager for DeferMessageMeta {
             self.list.push(unit);
         }
         self.read_length = calc_cache_length(self.list.len());
-        // (self.cache_tx, self.cache_rx) = mpsc::channel(self.read_length);
         Ok(())
     }
 
@@ -161,5 +163,34 @@ impl MetaManager for DeferMessageMeta {
 
         self.list.push(unit);
         self.list.sort_by_key(|u| u.defer_time);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_defer_message_meta_next() {
+        let mut defer = DeferMessageMeta::new("../target/message/defer");
+        // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
+        if let Err(e) = defer.load() {
+            panic!("{e}");
+        }
+
+        loop {
+            match defer.next().await {
+                Ok(msg_opt) => {
+                    if msg_opt.is_none() {
+                        break;
+                    }
+                    let msg = msg_opt.unwrap();
+                    println!("msg = {msg:?}");
+                }
+                Err(e) => {
+                    panic!("{e}");
+                }
+            }
+        }
     }
 }

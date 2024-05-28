@@ -255,7 +255,6 @@ mod tests {
     async fn test_instant_message_meta_next() {
         let mut inst = InstantMessageMeta::new("../target/message/instant");
         // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
-        println!("1111");
         if let Err(e) = inst.load() {
             panic!("{e}");
         }

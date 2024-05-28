@@ -1,3 +1,4 @@
+pub mod compress;
 pub mod v1;
 
 use self::v1::MessageV1;

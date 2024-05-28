@@ -349,6 +349,8 @@ where
 }
 
 /// 普通消息，一个消息对应一个文件
+///
+/// 格式为<8-bytes msg-size><8-bytes msg-num><msg1><msg2>...<msgn>
 pub struct MessageDisk {
     /// 写入的文件
     filename: String,
@@ -587,7 +589,7 @@ pub mod tests {
     use bytes::Bytes;
     use common::util::{check_and_create_filename, random_str};
     use rand::Rng;
-    use std::path::Path;
+    use std::{io::Read, path::Path};
     use tokio::{
         fs::OpenOptions,
         io::{AsyncSeekExt, AsyncWriteExt},
@@ -635,8 +637,12 @@ pub mod tests {
                 .with_defer_time(100 + i)
                 .with_not_ready(false)
                 .with_persist(true);
+
+            let mut rng = rand::thread_rng();
+            let length = rng.gen_range(5..50);
+            let body_str = random_str(length as _);
             assert_eq!(
-                body.with_body(Bytes::from_iter(format!("2000000{i}").bytes()))
+                body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))
                     .is_ok(),
                 true
             );
