@@ -24,3 +24,4 @@ lazy_static = "1.4.0"
 chrono = "0.4.38"
 semver = "1.0.23"
 rand = { version = "0.8.5", features = ["std_rng"] }
+async-trait = "0.1.80"

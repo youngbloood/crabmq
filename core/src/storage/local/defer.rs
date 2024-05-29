@@ -1,5 +1,6 @@
 use super::record::MessageRecord;
-use super::{calc_cache_length, gen_filename, FileHandler, MetaManager, SPLIT_UNIT};
+use super::{calc_cache_length, FileHandler, SPLIT_UNIT};
+use super::{gen_filename, MetaManager};
 use crate::message::Message;
 use anyhow::Result;
 use bytes::BytesMut;
@@ -17,35 +18,35 @@ use std::{
 use tokio::time::interval;
 use tokio::{fs::File, io::AsyncSeekExt, select, sync::mpsc::Sender};
 
-pub fn write_defer_to_cache(guard: Guard<DeferMessageMeta>, sender: Sender<Message>) {
-    // 循环读取
-    tokio::spawn(async move {
-        loop {
-            select! {
-                _ = CANCEL_TOKEN.cancelled() => {
-                    return;
-                }
+// pub fn write_defer_to_cache(guard: Guard<DeferMessageMeta>, sender: Sender<Message>) {
+//     // 循环读取
+//     tokio::spawn(async move {
+//         loop {
+//             select! {
+//                 _ = CANCEL_TOKEN.cancelled() => {
+//                     return;
+//                 }
 
-                result = guard.get_mut().next() => {
-                    match result {
-                        Ok(msg_opt) => {
-                            if let Some(msg) = msg_opt {
-                                // TODO: 这里的消息写到DeferMessageMeta自身缓存中，可以多缓存消息数量，提高性能
-                                let defer_time = msg.defer_time() - Local::now().timestamp() as u64;
-                                if defer_time > 0 {
-                                    let mut ticker = interval(Duration::from_secs(defer_time));
-                                    ticker.tick().await;
-                                    let _ = sender.send(msg).await;
-                                }
-                            }
-                        }
-                        Err(_) => todo!(),
-                    }
-                }
-            }
-        }
-    });
-}
+//                 result = guard.get_mut().next() => {
+//                     match result {
+//                         Ok(msg_opt) => {
+//                             if let Some(msg) = msg_opt {
+//                                 // TODO: 这里的消息写到DeferMessageMeta自身缓存中，可以多缓存消息数量，提高性能
+//                                 let defer_time = msg.defer_time() - Local::now().timestamp() as u64;
+//                                 if defer_time > 0 {
+//                                     let mut ticker = interval(Duration::from_secs(defer_time));
+//                                     ticker.tick().await;
+//                                     let _ = sender.send(msg).await;
+//                                 }
+//                             }
+//                         }
+//                         Err(_) => todo!(),
+//                     }
+//                 }
+//             }
+//         }
+//     });
+// }
 
 pub struct DeferMessageMeta {
     dir: String,

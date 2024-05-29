@@ -1,7 +1,7 @@
 use crate::channel::Channel;
 use crate::message::Message;
-use crate::topic::new_topic;
-use crate::topic::Topic;
+use crate::topic::topic::new_topic;
+use crate::topic::topic::Topic;
 use anyhow::anyhow;
 use anyhow::Result;
 use clap::Parser;
@@ -120,6 +120,14 @@ pub struct TsuixuqOption {
     #[arg(long = "persist-message-period", default_value_t = 50)]
     /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
     pub persist_message_period: u64,
+
+    #[arg(long = "message-storage-type", default_value = "local")]
+    /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
+    pub message_storage_type: String,
+
+    #[arg(long = "message-cache-type", default_value = "memory")]
+    /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
+    pub message_cache_type: String,
 }
 
 impl TsuixuqOption {

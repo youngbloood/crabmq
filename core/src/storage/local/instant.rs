@@ -4,45 +4,13 @@ use super::{
 };
 use crate::message::Message;
 use anyhow::{anyhow, Result};
-use common::{
-    global::{Guard, CANCEL_TOKEN},
-    util::{check_and_create_filename, check_exist},
-};
+use common::util::{check_and_create_filename, check_exist};
 use std::{
     fs::{read_to_string, write},
     os::unix::fs::MetadataExt,
     path::Path,
 };
-use tokio::{fs::File, io::AsyncSeekExt, select, sync::mpsc::Sender};
-use tracing::{error, info};
-
-pub fn write_instant_to_cache(guard: Guard<InstantMessageMeta>, sender: Sender<Message>) {
-    // 查出所有的factor
-    tokio::spawn(async move {
-        loop {
-            select! {
-                _ = CANCEL_TOKEN.cancelled() => {
-                    return;
-                }
-
-                result = guard.get_mut().next() => {
-                    match result {
-                        Ok((msg_opt,_)) => {
-                             // TODO: 这里的消息写到InstantMessageMeta自身缓存中，可以多缓存消息数量，提高性能
-                            if let Some(msg) = msg_opt {
-                                info!("从instant获取到消息111:{msg:?}");
-                                let _ = sender.send(msg).await;
-                            }
-                        }
-                        Err(e) => {
-                            error!("{e}");
-                        },
-                    }
-                }
-            }
-        }
-    });
-}
+use tokio::{fs::File, io::AsyncSeekExt};
 
 pub struct InstantMessageMeta {
     dir: String,

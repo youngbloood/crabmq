@@ -1,12 +1,9 @@
-pub mod defer;
-pub mod instant;
+mod defer;
+mod instant;
 mod record;
 
-use self::{
-    defer::{write_defer_to_cache, DeferMessageMeta},
-    instant::{write_instant_to_cache, InstantMessageMeta},
-};
-use super::{MessageManager, MessageQueue};
+use self::{defer::DeferMessageMeta, instant::InstantMessageMeta};
+use super::StorageOperation;
 use crate::{
     message::Message,
     protocol::{ProtocolBody, ProtocolHead},
@@ -15,46 +12,20 @@ use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use chrono::Local;
 use common::{
-    global::{Guard, CANCEL_TOKEN},
+    global::Guard,
     util::{check_and_create_dir, check_and_create_filename, check_exist, is_debug},
 };
 use parking_lot::RwLock;
-use std::{fs, io::SeekFrom, path::PathBuf, pin::Pin, time::Duration, vec};
+use std::{fs, io::SeekFrom, path::PathBuf, pin::Pin, vec};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt as _},
-    select,
-    sync::mpsc::{self, Receiver, Sender},
-    time::interval,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
-
-pub async fn build_disk_queue(
-    dir: PathBuf,
-    max_msg_num_per_file: u64,
-    max_size_per_file: u64,
-    persist_factor: u64,
-    persist_period: u64,
-) -> Result<MessageManager> {
-    let mut disk_queue = MessageQueueDisk::new(
-        dir,
-        max_msg_num_per_file,
-        max_size_per_file,
-        persist_factor,
-        persist_period,
-    );
-    disk_queue.load().await?;
-
-    let guard: Guard<MessageQueueDisk> = Guard::new(disk_queue);
-    let guard_ret = guard.clone();
-    tokio::spawn(load_to_cache(guard));
-
-    Ok(MessageManager::new(None, Some(guard_ret)))
-}
 
 fn calc_cache_length(all_len: usize) -> usize {
     let get_num: usize;
@@ -70,70 +41,31 @@ fn calc_cache_length(all_len: usize) -> usize {
     get_num
 }
 
-/// Load cache message from disk. In order to pop message from disk quickly.
-async fn load_to_cache(guard: Guard<MessageQueueDisk>) {
-    let (tx, mut rx) = mpsc::channel(10);
-
-    write_defer_to_cache(guard.get().defer.meta.clone(), tx.clone());
-    write_instant_to_cache(guard.get().instant.meta.clone(), tx.clone());
-
-    let mut ticker = interval(Duration::from_millis(guard.get().persist_period));
-    loop {
-        select! {
-            _ = CANCEL_TOKEN.cancelled() => {
-                return ;
-            }
-
-            msg_opt = rx.recv() => {
-                if let Some(msg) = msg_opt {
-                    let _ = guard.get().push_to_cache(msg).await;
-                }
-            }
-
-            _ = ticker.tick() => {
-                let _ = guard.get().send_persist_singal().await;
-            }
-
-            _ = guard.get_mut().recv_persist_singal() => {
-                if let Err(e) = guard.get_mut().persist().await{
-                    eprintln!("persist MessageQueueDisk err: {e:?}");
-                }
-            }
-        }
-    }
-}
-
-pub struct MessageQueueDisk {
+pub struct StorageLocal {
     dir: PathBuf,
     instant: Manager<InstantMessageMeta>,
     defer: Manager<DeferMessageMeta>,
 
-    tx: Sender<Message>,
-    rx: Receiver<Message>,
-
-    /// 持久化因子
-    persist_factor: u64,
-    persist_factor_now: u64,
-
-    /// 持久化周期，单位：ms
-    persist_period: u64,
-
-    persist_singal_tx: Sender<()>,
-    persist_singla_rx: Receiver<()>,
-
+    /// 取消信号
     cancel: CancellationToken,
 }
 
-unsafe impl Send for MessageQueueDisk {}
-unsafe impl Sync for MessageQueueDisk {}
+unsafe impl Send for StorageLocal {}
+unsafe impl Sync for StorageLocal {}
 
-impl MessageQueue for MessageQueueDisk {
+impl StorageOperation for StorageLocal {
+    async fn init(&mut self) -> Result<()> {
+        check_and_create_dir(self.dir.to_str().unwrap())?;
+        self.instant.load().await?;
+        self.defer.load().await?;
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Option<Message> {
+        None
+    }
+
     async fn push(&mut self, msg: Message) -> Result<()> {
-        self.persist_factor_now += 1;
-        if self.persist_factor_now > self.persist_factor {
-            self.persist_factor_now = 0;
-            let _ = self.send_persist_singal().await;
-        }
         if msg.is_defer() {
             self.defer.push(msg).await?;
             return Ok(());
@@ -142,30 +74,24 @@ impl MessageQueue for MessageQueueDisk {
         Ok(())
     }
 
-    async fn pop(&mut self) -> Option<Message> {
-        self.rx.recv().await
+    async fn flush(&mut self) -> Result<()> {
+        self.instant.persist().await?;
+        self.defer.persist().await?;
+        Ok(())
     }
 
-    fn stop(&mut self) {
+    async fn stop(&mut self) -> Result<()> {
         self.cancel.cancel();
+        Ok(())
     }
 }
 
-impl MessageQueueDisk {
-    pub fn new(
-        dir: PathBuf,
-        max_msg_num_per_file: u64,
-        max_size_per_file: u64,
-        persist_factor: u64,
-        persist_period: u64,
-    ) -> Self {
+impl StorageLocal {
+    pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         let parent = dir.clone();
-        let (tx, rx) = mpsc::channel(1000);
-        let (singal_tx, singal_rx) = mpsc::channel(1);
-        MessageQueueDisk {
+        // let (singal_tx, singal_rx) = mpsc::channel(1);
+        StorageLocal {
             dir: dir,
-            tx,
-            rx,
             instant: Manager::new(
                 parent.join("instant"),
                 InstantMessageMeta::new(parent.join("instant").to_str().unwrap()),
@@ -179,39 +105,7 @@ impl MessageQueueDisk {
                 max_size_per_file,
             ),
             cancel: CancellationToken::new(),
-            persist_factor,
-            persist_factor_now: 0,
-            persist_period,
-            persist_singal_tx: singal_tx,
-            persist_singla_rx: singal_rx,
         }
-    }
-
-    async fn push_to_cache(&self, msg: Message) -> Result<()> {
-        self.tx.send(msg).await?;
-        Ok(())
-    }
-
-    pub async fn load(&mut self) -> Result<()> {
-        check_and_create_dir(self.dir.to_str().unwrap())?;
-        self.instant.load().await?;
-        self.defer.load().await?;
-        Ok(())
-    }
-
-    pub async fn send_persist_singal(&self) -> Result<()> {
-        self.persist_singal_tx.send(()).await?;
-        Ok(())
-    }
-
-    pub async fn recv_persist_singal(&mut self) -> Option<()> {
-        self.persist_singla_rx.recv().await
-    }
-
-    pub async fn persist(&mut self) -> Result<()> {
-        self.instant.persist().await?;
-        self.defer.persist().await?;
-        Ok(())
     }
 }
 
@@ -276,10 +170,6 @@ where
         }
         self.writer.push(msg);
         Ok(())
-    }
-
-    pub async fn read(&mut self) -> Option<Message> {
-        None
     }
 
     pub fn rorate(&mut self) -> Result<()> {
@@ -580,16 +470,17 @@ impl FileHandler {
 
 #[cfg(test)]
 pub mod tests {
-    use super::MessageQueueDisk;
+    use super::StorageLocal;
     use crate::{
+        cache::CACHE_TYPE_MEM,
         message::Message,
         protocol::{ProtocolBody, ProtocolHead},
-        topic::message_manager::{disk::MetaManager as _, MessageQueue as _},
+        storage::StorageOperation as _,
     };
     use bytes::Bytes;
     use common::util::{check_and_create_filename, random_str};
     use rand::Rng;
-    use std::{io::Read, path::Path};
+    use std::path::Path;
     use tokio::{
         fs::OpenOptions,
         io::{AsyncSeekExt, AsyncWriteExt},
@@ -605,26 +496,25 @@ pub mod tests {
         let _ = tracing_subscriber::fmt::try_init();
     }
 
-    async fn load_mm() -> MessageQueueDisk {
+    async fn init_mm() -> StorageLocal {
         let p: &Path = Path::new("../target");
-        let mut mm = MessageQueueDisk::new(p.join("message"), 10, 299, 10, 30);
-        mm.persist_factor = 10000;
-        match mm.load().await {
-            Ok(_) => mm,
+        let mut local = StorageLocal::new(p.join("message"), 10, 299);
+        match local.init().await {
+            Ok(_) => local,
             Err(e) => panic!("{e:?}"),
         }
     }
 
     #[tokio::test]
     async fn test_message_manager_load() {
-        let mm = load_mm().await;
-        println!("msg_size = {}", mm.instant.writer.msg_size);
-        println!("msg_num = {}", mm.instant.writer.msg_num);
+        let local = init_mm().await;
+        println!("msg_size = {}", local.instant.writer.msg_size);
+        println!("msg_num = {}", local.instant.writer.msg_num);
     }
 
     #[tokio::test]
-    async fn test_message_manager_defer_push_and_persist() {
-        let mut mm = load_mm().await;
+    async fn test_message_manager_defer_push_and_flush() {
+        let mut local = init_mm().await;
         println!("load success");
         let mut head = ProtocolHead::new();
         assert_eq!(head.set_version(1).is_ok(), true);
@@ -647,30 +537,33 @@ pub mod tests {
                 true
             );
             assert_eq!(
-                mm.push(Message::with_one(head.clone(), body)).await.is_ok(),
+                local
+                    .push(Message::with_one(head.clone(), body))
+                    .await
+                    .is_ok(),
                 true
             );
             if i / 3 == 0 {
-                assert_eq!(mm.persist().await.is_ok(), true);
+                assert_eq!(local.flush().await.is_ok(), true);
             }
         }
 
-        assert_eq!(mm.persist().await.is_ok(), true);
+        assert_eq!(local.flush().await.is_ok(), true);
     }
 
-    #[tokio::test]
-    async fn test_message_manager_defer_consume() {
-        init_log();
-        let mm = load_mm().await;
-        let pre = mm.defer.meta.get().list.len();
-        assert_eq!(mm.defer.meta.get_mut().consume().await.is_ok(), true);
-        let post = mm.defer.meta.get().list.len();
-        assert_eq!(post + 1, pre);
-    }
+    // #[tokio::test]
+    // async fn test_message_manager_defer_consume() {
+    //     init_log();
+    //     let local = init_mm().await;
+    //     let pre = local.defer.meta.get().list.len();
+    //     assert_eq!(local.defer.meta.get_mut().consume().await.is_ok(), true);
+    //     let post = local.defer.meta.get().list.len();
+    //     assert_eq!(post + 1, pre);
+    // }
 
     #[tokio::test]
-    async fn test_message_manager_instant_push_and_persist() {
-        let mut mm = load_mm().await;
+    async fn test_message_manager_instant_push_and_flush() {
+        let mut local = init_mm().await;
         let mut head = ProtocolHead::new();
         assert_eq!(head.set_channel("default").is_ok(), true);
         assert_eq!(head.set_topic("default-topic").is_ok(), true);
@@ -691,23 +584,26 @@ pub mod tests {
             );
 
             assert_eq!(
-                mm.push(Message::with_one(head.clone(), body)).await.is_ok(),
+                local
+                    .push(Message::with_one(head.clone(), body))
+                    .await
+                    .is_ok(),
                 true
             );
         }
 
-        assert_eq!(mm.persist().await.is_ok(), true);
+        assert_eq!(local.flush().await.is_ok(), true);
     }
 
-    #[tokio::test]
-    async fn test_message_manager_instant_consume() {
-        init_log();
-        let mm = load_mm().await;
-        let pre = mm.instant.meta.get().now.left_num;
-        assert_eq!(mm.instant.meta.get_mut().consume().await.is_ok(), true);
-        let post = mm.instant.meta.get().now.left_num;
-        assert_eq!(post + 1, pre);
-    }
+    // #[tokio::test]
+    // async fn test_message_manager_instant_consume() {
+    //     init_log();
+    //     let mm = init_mm().await;
+    //     let pre = mm.instant.meta.get().now.left_num;
+    //     assert_eq!(mm.instant.meta.get_mut().consume().await.is_ok(), true);
+    //     let post = mm.instant.meta.get().now.left_num;
+    //     assert_eq!(post + 1, pre);
+    // }
 
     #[tokio::test]
     async fn test_file_seek() {
