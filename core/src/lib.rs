@@ -3,7 +3,6 @@ mod channel;
 mod client;
 mod compress;
 pub mod conn;
-mod disk_queue;
 pub mod error;
 pub mod message;
 pub mod protocol;
