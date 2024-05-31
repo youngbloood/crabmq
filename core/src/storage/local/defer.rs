@@ -4,50 +4,20 @@ use super::{gen_filename, MetaManager};
 use crate::message::Message;
 use anyhow::Result;
 use bytes::BytesMut;
-use chrono::Local;
-use common::global::Guard;
-use common::{global::CANCEL_TOKEN, util::check_and_create_filename};
+use common::util::check_and_create_filename;
 use parking_lot::RwLock;
-use std::time::Duration;
+use std::fs::OpenOptions;
+use std::io::{SeekFrom, Write};
 use std::{
     collections::HashMap,
     fs::{read_to_string, write},
     path::Path,
     vec,
 };
-use tokio::time::interval;
-use tokio::{fs::File, io::AsyncSeekExt, select, sync::mpsc::Sender};
+use tokio::{fs::File, io::AsyncSeekExt};
+use tracing::debug;
 
-// pub fn write_defer_to_cache(guard: Guard<DeferMessageMeta>, sender: Sender<Message>) {
-//     // 循环读取
-//     tokio::spawn(async move {
-//         loop {
-//             select! {
-//                 _ = CANCEL_TOKEN.cancelled() => {
-//                     return;
-//                 }
-
-//                 result = guard.get_mut().next() => {
-//                     match result {
-//                         Ok(msg_opt) => {
-//                             if let Some(msg) = msg_opt {
-//                                 // TODO: 这里的消息写到DeferMessageMeta自身缓存中，可以多缓存消息数量，提高性能
-//                                 let defer_time = msg.defer_time() - Local::now().timestamp() as u64;
-//                                 if defer_time > 0 {
-//                                     let mut ticker = interval(Duration::from_secs(defer_time));
-//                                     ticker.tick().await;
-//                                     let _ = sender.send(msg).await;
-//                                 }
-//                             }
-//                         }
-//                         Err(_) => todo!(),
-//                     }
-//                 }
-//             }
-//         }
-//     });
-// }
-
+#[derive(Debug)]
 pub struct DeferMessageMeta {
     dir: String,
 
@@ -59,6 +29,7 @@ pub struct DeferMessageMeta {
 
     /// 读取的长度
     read_length: usize,
+
     cache: Vec<Message>,
 
     /// defer中，record记录在meta文件中，剩余未消费消息的位置信息
@@ -83,11 +54,10 @@ impl DeferMessageMeta {
         }
 
         let handler = wg.get_mut(filename_str).unwrap();
-        handler.fd.seek(std::io::SeekFrom::Start(u.offset)).await?;
+        let offset = u.offset;
+        handler.fd.seek(SeekFrom::Start(u.offset)).await?;
         let (msg_opt, _) = handler.parse_message().await?;
-        if msg_opt.is_some() {
-            self.read_start += 1;
-        }
+        self.read_start += 1;
         return Ok(msg_opt);
     }
 }
@@ -113,22 +83,6 @@ impl MetaManager for DeferMessageMeta {
             self.read_start -= 1;
             self.read_length += 1;
         }
-
-        Ok(())
-    }
-
-    fn meta_filename(&self) -> String {
-        let parent = Path::new(self.dir.as_str());
-        parent.join("meta").to_str().unwrap().to_string()
-    }
-
-    fn persist(&self) -> Result<()> {
-        let mut content = BytesMut::new();
-        let mut iter = self.list.iter();
-        while let Some(unit) = iter.next() {
-            content.extend(unit.format().as_bytes());
-        }
-        write(self.meta_filename(), content)?;
 
         Ok(())
     }
@@ -164,6 +118,22 @@ impl MetaManager for DeferMessageMeta {
 
         self.list.push(unit);
         self.list.sort_by_key(|u| u.defer_time);
+    }
+
+    fn persist(&self) -> Result<()> {
+        let mut content = BytesMut::new();
+        let mut iter = self.list.iter();
+        while let Some(unit) = iter.next() {
+            content.extend(unit.format().as_bytes());
+        }
+        write(self.meta_filename(), content)?;
+
+        Ok(())
+    }
+
+    fn meta_filename(&self) -> String {
+        let parent = Path::new(self.dir.as_str());
+        parent.join("meta").to_str().unwrap().to_string()
     }
 }
 

@@ -7,11 +7,14 @@ use anyhow::{anyhow, Result};
 use common::util::{check_and_create_filename, check_exist};
 use std::{
     fs::{read_to_string, write},
+    io::SeekFrom,
     os::unix::fs::MetadataExt,
     path::Path,
 };
 use tokio::{fs::File, io::AsyncSeekExt};
+use tracing::warn;
 
+#[derive(Debug)]
 pub struct InstantMessageMeta {
     dir: String,
 
@@ -28,6 +31,7 @@ pub struct InstantMessageMeta {
     pub record: Option<MessageRecordFile>,
 }
 
+#[derive(Debug)]
 pub struct InstantMessageMetaUnit {
     /// 总消息数量
     pub msg_num: u64,
@@ -103,7 +107,7 @@ impl InstantMessageMetaUnit {
 }
 
 impl InstantMessageMeta {
-    async fn next(&mut self) -> Result<(Option<Message>, bool)> {
+    pub async fn next(&mut self) -> Result<(Option<Message>, bool)> {
         let dir = self.dir.as_str();
         let parent = Path::new(dir);
         let mut read_factor = self.read_ptr.factor;
@@ -118,6 +122,10 @@ impl InstantMessageMeta {
             read_factor += 1;
             let next_filename = parent.join(gen_filename(read_factor));
             if !check_exist(next_filename.to_str().unwrap()) {
+                // warn!(
+                //     "next instant file {} not exist",
+                //     next_filename.to_str().unwrap()
+                // );
                 return Ok((None, false));
             }
             rolling = true;
@@ -126,10 +134,7 @@ impl InstantMessageMeta {
         }
 
         let mut handler = FileHandler::new(fd);
-        handler
-            .fd
-            .seek(std::io::SeekFrom::Start(offset as _))
-            .await?;
+        handler.fd.seek(SeekFrom::Start(offset as _)).await?;
 
         match handler.parse_message().await {
             Ok((msg_opt, _rolling)) => {

@@ -1,5 +1,7 @@
 use crate::channel::Channel;
 use crate::message::Message;
+use crate::message_manager::new_message_manager;
+use crate::message_manager::MessageManager;
 use crate::topic::topic::new_topic;
 use crate::topic::topic::Topic;
 use anyhow::anyhow;
@@ -8,10 +10,12 @@ use clap::Parser;
 use common::global::Guard;
 use common::util::check_exist;
 use config::{Config, File};
+use futures::executor::block_on;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File as StdFile;
 use tokio::sync::mpsc::Sender;
+use tracing::debug;
 use tracing::Level;
 use tracing_appender::rolling::{daily, hourly, minutely, never, RollingFileAppender};
 
@@ -192,6 +196,7 @@ impl TsuixuqOption {
 
 pub struct Tsuixuq {
     opt: Guard<TsuixuqOption>,
+    mm: Guard<MessageManager>,
     topics: HashMap<String, Guard<Topic>>,
     pub out_sender: Option<Sender<(String, Message)>>,
 }
@@ -202,21 +207,25 @@ unsafe impl Send for Tsuixuq {}
 impl Tsuixuq {
     pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
         let mut tsuixuq = Tsuixuq {
-            opt,
+            mm: block_on(new_message_manager(opt.clone()))?,
             topics: HashMap::new(),
             out_sender: None,
+            opt,
         };
 
         let message_dir = tsuixuq.opt.get().message_dir.as_str();
         if !check_exist(message_dir) {
             return Ok(tsuixuq);
         }
+        debug!("Tsuixuq: message_dir = {message_dir}");
         for entry in fs::read_dir(tsuixuq.opt.get().message_dir.as_str())? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            tsuixuq.get_or_create_topic(entry.file_name().to_str().unwrap(), false)?;
+            let topic_name = entry.file_name();
+            debug!("Tsuixuq: load topic: {}", topic_name.to_str().unwrap());
+            tsuixuq.get_or_create_topic(topic_name.to_str().unwrap(), false)?;
         }
 
         Ok(tsuixuq)
@@ -235,7 +244,7 @@ impl Tsuixuq {
         }
 
         if !self.topics.contains_key(topic_name) {
-            let topic = new_topic(self.opt.clone(), topic_name, ephemeral)?;
+            let topic = new_topic(self.opt.clone(), self.mm.clone(), topic_name, ephemeral)?;
             self.topics.insert(topic_name.to_string(), topic.clone());
             return Ok(topic.clone());
         }
@@ -244,6 +253,19 @@ impl Tsuixuq {
     }
 
     pub async fn send_message(
+        &mut self,
+        out_sender: Sender<(String, Message)>,
+        addr: &str,
+        msg: Message,
+    ) -> Result<()> {
+        let topic_name = msg.get_topic();
+        let topic = self.get_or_create_topic(topic_name, msg.topic_ephemeral())?;
+        topic.get_mut().send_msg(out_sender, addr, msg).await?;
+        Ok(())
+    }
+
+    /// 将消息发下至consumers
+    pub async fn deliver_message(
         &mut self,
         out_sender: Sender<(String, Message)>,
         addr: &str,

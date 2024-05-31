@@ -1,39 +1,52 @@
-use super::{dummy::Dummy, local::StorageLocal, StorageOperation, STORAGE_TYPE_LOCAL};
+use super::STORAGE_TYPE_DUMMY;
+use super::{dummy::Dummy, local::StorageLocal, STORAGE_TYPE_LOCAL};
 use crate::message::Message;
+use crate::tsuixuq::Tsuixuq;
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
+use enum_dispatch::enum_dispatch;
+use std::sync::atomic::Ordering::SeqCst;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};
 use tokio::{
     select,
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
+use tracing::error;
 
+// #[async_trait::async_trait]
+#[enum_dispatch]
+pub trait StorageOperation {
+    /// init the Storage Media.
+    async fn init(&mut self) -> Result<()>;
+
+    /// return the next defer Message from Storage Media.
+    async fn next_defer(&self) -> Result<Option<Message>>;
+
+    /// return the next instant Message from Storage Media.
+    async fn next_instant(&self) -> Result<Option<Message>>;
+
+    /// push a message into Storage.
+    async fn push(&mut self, _: Message) -> Result<()>;
+
+    /// flush the messages to Storage Media.
+    async fn flush(&self) -> Result<()>;
+
+    /// stop the Storage Media.
+    async fn stop(&self) -> Result<()>;
+
+    // fn topic_create(&self)->Result<()>;
+
+    // TODO: 增加如何接口
+    // comsume(&mut self,id:&str)->Result<()>;
+    // ready(&mut self,id:&str)->Result<()>;
+    // delete(&mut self,id:&str)->Result<()>;
+}
+
+#[enum_dispatch(StorageOperation)]
 pub enum StorageEnum {
     Local(StorageLocal),
     Memory(Dummy),
-}
-
-impl StorageOperation for StorageEnum {
-    async fn init(&mut self) -> Result<()> {
-        todo!()
-    }
-
-    async fn next(&mut self) -> Option<Message> {
-        todo!()
-    }
-
-    async fn push(&mut self, _: Message) -> Result<()> {
-        todo!()
-    }
-
-    async fn flush(&mut self) -> Result<()> {
-        todo!()
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        todo!()
-    }
 }
 
 pub struct StorageWrapper {
@@ -50,12 +63,44 @@ pub struct StorageWrapper {
 }
 
 impl StorageWrapper {
-    pub async fn push(&self, msg: Message) -> Result<()> {
-        Ok(())
+    fn new(inner: StorageEnum, persist_period: u64, persist_factor: u64) -> Self {
+        let (singal_tx, singal_rx) = mpsc::channel(1);
+        StorageWrapper {
+            inner,
+            persist_period,
+            persist_factor,
+            persist_factor_now: AtomicU64::new(0),
+            persist_singal_tx: singal_tx,
+            persist_singla_rx: singal_rx,
+        }
     }
 
-    pub async fn next(&self) -> Option<Message> {
-        None
+    pub async fn push(&mut self, msg: Message) -> Result<()> {
+        self.persist_factor_now.fetch_add(1, SeqCst);
+        if self.persist_factor_now.load(SeqCst) >= self.persist_factor {
+            let _ = self.send_persist_singal().await;
+        }
+        self.inner.push(msg).await
+    }
+
+    pub async fn next_defer(&self) -> Option<Message> {
+        match self.inner.next_defer().await {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("get defer message failed: {e:?}");
+                None
+            }
+        }
+    }
+
+    pub async fn next_instant(&self) -> Option<Message> {
+        match self.inner.next_instant().await {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("get instant message failed: {e:?}");
+                None
+            }
+        }
     }
 
     pub async fn send_persist_singal(&self) -> Result<()> {
@@ -89,20 +134,22 @@ async fn storage_wrapper_loop(guard: Guard<StorageWrapper>) {
     }
 }
 
-pub fn new_storage_wrapper(
+pub async fn new_storage_wrapper(
     storage_type: &str,
     dir: PathBuf,
     max_msg_num_per_file: u64,
     max_size_per_file: u64,
     persist_factor: u64,
     persist_period: u64,
-) -> Guard<StorageWrapper> {
-    let storage = match storage_type {
+) -> Result<Guard<StorageWrapper>> {
+    let mut storage = match storage_type {
         STORAGE_TYPE_LOCAL => StorageEnum::Local(StorageLocal::new(
             dir,
             max_msg_num_per_file,
             max_size_per_file,
         )),
+
+        STORAGE_TYPE_DUMMY => StorageEnum::Memory(Dummy::new(100)),
 
         _ => StorageEnum::Local(StorageLocal::new(
             dir,
@@ -110,18 +157,10 @@ pub fn new_storage_wrapper(
             max_size_per_file,
         )),
     };
+    storage.init().await?;
 
-    let (singal_tx, singal_rx) = mpsc::channel(1);
-    let storage_wrapper = StorageWrapper {
-        inner: storage,
-        persist_period,
-        persist_factor,
-        persist_factor_now: AtomicU64::new(0),
-        persist_singal_tx: singal_tx,
-        persist_singla_rx: singal_rx,
-    };
-
+    let storage_wrapper = StorageWrapper::new(storage, persist_period, persist_factor);
     let guard = Guard::new(storage_wrapper);
     tokio::spawn(storage_wrapper_loop(guard.clone()));
-    guard
+    Ok(guard)
 }

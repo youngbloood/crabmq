@@ -1,6 +1,6 @@
-use super::message_manager::{new_message_manager, MessageManager};
 use crate::channel::Channel;
 use crate::message::Message;
+use crate::message_manager::{new_message_manager, MessageManager};
 use crate::tsuixuq::TsuixuqOption;
 use anyhow::{anyhow, Result};
 use common::global::{Guard, CANCEL_TOKEN};
@@ -34,7 +34,12 @@ pub struct Topic {
 }
 
 impl Topic {
-    pub fn new(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Self> {
+    pub fn new(
+        opt: Guard<TsuixuqOption>,
+        mm: Guard<MessageManager>,
+        name: &str,
+        ephemeral: bool,
+    ) -> Result<Self> {
         let n = Name::new(name);
         let opt_clone = opt.clone();
         let mut topic = Topic {
@@ -46,7 +51,7 @@ impl Topic {
             message_bytes: 0,
             pub_num: 0,
             sub_num: 0,
-            queue: new_message_manager(opt_clone, ephemeral),
+            queue: mm,
             cancel: CancellationToken::new(),
         };
 
@@ -126,8 +131,13 @@ impl Topic {
     }
 }
 
-pub fn new_topic(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Guard<Topic>> {
-    let guard = Guard::new(Topic::new(opt, name, ephemeral)?);
+pub fn new_topic(
+    opt: Guard<TsuixuqOption>,
+    mm: Guard<MessageManager>,
+    name: &str,
+    ephemeral: bool,
+) -> Result<Guard<Topic>> {
+    let guard = Guard::new(Topic::new(opt, mm, name, ephemeral)?);
     let guard_loop = guard.clone();
     tokio::spawn(topic_loop(guard_loop));
     Ok(guard)

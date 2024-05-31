@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod exterior;
 pub mod memory;
 
 pub const CACHE_TYPE_MEM: &str = "momery";
@@ -10,9 +11,12 @@ use anyhow::Result;
 ///
 /// In order to get Message quickly.
 pub trait CacheOperation {
-    /// push a message into cache.
-    async fn push(&mut self, _: Message) -> Result<()>;
+    /// push a message into cache. it will be block if the cache is filled.
+    async fn push(&self, _: Message) -> Result<()>;
 
-    /// pop a message from cache.
-    async fn pop(&mut self) -> Option<Message>;
+    /// pop a message from cache. if it is defer message, cache should control it pop when it's expired. or pop the None
+    async fn pop(&self) -> Option<Message>;
+
+    /// resize the buffer length in cache.
+    async fn resize(&self, size: usize) -> Result<()>;
 }

@@ -52,6 +52,7 @@ impl MessageRecord {
 }
 
 /// instant消息的record单独存放在一个文件中
+#[derive(Debug)]
 pub struct MessageRecordFile {
     filename: String,
     write_offset: u64,

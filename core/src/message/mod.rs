@@ -118,19 +118,10 @@ impl Message {
         match self {
             Self::V1(v1) => {
                 let mut size = v1.head.calc_len();
-                let head_size = size;
-                let mut body_size = 0;
                 v1.bodys.list.iter().for_each(|body| {
                     size += body.calc_len();
-                    body_size += body.calc_len();
                 });
 
-                println!(
-                    "all-size={}, head-size={}, body-size={}",
-                    head_size + body_size,
-                    head_size,
-                    body_size
-                );
                 size
             }
             _ => unreachable!(),

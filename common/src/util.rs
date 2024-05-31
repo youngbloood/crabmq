@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use futures::executor::block_on;
 use futures::Future;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -8,7 +9,9 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tokio::{select, time::interval};
+use tokio::join;
+use tokio::time::Interval;
+use tokio::{select, time::interval as async_interval};
 
 const CAPITAL: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
@@ -20,8 +23,7 @@ pub fn type_of<T>(_: T) -> &'static str {
 
 /// [`execute_timeout`] execute the [`fut`] in timeout interval. It will return Err when timeout or fur return a Err.
 pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u64) -> Result<T> {
-    let mut ticker = interval(Duration::from_secs(timeout));
-    ticker.tick().await;
+    let mut ticker = interval(Duration::from_secs(timeout)).await;
     select! {
         out = fut => {
             match out {
@@ -89,4 +91,10 @@ pub fn random_str(length: usize) -> String {
         .map(char::from)
         .collect();
     result
+}
+
+pub async fn interval(dur: Duration) -> Interval {
+    let mut ticker = async_interval(dur);
+    ticker.tick().await;
+    ticker
 }

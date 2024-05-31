@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.81"
+anyhow = "1.0.86"
 bytes = "1.6.0"
 common = { version = "0.1.0", path = "../common" }
 tokio = { version = "1.37.0", features = ["full", "tracing"] }
@@ -25,3 +25,5 @@ chrono = "0.4.38"
 semver = "1.0.23"
 rand = { version = "0.8.5", features = ["std_rng"] }
 async-trait = "0.1.80"
+dynamic_queue = { version = "0.1.1", git = "https://github.com/youngbloood/dynamic_queue.git", tag = "0.1.1" }
+enum_dispatch = "0.3.13"
