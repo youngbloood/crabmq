@@ -1,23 +1,22 @@
-use std::vec;
-
 use crate::message::Message;
 use anyhow::Result;
-use chrono::Local;
+use common::global::Guard;
 use dynamic_queue::{DynamicQueue, Queue};
-use parking_lot::RwLock;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 pub type Memory = DynamicQueue<Message>;
 
 pub struct MessageCache {
-    defer: RwLock<Vec<Message>>,
-    instant: RwLock<Vec<Message>>,
+    sender: UnboundedSender<Message>,
+    recver: Guard<UnboundedReceiver<Message>>,
 }
 
 impl MessageCache {
-    pub fn new(defer_len: usize, instant_len: usize) -> Self {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
         MessageCache {
-            defer: RwLock::new(Vec::with_capacity(defer_len)),
-            instant: RwLock::new(Vec::with_capacity(instant_len)),
+            sender: tx,
+            recver: Guard::new(rx),
         }
     }
 }
@@ -27,35 +26,11 @@ impl Queue for MessageCache {
     type Item = Message;
 
     async fn push(&self, msg: Message) -> Result<()> {
-        if msg.is_defer() {
-            let mut wg = self.defer.write();
-            wg.push(msg);
-            return Ok(());
-        }
-        let mut wg = self.instant.write();
-        wg.push(msg);
+        self.sender.send(msg)?;
         Ok(())
     }
 
     async fn pop(&self) -> Option<Message> {
-        let mut should_pop_defer: bool = false;
-        {
-            let rg = self.defer.read();
-            if rg.len() != 0 {
-                let seek_msg = rg.get(0).unwrap();
-                let now = Local::now().timestamp();
-                if seek_msg.defer_time() <= now as u64 {
-                    should_pop_defer = true
-                }
-            }
-        }
-
-        if should_pop_defer {
-            let mut wg = self.defer.write();
-            return wg.pop();
-        }
-
-        let mut wg = self.instant.write();
-        wg.pop()
+        self.recver.get_mut().recv().await
     }
 }

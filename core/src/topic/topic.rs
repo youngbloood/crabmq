@@ -1,6 +1,6 @@
 use crate::channel::Channel;
 use crate::message::Message;
-use crate::message_manager::{new_message_manager, MessageManager};
+use crate::message_manager::MessageManager;
 use crate::tsuixuq::TsuixuqOption;
 use anyhow::{anyhow, Result};
 use common::global::{Guard, CANCEL_TOKEN};
@@ -17,14 +17,12 @@ use tokio_util::sync::CancellationToken;
 pub struct Topic {
     opt: Guard<TsuixuqOption>,
 
-    name: Name,
+    pub name: Name,
     message_count: u64, // 消息的数量
     message_bytes: u64, // 消息的大小
 
     pub_num: u64, // publisher的数量
     sub_num: u64, // subscriber的数量
-
-    queue: Guard<MessageManager>,
 
     ephemeral: bool,
 
@@ -34,12 +32,7 @@ pub struct Topic {
 }
 
 impl Topic {
-    pub fn new(
-        opt: Guard<TsuixuqOption>,
-        mm: Guard<MessageManager>,
-        name: &str,
-        ephemeral: bool,
-    ) -> Result<Self> {
+    pub fn new(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Self> {
         let n = Name::new(name);
         let opt_clone = opt.clone();
         let mut topic = Topic {
@@ -51,7 +44,6 @@ impl Topic {
             message_bytes: 0,
             pub_num: 0,
             sub_num: 0,
-            queue: mm,
             cancel: CancellationToken::new(),
         };
 
@@ -68,27 +60,36 @@ impl Topic {
         Guard::new(self)
     }
 
-    pub async fn send_msg(
-        &mut self,
-        out_sender: Sender<(String, Message)>,
-        addr: &str,
-        msg: Message,
-    ) -> Result<()> {
-        let mut msg_resp = msg.clone();
-        msg_resp.set_resp()?;
-        out_sender.send((addr.to_string(), msg_resp)).await?;
-
-        let msg_list: Vec<Message> = msg.split();
-        let mut iter = msg_list.iter();
-        while let Some(msg) = iter.next() {
-            // TODO: 处理各种body
-            self.queue.get_mut().push(msg.clone()).await?;
-            // if body.is_ack() {}
-            // if body.is_persist() {}
+    /// 将消息发下至consumers
+    pub async fn deliver_message(&self, msg: Message) -> Result<()> {
+        let mut iter = self.channels.iter();
+        while let Some((_, chan)) = iter.next() {
+            chan.get().send_msg(msg.clone()).await?;
         }
-
         Ok(())
     }
+
+    // pub async fn send_msg(
+    //     &mut self,
+    //     out_sender: Sender<(String, Message)>,
+    //     addr: &str,
+    //     msg: Message,
+    // ) -> Result<()> {
+    //     let mut msg_resp = msg.clone();
+    //     msg_resp.set_resp()?;
+    //     out_sender.send((addr.to_string(), msg_resp)).await?;
+
+    //     let msg_list: Vec<Message> = msg.split();
+    //     let mut iter = msg_list.iter();
+    //     while let Some(msg) = iter.next() {
+    //         // TODO: 处理各种body
+    //         self.queue.get_mut().push(msg.clone()).await?;
+    //         // if body.is_ack() {}
+    //         // if body.is_persist() {}
+    //     }
+
+    //     Ok(())
+    // }
 
     pub fn get_mut_channel(&mut self, chan_name: &str) -> Result<Guard<Channel>> {
         let topic = self.name.as_str();
@@ -131,15 +132,8 @@ impl Topic {
     }
 }
 
-pub fn new_topic(
-    opt: Guard<TsuixuqOption>,
-    mm: Guard<MessageManager>,
-    name: &str,
-    ephemeral: bool,
-) -> Result<Guard<Topic>> {
-    let guard = Guard::new(Topic::new(opt, mm, name, ephemeral)?);
-    let guard_loop = guard.clone();
-    tokio::spawn(topic_loop(guard_loop));
+pub fn new_topic(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Guard<Topic>> {
+    let guard = Guard::new(Topic::new(opt, name, ephemeral)?);
     Ok(guard)
 }
 
@@ -171,33 +165,33 @@ pub async fn topic_has_consumers(topic: Guard<Topic>) {
     let _ = notify_rx.await;
 }
 
-async fn topic_loop(guard: Guard<Topic>) {
-    loop {
-        select! {
-            _ = CANCEL_TOKEN.cancelled() => {
-                return;
-            }
+// async fn topic_loop(guard: Guard<Topic>) {
+//     loop {
+//         select! {
+//             _ = CANCEL_TOKEN.cancelled() => {
+//                 return;
+//             }
 
-            _ = guard.get().cancel.cancelled() => {
-                return ;
-            }
+//             _ = guard.get().cancel.cancelled() => {
+//                 return ;
+//             }
 
-            msg_opt = guard.get().queue.get_mut().pop() => {
-                if msg_opt.is_none(){
-                    continue;
-                }
-                // 等待topic下的channel有client接受时，才进行消息的发送
-                topic_has_consumers(guard.clone()).await;
+//             msg_opt = guard.get().queue.get_mut().pop() => {
+//                 if msg_opt.is_none(){
+//                     continue;
+//                 }
+//                 // 等待topic下的channel有client接受时，才进行消息的发送
+//                 topic_has_consumers(guard.clone()).await;
 
-                let msg = msg_opt.unwrap();
-                guard.get().channels.iter().for_each(|(_, chan)| {
-                    let chan_guard = chan.clone();
-                    let msg_clone = msg.clone();
-                    tokio::spawn(async move{
-                            let _ = chan_guard.get().send_msg( msg_clone).await;
-                        });
-                });
-            }
-        }
-    }
-}
+//                 let msg = msg_opt.unwrap();
+//                 guard.get().channels.iter().for_each(|(_, chan)| {
+//                     let chan_guard = chan.clone();
+//                     let msg_clone = msg.clone();
+//                     tokio::spawn(async move{
+//                             let _ = chan_guard.get().send_msg( msg_clone).await;
+//                         });
+//                 });
+//             }
+//         }
+//     }
+// }

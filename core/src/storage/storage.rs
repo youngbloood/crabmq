@@ -1,33 +1,31 @@
+use super::dummy::TopicDummyBase;
 use super::STORAGE_TYPE_DUMMY;
 use super::{dummy::Dummy, local::StorageLocal, STORAGE_TYPE_LOCAL};
-use crate::message::Message;
+use crate::message::{convert_to_resp, Message};
 use crate::tsuixuq::Tsuixuq;
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use enum_dispatch::enum_dispatch;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};
 use tokio::{
     select,
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
-use tracing::error;
 
-// #[async_trait::async_trait]
+#[async_trait::async_trait]
 #[enum_dispatch]
 pub trait StorageOperation {
     /// init the Storage Media.
-    async fn init(&mut self) -> Result<()>;
+    async fn init(&self) -> Result<()>;
 
-    /// return the next defer Message from Storage Media.
-    async fn next_defer(&self) -> Result<Option<Message>>;
-
-    /// return the next instant Message from Storage Media.
-    async fn next_instant(&self) -> Result<Option<Message>>;
-
-    /// push a message into Storage.
-    async fn push(&mut self, _: Message) -> Result<()>;
+    /// get or create a topic
+    async fn get_or_create_topic(&self, topic_name: &str) -> Result<Arc<Box<dyn TopicOperation>>>;
 
     /// flush the messages to Storage Media.
     async fn flush(&self) -> Result<()>;
@@ -35,9 +33,31 @@ pub trait StorageOperation {
     /// stop the Storage Media.
     async fn stop(&self) -> Result<()>;
 
-    // fn topic_create(&self)->Result<()>;
+    // TODO: 增加如下接口
+    // comsume(&mut self,id:&str)->Result<()>;
+    // ready(&mut self,id:&str)->Result<()>;
+    // delete(&mut self,id:&str)->Result<()>;
+}
 
-    // TODO: 增加如何接口
+#[async_trait::async_trait]
+pub trait TopicOperation: Send + Sync {
+    /// return the topic name.
+    fn name(&self) -> &str;
+
+    /// return the next defer Message from Storage Media.
+    ///
+    /// If there is no message return. Storage Media should block this function until return Ok(Some(message))
+    async fn next_defer(&self) -> Result<Option<Message>>;
+
+    /// return the next instant Message from Storage Media.
+    ///
+    /// If there is no message return. Storage Media should block this function until return Ok(Some(message))
+    async fn next_instant(&self) -> Result<Option<Message>>;
+
+    /// push a message into topic.
+    async fn push(&self, msg: Message) -> Result<()>;
+
+    // TODO: 增加如下接口
     // comsume(&mut self,id:&str)->Result<()>;
     // ready(&mut self,id:&str)->Result<()>;
     // delete(&mut self,id:&str)->Result<()>;
@@ -60,6 +80,8 @@ pub struct StorageWrapper {
 
     persist_singal_tx: Sender<()>,
     persist_singla_rx: Receiver<()>,
+
+    ephemeral_topics: RwLock<HashMap<String, Arc<Box<dyn TopicOperation>>>>,
 }
 
 impl StorageWrapper {
@@ -72,35 +94,31 @@ impl StorageWrapper {
             persist_factor_now: AtomicU64::new(0),
             persist_singal_tx: singal_tx,
             persist_singla_rx: singal_rx,
+            ephemeral_topics: RwLock::new(HashMap::new()),
         }
     }
 
-    pub async fn push(&mut self, msg: Message) -> Result<()> {
-        self.persist_factor_now.fetch_add(1, SeqCst);
-        if self.persist_factor_now.load(SeqCst) >= self.persist_factor {
-            let _ = self.send_persist_singal().await;
-        }
-        self.inner.push(msg).await
-    }
-
-    pub async fn next_defer(&self) -> Option<Message> {
-        match self.inner.next_defer().await {
-            Ok(msg) => msg,
-            Err(e) => {
-                error!("get defer message failed: {e:?}");
-                None
+    pub async fn get_or_create_topic(
+        &self,
+        topic_name: &str,
+        ephemeral: bool,
+    ) -> Result<Arc<Box<dyn TopicOperation>>> {
+        if ephemeral {
+            if !self.ephemeral_topics.read().contains_key(topic_name) {
+                let topic = Arc::new(Box::new(Guard::new(TopicDummyBase::new(topic_name, 100)))
+                    as Box<dyn TopicOperation>);
+                self.ephemeral_topics
+                    .write()
+                    .insert(topic_name.to_string(), topic.clone());
             }
+            return Ok(self
+                .ephemeral_topics
+                .read()
+                .get(topic_name)
+                .unwrap()
+                .clone());
         }
-    }
-
-    pub async fn next_instant(&self) -> Option<Message> {
-        match self.inner.next_instant().await {
-            Ok(msg) => msg,
-            Err(e) => {
-                error!("get instant message failed: {e:?}");
-                None
-            }
-        }
+        self.inner.get_or_create_topic(topic_name).await
     }
 
     pub async fn send_persist_singal(&self) -> Result<()> {
@@ -110,6 +128,27 @@ impl StorageWrapper {
 
     pub async fn recv_persist_singal(&mut self) -> Option<()> {
         self.persist_singla_rx.recv().await
+    }
+
+    pub async fn push(
+        &self,
+        out_sender: Sender<(String, Message)>,
+        addr: &str,
+        msg: Message,
+    ) -> Result<()> {
+        let topic_storage = self
+            .get_or_create_topic(msg.get_topic(), msg.topic_ephemeral())
+            .await?;
+
+        if self.persist_factor_now.load(SeqCst) > self.persist_factor {
+            self.inner.flush().await?;
+        }
+        topic_storage.push(msg.clone()).await?;
+        // 可能client已经关闭，忽略该err
+        let _ = out_sender
+            .send((addr.to_string(), convert_to_resp(msg)))
+            .await;
+        Ok(())
     }
 }
 
@@ -142,7 +181,7 @@ pub async fn new_storage_wrapper(
     persist_factor: u64,
     persist_period: u64,
 ) -> Result<Guard<StorageWrapper>> {
-    let mut storage = match storage_type {
+    let storage = match storage_type {
         STORAGE_TYPE_LOCAL => StorageEnum::Local(StorageLocal::new(
             dir,
             max_msg_num_per_file,

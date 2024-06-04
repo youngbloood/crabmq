@@ -1,7 +1,9 @@
-use super::{memory::Memory, CacheOperation, CACHE_TYPE_MEM};
+use super::{
+    memory::{Memory, MessageCache},
+    CacheOperation, CACHE_TYPE_MEM,
+};
 use crate::message::Message;
 use anyhow::Result;
-use dynamic_queue::DefaultQueue;
 use std::ops::Deref;
 
 pub enum CacheEnum {
@@ -25,6 +27,7 @@ impl CacheOperation for CacheEnum {
         match self {
             CacheEnum::Memory(mem) => mem.resize(size),
         }
+        Ok(())
     }
 }
 
@@ -36,12 +39,12 @@ impl CacheWrapper {
     pub fn new(cache_type: &str, size: usize) -> Self {
         match cache_type {
             CACHE_TYPE_MEM => {
-                let cache = CacheEnum::Memory(Memory::new(size, DefaultQueue::new(10)));
+                let cache = CacheEnum::Memory(Memory::new(size, MessageCache::new()));
                 CacheWrapper { inner: cache }
             }
 
             _ => {
-                let cache = CacheEnum::Memory(Memory::new(size, DefaultQueue::new(10)));
+                let cache = CacheEnum::Memory(Memory::new(size, MessageCache::new()));
                 CacheWrapper { inner: cache }
             }
         }

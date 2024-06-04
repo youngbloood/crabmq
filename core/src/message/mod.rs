@@ -169,3 +169,12 @@ impl Message {
         }
     }
 }
+
+pub fn convert_to_resp(msg: Message) -> Message {
+    let mut resp_msg = msg.clone();
+    match &mut resp_msg {
+        Message::Null => unreachable!(),
+        Message::V1(ref mut v1) => v1.head.set_flag_resq(true),
+    };
+    resp_msg
+}

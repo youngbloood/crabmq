@@ -98,21 +98,8 @@ impl TcpServer {
                         error!(addr = addr, "init msg error: {e}");
                         continue;
                     }
-
                     let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
-                    let addr = addr.as_str();
-                    match msg.action() {
-                        ACTION_FIN => self.fin(addr, msg).await,
-                        ACTION_RDY => self.rdy(addr, msg).await,
-                        ACTION_REQ => self.req(addr, msg).await,
-                        ACTION_PUB => self.publish(addr, msg).await,
-                        ACTION_NOP => self.nop(addr, msg).await,
-                        ACTION_TOUCH => self.touch(addr, msg).await,
-                        ACTION_SUB => self.sub(addr, msg, client_guard).await,
-                        ACTION_CLS =>self.cls(addr, msg).await,
-                        ACTION_AUTH => self.auth(addr, msg).await,
-                        _ => unreachable!(),
-                    }
+                    self.tsuixuq.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),msg).await;
                 }
 
                 // 处理响应至客户端的消息
@@ -151,53 +138,4 @@ impl TcpServer {
 
         (None, true)
     }
-
-    //============================ Handle Action ==============================//
-    pub async fn fin(&self, addr: &str, msg: Message) {}
-
-    pub async fn rdy(&self, addr: &str, msg: Message) {}
-
-    pub async fn publish(&self, addr: &str, msg: Message) {
-        let daemon = self.tsuixuq.get_mut();
-        let _ = daemon
-            .send_message(self.out_sender.clone(), addr, msg)
-            .await;
-    }
-    pub async fn req(&self, addr: &str, msg: Message) {}
-
-    pub async fn nop(&self, addr: &str, msg: Message) {}
-
-    pub async fn touch(&self, addr: &str, msg: Message) {}
-
-    pub async fn sub(&self, addr: &str, msg: Message, guard: Guard<Client>) {
-        let topic_name = msg.get_topic();
-        let chan_name = msg.get_channel();
-
-        let tsuixuq = self.tsuixuq.clone();
-        let daemon = tsuixuq.get_mut();
-        let topic = daemon
-            .get_or_create_topic(topic_name, msg.topic_ephemeral())
-            .expect("get topic err");
-        let chan = topic.get_mut().get_create_mut_channel(chan_name);
-        chan.get_mut().set_client(addr, guard);
-        info!(addr = addr, "sub topic: {topic_name}, channel: {chan_name}",);
-        let _ = self
-            .out_sender
-            .send((addr.to_string(), msg_with_resp(msg)))
-            .await;
-    }
-
-    pub async fn cls(&self, addr: &str, msg: Message) {}
-
-    pub async fn auth(&self, addr: &str, msg: Message) {}
-    //============================ Handle Action ==============================//
-}
-
-fn msg_with_resp(msg: Message) -> Message {
-    let mut resp_msg = msg.clone();
-    match &mut resp_msg {
-        Message::Null => unreachable!(),
-        Message::V1(ref mut v1) => v1.head.set_flag_resq(true),
-    };
-    resp_msg
 }

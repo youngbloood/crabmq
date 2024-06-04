@@ -470,8 +470,8 @@ checksum = "0d6ef0072f8a535281e4876be788938b528e9a1d43900b82c2569af7da799125"
 
 [[package]]
 name = "dynamic_queue"
-version = "0.1.1"
-source = "git+https://github.com/youngbloood/dynamic_queue.git?tag=0.1.1#8a4da92120dc54fa4661e76ceec16a4439b9a101"
+version = "0.1.2"
+source = "git+https://github.com/youngbloood/dynamic_queue.git?tag=0.1.2#39b3c7b425dd5b3d4aba64dcf3d9e95a772095c5"
 dependencies = [
  "anyhow",
  "async-trait",

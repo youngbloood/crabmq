@@ -1,5 +1,4 @@
 pub mod cache;
-pub mod exterior;
 pub mod memory;
 
 pub const CACHE_TYPE_MEM: &str = "momery";
