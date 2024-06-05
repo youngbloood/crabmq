@@ -57,24 +57,7 @@ impl Tsuixuqd {
         let tsuixuq_clone: Guard<Tsuixuq> = tsuixuq.clone();
         let opt_arc = opt.clone();
 
-        match tokio::spawn(async move {
-            info!("start listen port: {}", tcp_port);
-            match TcpListener::bind(format!("127.0.0.1:{}", tcp_port)).await {
-                Err(err) => {
-                    return Err(anyhow!("listen port failed: {err}"));
-                }
-                Ok(tcp_listener) => {
-                    // 将处理tcp_listener单独放到一个Future中处理
-                    tokio::spawn(async move {
-                        let mut tcp_server = TcpServer::new(opt_arc, tcp_listener, tsuixuq_clone);
-                        tcp_server.serve().await;
-                    });
-                    return Ok(());
-                }
-            }
-        })
-        .await
-        {
+        match tokio::spawn(binding(tcp_port, opt_arc, tsuixuq_clone)).await {
             Ok(v) => {
                 if let Err(e) = v {
                     return Err(anyhow!(e));
@@ -87,5 +70,21 @@ impl Tsuixuqd {
 
         global::CANCEL_TOKEN.cancelled().await;
         Ok(())
+    }
+}
+
+async fn binding(port: u32, opt: Guard<TsuixuqOption>, tsuixuq: Guard<Tsuixuq>) -> Result<()> {
+    info!("start listen port: {}", port);
+    match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+        Err(err) => Err(anyhow!("listen port failed: {err}")),
+        Ok(tcp_listener) => {
+            // 将处理tcp_listener单独放到一个Future中处理
+            tokio::spawn(async move {
+                let mut tcp_server = TcpServer::new(opt, tcp_listener, tsuixuq);
+                tcp_server.serve().await;
+            });
+
+            Ok(())
+        }
     }
 }

@@ -2,17 +2,14 @@ use crate::client::Client;
 use crate::message::Message;
 use crate::message_manager::new_message_manager;
 use crate::message_manager::MessageManager;
-use crate::protocol::*;
 use anyhow::Result;
 use clap::Parser;
 use common::global::Guard;
 use config::{Config, File};
 use futures::executor::block_on;
 use tokio::sync::mpsc::Sender;
-use tracing::debug;
-use tracing::info;
 use tracing::Level;
-use tracing_appender::rolling::{daily, hourly, minutely, never, RollingFileAppender};
+use tracing_appender::rolling::{daily, hourly, minutely, never};
 
 const DEFAULT_BUFFER: u64 = 10000;
 const DEFAULT_FACTOR: u16 = 100;
@@ -35,7 +32,7 @@ pub struct TsuixuqOption {
 
     #[arg(short = 'p', long = "port", default_value_t = 3890)]
     /// tcp监听端口
-    pub tcp_port: u16,
+    pub tcp_port: u32,
 
     #[arg(long = "msg-num-buffer", default_value_t = DEFAULT_BUFFER as u16)]
     /// 客户端发送的params缓存数量
@@ -132,7 +129,7 @@ pub struct TsuixuqOption {
 impl TsuixuqOption {
     pub fn from_config(filename: &str) -> Result<TsuixuqOption> {
         let mut opt = TsuixuqOption::parse();
-        if filename.len() != 0 {
+        if !filename.is_empty() {
             let cfg = Config::builder()
                 .add_source(File::with_name(filename))
                 .build()?;
@@ -158,29 +155,17 @@ impl TsuixuqOption {
         let suber = tracing_subscriber::fmt().with_max_level(self.get_log_level());
         // .with_ansi(false);
 
-        if self.log_dir.len() == 0 && self.log_filename.len() == 0 {
+        if self.log_dir.is_empty() && self.log_filename.is_empty() {
             suber.init();
             return Ok(());
         }
 
-        let appender: RollingFileAppender;
-        match self.log_rolling.as_str() {
-            "hourly" => {
-                appender = hourly(self.log_dir.as_str(), self.log_filename.as_str());
-            }
-
-            "minutely" => {
-                appender = minutely(self.log_dir.as_str(), self.log_filename.as_str());
-            }
-
-            "never" => {
-                appender = never(self.log_dir.as_str(), self.log_filename.as_str());
-            }
-
-            _ => {
-                appender = daily(self.log_dir.as_str(), self.log_filename.as_str());
-            }
-        }
+        let appender = match self.log_rolling.as_str() {
+            "hourly" => hourly(self.log_dir.as_str(), self.log_filename.as_str()),
+            "minutely" => minutely(self.log_dir.as_str(), self.log_filename.as_str()),
+            "never" => never(self.log_dir.as_str(), self.log_filename.as_str()),
+            _ => daily(self.log_dir.as_str(), self.log_filename.as_str()),
+        };
 
         let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
         suber.with_writer(non_blocking).init();
@@ -200,7 +185,7 @@ unsafe impl Send for Tsuixuq {}
 
 impl Tsuixuq {
     pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
-        let mut tsuixuq = Tsuixuq {
+        let tsuixuq = Tsuixuq {
             mm: block_on(new_message_manager(opt.clone()))?,
             out_sender: None,
             opt,

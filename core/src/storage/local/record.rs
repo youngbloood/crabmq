@@ -25,28 +25,30 @@ impl MessageRecord {
         if cells.len() < 5 {
             return Err(anyhow!("not standard defer meta record"));
         }
-        let mut unit: MessageRecord = MessageRecord::default();
-        unit.factor = cells
-            .get(0)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse factor failed");
-        unit.offset = cells
-            .get(1)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse offset failed");
-        unit.length = cells
-            .get(2)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse length failed");
-        unit.id = cells.get(3).unwrap().to_string();
-        unit.defer_time = cells
-            .get(4)
-            .unwrap()
-            .parse::<u64>()
-            .expect("parse length failed");
+        let unit = MessageRecord {
+            factor: cells
+                .first()
+                .unwrap()
+                .parse::<u64>()
+                .expect("parse factor failed"),
+            offset: cells
+                .get(1)
+                .unwrap()
+                .parse::<u64>()
+                .expect("parse offset failed"),
+            length: cells
+                .get(2)
+                .unwrap()
+                .parse::<u64>()
+                .expect("parse length failed"),
+            id: cells.get(3).unwrap().to_string(),
+            defer_time: cells
+                .get(4)
+                .unwrap()
+                .parse::<u64>()
+                .expect("parse length failed"),
+        };
+
         Ok(unit)
     }
 }
@@ -72,17 +74,17 @@ impl MessageRecordFile {
         let filename = self.filename.as_str();
         check_and_create_filename(filename)?;
         let content = read_to_string(filename)?;
-        if content.len() == 0 {
+        if content.is_empty() {
             return Ok(());
         }
 
         let lines: Vec<&str> = content.split(SPLIT_UNIT).collect();
-        let mut iter = lines.iter();
-        while let Some(line) = iter.next() {
-            if line.len() == 0 {
+        let iter = lines.iter();
+        for line in iter {
+            if line.is_empty() {
                 continue;
             }
-            let unit = MessageRecord::parse_from(*line)?;
+            let unit = MessageRecord::parse_from(line)?;
             self.list.push(unit);
         }
         Ok(())

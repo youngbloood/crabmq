@@ -163,8 +163,29 @@ impl Message {
         match self {
             Self::V1(v1) => {
                 v1.head.set_flag_resq(true);
-                return Ok(());
+                Ok(())
             }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        match self {
+            Self::V1(v1) => v1.bodys.list.first().unwrap().is_delete(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn is_consumed(&self) -> bool {
+        match self {
+            Self::V1(v1) => v1.bodys.list.first().unwrap().is_consumed(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn is_not_ready(&self) -> bool {
+        match self {
+            Self::V1(v1) => v1.bodys.list.first().unwrap().is_not_ready(),
             _ => unreachable!(),
         }
     }

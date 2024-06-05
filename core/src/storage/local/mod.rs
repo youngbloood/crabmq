@@ -7,7 +7,6 @@ use super::{storage::StorageOperation, TopicOperation};
 use crate::{
     message::Message,
     protocol::{ProtocolBody, ProtocolHead},
-    tsuixuq::Tsuixuq,
 };
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
@@ -21,6 +20,7 @@ use std::{
     collections::HashMap,
     fs,
     io::SeekFrom,
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     pin::Pin,
     sync::{atomic::AtomicU64, Arc},
@@ -34,18 +34,19 @@ use tokio::{
     select,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
+const HEAD_SIZE_PER_FILE: u64 = 8;
 
 fn calc_cache_length(all_len: usize) -> usize {
     let get_num: usize;
     if all_len < 100 {
         get_num = all_len;
-    } else if all_len >= 100 && all_len < 10_000 {
+    } else if (100..10_000).contains(&all_len) {
         get_num = 100 + all_len / 100;
-    } else if all_len >= 10_000 && all_len < 100_000 {
+    } else if (10_000..100_000).contains(&all_len) {
         get_num = 1000 + all_len / 1000;
     } else {
         get_num = 10000 + all_len / 10_000;
@@ -72,7 +73,7 @@ unsafe impl Sync for StorageLocal {}
 impl StorageLocal {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         StorageLocal {
-            dir: dir,
+            dir,
             topics: RwLock::new(HashMap::new()),
             cancel: CancellationToken::new(),
             max_msg_num_per_file,
@@ -128,8 +129,8 @@ impl StorageOperation for StorageLocal {
 
     async fn flush(&self) -> Result<()> {
         let rg = self.topics.read();
-        let mut iter = rg.iter();
-        while let Some((_, topic)) = iter.next() {
+        let iter = rg.iter();
+        for (_, topic) in iter {
             topic.get().instant.persist().await?;
             topic.get().defer.persist().await?;
         }
@@ -210,26 +211,29 @@ impl TopicOperation for TopicMessage {
                 }
 
                 msg = async {
-                    match self.get().defer.meta.get_mut().next().await {
+                    match self.get().defer.meta.get_mut().next(false).await {
                         Ok(msg) => {
                             match msg {
                                 Some(msg) => {
-                                    return Ok(Some(msg));
+                                    if !(msg.is_deleted() || msg.is_consumed() || msg.is_not_ready()) {
+                                        return Ok(Some(msg));
+                                    }
+                                    Ok(None)
                                 }
                                 None => {
                                     select! {
                                         _ = CANCEL_TOKEN.cancelled() =>{
-                                            return Err(anyhow!("process stopped"))
+                                            Err(anyhow!("process stopped"))
                                         }
                                         _ = ticker.tick() => {
-                                            return Ok(None)
+                                            Ok(None)
                                         }
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            return Err(anyhow!(e));
+                            Err(anyhow!(e))
                         }
                     }
                 } => {
@@ -252,31 +256,34 @@ impl TopicOperation for TopicMessage {
         let mut ticker = interval(Duration::from_secs(1)).await;
         loop {
             select! {
-                _ = CANCEL_TOKEN.cancelled() =>{
+                _ = CANCEL_TOKEN.cancelled() => {
                     return Err(anyhow!("process stopped"))
                 }
 
                 msg = async {
-                    match self.get().instant.meta.get_mut().next().await {
+                    match self.get().instant.meta.get_mut().next(false).await {
                         Ok((msg,_)) => {
                             match msg {
                                 Some(msg) => {
-                                    return Ok(Some(msg));
+                                    if !(msg.is_deleted() || msg.is_consumed() || msg.is_not_ready()) {
+                                        return Ok(Some(msg));
+                                    }
+                                    Ok(None)
                                 }
                                 None => {
                                     select! {
                                         _ = CANCEL_TOKEN.cancelled() =>{
-                                            return Err(anyhow!("process stopped"))
+                                            Err(anyhow!("process stopped"))
                                         }
                                         _ = ticker.tick() => {
-                                            return Ok(None)
+                                            Ok(None)
                                         }
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            return Err(anyhow!(e));
+                            Err(anyhow!(e))
                         }
                     }
                 } => {
@@ -305,14 +312,14 @@ impl TopicOperation for TopicMessage {
     }
 }
 
-pub struct Manager<T: MetaManager> {
+struct Manager<T: MetaManager> {
     /// 消息存放目录
     dir: PathBuf,
 
     /// 文件rorate因子
     factor: AtomicU64,
 
-    /// meta信息管理
+    /// meta信息管理，根据meta信息读取数据
     meta: Guard<T>,
 
     /// 每个文件最大消息数量
@@ -320,9 +327,6 @@ pub struct Manager<T: MetaManager> {
 
     /// 每个文件最多存放的大小
     max_size_per_file: u64,
-
-    /// 读取消息池
-    read_pool: Vec<ProtocolBody>,
 
     /// 写入消息
     writer: RwLock<MessageDisk>,
@@ -339,7 +343,6 @@ where
             meta: Guard::new(t),
             max_msg_num_per_file,
             max_size_per_file,
-            read_pool: Vec::new(),
             writer: RwLock::new(MessageDisk::new()),
         }
     }
@@ -389,9 +392,9 @@ where
         let rd = fs::read_dir(self.dir.to_str().unwrap())?;
         // u64::MAX: 922_3372_0368_5477_5807
         let mut max_factor = 0_u64;
-        let mut file_iter = rd.into_iter();
+        let file_iter = rd.into_iter();
         let mut cant_parse = vec![];
-        while let Some(entry) = file_iter.next() {
+        for entry in file_iter {
             let de = entry?;
             let filename = de.file_name().into_string().unwrap();
 
@@ -408,7 +411,7 @@ where
                 }
             }
         }
-        if cant_parse.len() != 0 {
+        if !cant_parse.is_empty() {
             warn!("files{cant_parse:?} not standard message file, ignore them.")
         }
 
@@ -431,7 +434,7 @@ where
     }
 
     pub async fn persist(&self) -> Result<()> {
-        if self.writer.read().msgs.read().len() == 0 {
+        if self.writer.read().msgs.read().is_empty() {
             return Ok(());
         }
         self.meta.get_mut().persist()?;
@@ -456,23 +459,23 @@ pub struct MessageDisk {
     /// push来的消存放在内存中
     msgs: RwLock<Vec<Message>>,
 
-    /// 写入位置的offset
-    write_offset: u64,
-
-    /// 当前文件的消息大小（8byte）
+    /// 当前文件的消息大小
     msg_size: u64,
 
     /// 当前文件消息数量（8byte）
     msg_num: u64,
+
+    /// 写入位置的offset
+    write_offset: u64,
 }
 
 impl MessageDisk {
     pub fn new() -> Self {
         MessageDisk {
             filename: String::new(),
-            msg_size: 8 + 8,
+            msg_size: HEAD_SIZE_PER_FILE,
             msg_num: 0,
-            write_offset: 16,
+            write_offset: HEAD_SIZE_PER_FILE,
             msgs: RwLock::new(vec![]),
             fd: None,
             validate: false,
@@ -483,8 +486,8 @@ impl MessageDisk {
         self.filename = filename.to_string();
         self.fd = None;
         self.msgs = RwLock::new(vec![]);
-        self.write_offset = 16;
-        self.msg_size = 16;
+        self.write_offset = HEAD_SIZE_PER_FILE;
+        self.msg_size = HEAD_SIZE_PER_FILE;
         self.msg_num = 0;
     }
 
@@ -515,21 +518,15 @@ impl MessageDisk {
         debug!("load from filename: {}", self.filename.as_str());
 
         let fd = self.fd.as_mut().unwrap().get_mut();
+
+        // init msg_size
+        let meta = fd.metadata().await?;
+        self.msg_size = meta.size();
+
         let mut pfd = Pin::new(fd);
-
-        // load msg_size
-        let mut num_buf = BytesMut::new();
-        num_buf.resize(8, 0);
-        pfd.read_exact(&mut num_buf).await?;
-        self.msg_size = u64::from_be_bytes(
-            num_buf
-                .to_vec()
-                .try_into()
-                .expect("convert to u64 array failed"),
-        );
-
         // load msg_num
-        num_buf.resize(8, 0);
+        let mut num_buf = BytesMut::new();
+        num_buf.resize(HEAD_SIZE_PER_FILE as _, 0);
         pfd.read_exact(&mut num_buf).await?;
         self.msg_num = u64::from_be_bytes(
             num_buf
@@ -545,18 +542,15 @@ impl MessageDisk {
         }
 
         loop {
-            let head: ProtocolHead;
-            match ProtocolHead::parse_from(&mut pfd).await {
-                Ok(h) => {
-                    head = h;
+            let head = ProtocolHead::parse_from(&mut pfd).await;
+            if let Err(e) = head {
+                if e.to_string().contains("eof") {
+                    break;
                 }
-                Err(e) => {
-                    if e.to_string().contains("eof") {
-                        break;
-                    }
-                    return Err(anyhow!(e));
-                }
+                return Err(anyhow!(e));
             }
+            let head = head.unwrap();
+
             match ProtocolBody::parse_from(&mut pfd).await {
                 Ok(body) => {
                     if is_debug() {
@@ -587,10 +581,10 @@ impl MessageDisk {
 
         self.init_fd().await?;
         let mut msgs_wg = self.msgs.write();
-        let mut iter = msgs_wg.iter();
+        let iter = msgs_wg.iter();
 
         let mut bts = vec![];
-        while let Some(mu) = iter.next() {
+        for mu in iter {
             bts.extend(mu.as_bytes());
         }
 
@@ -599,11 +593,11 @@ impl MessageDisk {
                 let mut fwg = fd.write();
 
                 // 写入msg_size
-                fwg.seek(SeekFrom::Start(0)).await?;
-                fwg.write_all(&self.msg_size.to_be_bytes()).await?;
+                // fwg.seek(SeekFrom::Start(0)).await?;
+                // fwg.write_all(&self.msg_size.to_be_bytes()).await?;
 
                 // 写入msg_num
-                fwg.seek(SeekFrom::Start(8)).await?;
+                fwg.seek(SeekFrom::Start(0)).await?;
                 fwg.write_all(&self.msg_num.to_be_bytes()).await?;
 
                 // 在offset位置写入内存中的msgs
@@ -675,7 +669,8 @@ impl FileHandler {
                 }
             }
         }
-        return Ok((None, rolling));
+
+        Ok((None, rolling))
     }
 }
 
@@ -708,7 +703,7 @@ pub mod tests {
 
     async fn init_mm() -> StorageLocal {
         let p: &Path = Path::new("../target");
-        let mut local = StorageLocal::new(p.join("message"), 10, 299);
+        let local = StorageLocal::new(p.join("message"), 10, 299);
         match local.init().await {
             Ok(_) => local,
             Err(e) => panic!("{e:?}"),
@@ -722,44 +717,43 @@ pub mod tests {
         // println!("msg_num = {}", local.instant.writer.msg_num);
     }
 
-    // #[tokio::test]
-    // async fn test_message_manager_defer_push_and_flush() {
-    //     let mut local = init_mm().await;
-    //     println!("load success");
-    //     let mut head = ProtocolHead::new();
-    //     assert_eq!(head.set_version(1).is_ok(), true);
+    #[tokio::test]
+    async fn test_message_manager_defer_push_and_flush() {
+        let local = init_mm().await;
+        println!("load success");
+        let mut head = ProtocolHead::new();
+        assert!(head.set_version(1).is_ok());
 
-    //     for i in 0..20 {
-    //         let mut body = ProtocolBody::new();
-    //         // 设置id
-    //         assert_eq!(body.with_id((i + 1000).to_string().as_str()).is_ok(), true);
-    //         body.with_ack(true)
-    //             .with_defer_time(100 + i)
-    //             .with_not_ready(false)
-    //             .with_persist(true);
+        for i in 0..20 {
+            let mut body = ProtocolBody::new();
+            // 设置id
+            assert!(body.with_id((i + 1000).to_string().as_str()).is_ok());
+            body.with_ack(true)
+                .with_defer_time(100 + i)
+                .with_not_ready(false)
+                .with_persist(true);
 
-    //         let mut rng = rand::thread_rng();
-    //         let length = rng.gen_range(5..50);
-    //         let body_str = random_str(length as _);
-    //         assert_eq!(
-    //             body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))
-    //                 .is_ok(),
-    //             true
-    //         );
-    //         assert_eq!(
-    //             local
-    //                 .push(Message::with_one(head.clone(), body))
-    //                 .await
-    //                 .is_ok(),
-    //             true
-    //         );
-    //         if i / 3 == 0 {
-    //             assert_eq!(local.flush().await.is_ok(), true);
-    //         }
-    //     }
+            let mut rng = rand::thread_rng();
+            let length = rng.gen_range(5..50);
+            let body_str = random_str(length as _);
+            assert!(body
+                .with_body(Bytes::copy_from_slice(body_str.as_bytes()))
+                .is_ok());
+            let topic_mm = local
+                .get_or_create_topic("default")
+                .await
+                .expect("get_or_create_topic failed");
+            assert!(topic_mm
+                .push(Message::with_one(head.clone(), body))
+                .await
+                .is_ok());
+            if i / 3 == 0 {
+                assert!(local.flush().await.is_ok());
+            }
+        }
 
-    //     assert_eq!(local.flush().await.is_ok(), true);
-    // }
+        assert!(local.flush().await.is_ok());
+    }
 
     // #[tokio::test]
     // async fn test_message_manager_defer_next() {
@@ -774,43 +768,43 @@ pub mod tests {
     //     }
     // }
 
-    // #[tokio::test]
-    // async fn test_message_manager_instant_push_and_flush() {
-    //     let mut local = init_mm().await;
-    //     println!("load success");
-    //     let mut head = ProtocolHead::new();
-    //     assert_eq!(head.set_topic("default").is_ok(), true);
-    //     assert_eq!(head.set_channel("channel-name").is_ok(), true);
-    //     assert_eq!(head.set_version(1).is_ok(), true);
+    #[tokio::test]
+    async fn test_message_manager_instant_push_and_flush() {
+        let local = init_mm().await;
+        println!("load success");
+        let mut head = ProtocolHead::new();
+        assert!(head.set_topic("default").is_ok());
+        assert!(head.set_channel("channel-name").is_ok());
+        assert!(head.set_version(1).is_ok());
 
-    //     for i in 0..20 {
-    //         let mut body = ProtocolBody::new();
-    //         // 设置id
-    //         assert_eq!(body.with_id((i + 1000).to_string().as_str()).is_ok(), true);
-    //         body.with_ack(true).with_not_ready(false).with_persist(true);
+        for i in 0..20 {
+            let mut body = ProtocolBody::new();
+            // 设置id
+            assert!(body.with_id((i + 1000).to_string().as_str()).is_ok());
+            body.with_ack(true).with_not_ready(false).with_persist(true);
 
-    //         let mut rng = rand::thread_rng();
-    //         let length = rng.gen_range(5..50);
-    //         let body_str = random_str(length as _);
-    //         assert_eq!(
-    //             body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))
-    //                 .is_ok(),
-    //             true
-    //         );
-    //         assert_eq!(
-    //             local
-    //                 .push(Message::with_one(head.clone(), body))
-    //                 .await
-    //                 .is_ok(),
-    //             true
-    //         );
-    //         if i / 3 == 0 {
-    //             assert_eq!(local.flush().await.is_ok(), true);
-    //         }
-    //     }
+            let mut rng = rand::thread_rng();
+            let length = rng.gen_range(5..50);
+            let body_str = random_str(length as _);
+            assert!(body
+                .with_body(Bytes::copy_from_slice(body_str.as_bytes()))
+                .is_ok());
 
-    //     assert_eq!(local.flush().await.is_ok(), true);
-    // }
+            let topic_mm = local
+                .get_or_create_topic("default")
+                .await
+                .expect("get_or_create_topic failed");
+            assert!(topic_mm
+                .push(Message::with_one(head.clone(), body))
+                .await
+                .is_ok());
+            if i / 3 == 0 {
+                assert!(local.flush().await.is_ok());
+            }
+        }
+
+        assert!(local.flush().await.is_ok());
+    }
 
     // #[tokio::test]
     // async fn test_message_manager_instant_next() {
@@ -845,25 +839,23 @@ pub mod tests {
             .open("./test_file_seek")
             .await
             .unwrap();
-        assert_eq!(
-            fd.write("abcdefghijklmnopqrstuvwxyz".as_bytes())
-                .await
-                .is_ok(),
-            true
-        );
+        assert!(fd
+            .write("abcdefghijklmnopqrstuvwxyz".as_bytes())
+            .await
+            .is_ok());
 
-        assert_eq!(fd.flush().await.is_ok(), true);
+        assert!(fd.flush().await.is_ok());
 
-        assert_eq!(fd.seek(std::io::SeekFrom::Start(4)).await.is_ok(), true);
-        assert_eq!(fd.write("EFGH".as_bytes()).await.is_ok(), true);
-        assert_eq!(fd.flush().await.is_ok(), true);
+        assert!(fd.seek(std::io::SeekFrom::Start(4)).await.is_ok());
+        assert!(fd.write("EFGH".as_bytes()).await.is_ok());
+        assert!(fd.flush().await.is_ok());
 
-        assert_eq!(fd.seek(std::io::SeekFrom::Start(20)).await.is_ok(), true);
-        assert_eq!(fd.write("UVW".as_bytes()).await.is_ok(), true);
-        assert_eq!(fd.flush().await.is_ok(), true);
+        assert!(fd.seek(std::io::SeekFrom::Start(20)).await.is_ok());
+        assert!(fd.write("UVW".as_bytes()).await.is_ok());
+        assert!(fd.flush().await.is_ok());
 
-        assert_eq!(fd.rewind().await.is_ok(), true);
-        assert_eq!(fd.write("ABC".as_bytes()).await.is_ok(), true);
-        assert_eq!(fd.flush().await.is_ok(), true);
+        assert!(fd.rewind().await.is_ok());
+        assert!(fd.write("ABC".as_bytes()).await.is_ok());
+        assert!(fd.flush().await.is_ok());
     }
 }

@@ -1,6 +1,6 @@
 use super::{
     calc_cache_length, gen_filename, record::MessageRecordFile, FileHandler, MetaManager,
-    SPLIT_CELL,
+    HEAD_SIZE_PER_FILE, SPLIT_CELL,
 };
 use crate::message::Message;
 use anyhow::{anyhow, Result};
@@ -12,7 +12,6 @@ use std::{
     path::Path,
 };
 use tokio::{fs::File, io::AsyncSeekExt};
-use tracing::warn;
 
 #[derive(Debug)]
 pub struct InstantMessageMeta {
@@ -53,7 +52,7 @@ impl Default for InstantMessageMetaUnit {
             msg_num: 0,
             left_num: 0,
             factor: 0,
-            offset: 16,
+            offset: HEAD_SIZE_PER_FILE,
             length: 0,
         }
     }
@@ -69,7 +68,7 @@ impl InstantMessageMetaUnit {
 
     fn parse_from(&mut self, filename: &str) -> Result<()> {
         let content = read_to_string(filename)?;
-        if content.len() == 0 {
+        if content.is_empty() {
             return Ok(());
         }
         let lines: Vec<&str> = content.split(SPLIT_CELL).collect();
@@ -77,7 +76,7 @@ impl InstantMessageMetaUnit {
             return Err(anyhow!("not standard instant meta file"));
         }
         self.msg_num = lines
-            .get(0)
+            .first()
             .unwrap()
             .parse::<u64>()
             .expect("parse msg_num failed");
@@ -107,7 +106,8 @@ impl InstantMessageMetaUnit {
 }
 
 impl InstantMessageMeta {
-    pub async fn next(&mut self) -> Result<(Option<Message>, bool)> {
+    /// get next message, if seek is true, then will not rolling the read_ptr
+    pub async fn next(&mut self, seek: bool) -> Result<(Option<Message>, bool)> {
         let dir = self.dir.as_str();
         let parent = Path::new(dir);
         let mut read_factor = self.read_ptr.factor;
@@ -130,7 +130,7 @@ impl InstantMessageMeta {
             }
             rolling = true;
             fd = File::open(next_filename.to_str().unwrap()).await?;
-            offset = 16;
+            offset = HEAD_SIZE_PER_FILE;
         }
 
         let mut handler = FileHandler::new(fd);
@@ -139,16 +139,19 @@ impl InstantMessageMeta {
         match handler.parse_message().await {
             Ok((msg_opt, _rolling)) => {
                 if rolling {
-                    self.read_ptr.factor += 1;
-                    if msg_opt.is_some() {
-                        self.read_ptr.offset = 16 + msg_opt.as_ref().unwrap().calc_len() as u64;
+                    if !seek {
+                        self.read_ptr.factor += 1;
                     }
-                } else if msg_opt.is_some() {
+                    if msg_opt.is_some() && !seek {
+                        self.read_ptr.offset =
+                            HEAD_SIZE_PER_FILE + msg_opt.as_ref().unwrap().calc_len() as u64;
+                    }
+                } else if msg_opt.is_some() && !seek {
                     self.read_ptr.offset += msg_opt.as_ref().unwrap().calc_len() as u64;
                 }
-                return Ok((msg_opt, rolling));
+                Ok((msg_opt, rolling))
             }
-            Err(e) => return Err(anyhow!(e)),
+            Err(e) => Err(anyhow!(e)),
         }
     }
 }
@@ -165,14 +168,12 @@ impl MetaManager for InstantMessageMeta {
     }
 
     async fn consume(&mut self) -> Result<()> {
-        let (next_msg, rolling) = self.next().await?;
+        let (next_msg, rolling) = self.next(true).await?;
         if rolling {
             self.now.factor += 1;
-            self.now.offset = 16;
-        } else {
-            if let Some(nm) = next_msg.as_ref() {
-                self.now.offset += nm.calc_len() as u64;
-            }
+            self.now.offset = HEAD_SIZE_PER_FILE;
+        } else if let Some(nm) = next_msg.as_ref() {
+            self.now.offset += nm.calc_len() as u64;
         }
         if self.now.left_num != 0 {
             self.now.left_num -= 1;
@@ -197,6 +198,7 @@ impl MetaManager for InstantMessageMeta {
 
     fn load(&mut self) -> Result<()> {
         let metafile = self.meta_filename();
+        println!("metafile = {metafile}");
         check_and_create_filename(metafile.as_str())?;
         self.now.parse_from(metafile.as_str())?;
         self.read_ptr.parse_from(metafile.as_str())?;
@@ -225,14 +227,33 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_instant_message_meta_next() {
-        let mut inst = InstantMessageMeta::new("../target/message/instant");
+    async fn test_instant_message_meta_next_seek_true() {
+        let mut inst = InstantMessageMeta::new("../target/message/default/instant");
         // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
         if let Err(e) = inst.load() {
             panic!("{e}");
         }
 
-        while let Ok((msg_opt, _)) = inst.next().await {
+        for i in 0..20 {
+            if let Ok((msg, _)) = inst.next(true).await {
+                if msg.is_none() {
+                    break;
+                }
+                let msg = msg.unwrap();
+                println!("msg[{i}] = {msg:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_instant_message_meta_next_seek_false() {
+        let mut inst = InstantMessageMeta::new("../target/message/default/instant");
+        // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
+        if let Err(e) = inst.load() {
+            panic!("{e}");
+        }
+
+        while let Ok((msg_opt, _)) = inst.next(false).await {
             if msg_opt.is_none() {
                 break;
             }

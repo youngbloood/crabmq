@@ -79,6 +79,7 @@ pub const ACTION_AUTH: u8 = 9;
 *           channel value.
 *           token value.
 */
+#[derive(Default)]
 pub struct ProtocolHead {
     head: [u8; PROTOCOL_HEAD_LEN],
     topic: String,
@@ -105,16 +106,16 @@ impl Debug for ProtocolHead {
     }
 }
 
-impl Default for ProtocolHead {
-    fn default() -> Self {
-        Self {
-            head: Default::default(),
-            topic: Default::default(),
-            channel: Default::default(),
-            token: Default::default(),
-        }
-    }
-}
+// impl Default for ProtocolHead {
+//     fn default() -> Self {
+//         Self {
+//             head: Default::default(),
+//             topic: Default::default(),
+//             channel: Default::default(),
+//             token: Default::default(),
+//         }
+//     }
+// }
 
 impl ProtocolHead {
     pub fn new() -> Self {
@@ -135,10 +136,10 @@ impl ProtocolHead {
     }
 
     pub fn init(&mut self) -> Result<()> {
-        if self.topic.len() == 0 {
+        if self.topic.is_empty() {
             self.set_topic("default")?;
         }
-        if self.channel.len() == 0 {
+        if self.channel.is_empty() {
             self.set_channel("default")?;
         }
 
@@ -149,7 +150,7 @@ impl ProtocolHead {
     pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
         let mut head = ProtocolHead::new();
         head.read_parse(fd).await?;
-        return Ok(head);
+        Ok(head)
     }
 
     /// [`read_parse`] read the protocol head from reader.
@@ -192,12 +193,13 @@ impl ProtocolHead {
         Ok(())
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         let mut ph = Self::new();
         ph.set_head(self.head);
-        let _ = ph.set_topic(&self.topic.as_str());
-        let _ = ph.set_channel(&self.channel.as_str());
-        let _ = ph.set_token(&self.token.as_str());
+        let _ = ph.set_topic(self.topic.as_str());
+        let _ = ph.set_channel(self.channel.as_str());
+        let _ = ph.set_token(self.token.as_str());
 
         ph
     }
@@ -319,11 +321,11 @@ impl ProtocolHead {
     }
 
     pub fn topic_len(&self) -> u8 {
-        self.head[4] as u8
+        self.head[4]
     }
 
     pub fn channel_len(&self) -> u8 {
-        self.head[5] as u8
+        self.head[5]
     }
 
     pub fn token_len(&self) -> u8 {
@@ -355,7 +357,7 @@ impl ProtocolHead {
         if v > 0b00001111 || v == 0 {
             return Err(anyhow!("illigal protocol version number"));
         }
-        self.head[3] = v << 4 | self.head[3];
+        self.head[3] |= v << 4;
 
         Ok(())
     }
@@ -368,7 +370,7 @@ impl ProtocolHead {
         if num > 0b00001111 {
             return Err(anyhow!("num exceed maxnuim message number"));
         }
-        self.head[3] = self.head[3] | num;
+        self.head[3] |= num;
 
         Ok(())
     }
@@ -397,7 +399,7 @@ impl ProtocolHead {
 
     pub fn topic(&self) -> &str {
         let tp = self.topic.as_str();
-        if tp.len() == 0 {
+        if tp.is_empty() {
             return "default";
         }
         tp
@@ -405,7 +407,7 @@ impl ProtocolHead {
 
     pub fn channel(&self) -> &str {
         let chan = self.channel.as_str();
-        if chan.len() == 0 {
+        if chan.is_empty() {
             return "default";
         }
         chan
@@ -442,7 +444,7 @@ impl ProtocolHead {
 /**
 * ProtocolBodys:
 */
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ProtocolBodys {
     sid: i64, // 标识一批次的message
     pub list: Vec<ProtocolBody>,
@@ -460,8 +462,8 @@ impl ProtocolBodys {
         if self.sid == 0 {
             self.sid = SNOWFLAKE.get_id();
         }
-        let mut iter = self.list.iter_mut();
-        while let Some(pb) = iter.next() {
+        let iter = self.list.iter_mut();
+        for pb in iter {
             if pb.id_len() == 0 {
                 pb.with_id(SNOWFLAKE.get_id().to_string().as_str())?;
             }
@@ -523,10 +525,12 @@ impl ProtocolBodys {
         Ok(())
     }
 
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.list.len()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         let mut pbs = Self::new();
         pbs.sid = self.sid;
@@ -554,8 +558,8 @@ impl ProtocolBodys {
     }
 
     pub fn validate(&self, max_msg_len: u64) -> StdResult<(), ProtocolError> {
-        let mut iter = self.list.iter();
-        while let Some(pb) = iter.next() {
+        let iter = self.list.iter();
+        for pb in iter {
             if pb.body_len() > max_msg_len {
                 return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_LEN));
             }
@@ -582,6 +586,7 @@ impl ProtocolBodys {
 *           id value(length determine by ID-LENGTH)
 *           body value(length determine by BODY-LENGTH)
 */
+#[derive(Default)]
 pub struct ProtocolBody {
     head: [u8; PROTOCOL_BODY_HEAD_LEN],
     sid: i64,        // session_id: generate by ProtocolBodys
@@ -680,12 +685,13 @@ impl ProtocolBody {
         Ok(())
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         let mut pb = Self::new();
         pb.with_head(self.head);
-        let _ = pb.set_sid(self.sid);
+        pb.set_sid(self.sid);
         let _ = pb.with_defer_time(self.defer_time);
-        let _ = pb.with_id(&self.id.as_str());
+        let _ = pb.with_id(self.id.as_str());
         let _ = pb.with_body(self.body.clone());
 
         pb
@@ -697,10 +703,10 @@ impl ProtocolBody {
         if self.defer_time != 0 {
             result.extend(self.defer_time.to_be_bytes());
         }
-        if self.id.len() != 0 {
+        if !self.id.is_empty() {
             result.extend(self.id.as_bytes());
         }
-        result.extend(self.body.as_ref().into_iter());
+        result.extend(self.body.as_ref());
 
         result
     }

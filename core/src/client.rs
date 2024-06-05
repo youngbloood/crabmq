@@ -78,7 +78,7 @@ impl Client {
         }
     }
 
-    pub fn builder(self: Self) -> Guard<Self> {
+    pub fn builder(self) -> Guard<Self> {
         Guard::new(self)
     }
 

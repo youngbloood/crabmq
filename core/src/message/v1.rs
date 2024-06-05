@@ -2,7 +2,7 @@ use crate::{error::*, protocol::*};
 use anyhow::Result;
 use std::result::Result as StdResult;
 // 一个标准的消息体
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct MessageV1 {
     remote_addr: String,
     pub head: ProtocolHead,
@@ -10,13 +10,13 @@ pub struct MessageV1 {
 }
 
 impl MessageV1 {
-    pub fn new() -> Self {
-        MessageV1 {
-            head: ProtocolHead::default(),
-            bodys: ProtocolBodys::new(),
-            remote_addr: "".to_string(),
-        }
-    }
+    // pub fn new() -> Self {
+    //     MessageV1 {
+    //         head: ProtocolHead::new(),
+    //         bodys: ProtocolBodys::new(),
+    //         remote_addr: "".to_string(),
+    //     }
+    // }
 
     pub fn with(mut head: ProtocolHead, bodys: ProtocolBodys) -> Self {
         let _ = head.set_msg_num(bodys.len() as u8);
@@ -42,8 +42,9 @@ impl MessageV1 {
         self.remote_addr = remote_add.to_string();
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
-        let mut msg = Self::new();
+        let mut msg = Self::default();
         msg.head = self.head.clone();
         msg.bodys = self.bodys.clone();
 

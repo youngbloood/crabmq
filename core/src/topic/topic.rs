@@ -1,15 +1,12 @@
 use crate::channel::Channel;
 use crate::message::Message;
-use crate::message_manager::MessageManager;
 use crate::tsuixuq::TsuixuqOption;
 use anyhow::{anyhow, Result};
 use common::global::{Guard, CANCEL_TOKEN};
 use common::Name;
-use futures::executor::block_on;
+use std::collections::HashMap;
 use std::time::Duration;
-use std::{collections::HashMap, path::Path};
 use tokio::select;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +31,6 @@ pub struct Topic {
 impl Topic {
     pub fn new(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Self> {
         let n = Name::new(name);
-        let opt_clone = opt.clone();
         let mut topic = Topic {
             opt,
             name: n,
@@ -56,14 +52,14 @@ impl Topic {
         Ok(topic)
     }
 
-    pub fn builder(self: Self) -> Guard<Self> {
+    pub fn builder(self) -> Guard<Self> {
         Guard::new(self)
     }
 
     /// 将消息发下至consumers
     pub async fn deliver_message(&self, msg: Message) -> Result<()> {
-        let mut iter = self.channels.iter();
-        while let Some((_, chan)) = iter.next() {
+        let iter = self.channels.iter();
+        for (_, chan) in iter {
             chan.get().send_msg(msg.clone()).await?;
         }
         Ok(())
@@ -124,9 +120,9 @@ impl Topic {
     }
 
     pub async fn delete_client_from_channel(&mut self, chan_name: &str) {
-        let mut iter = self.channels.iter_mut();
+        let iter = self.channels.iter_mut();
 
-        while let Some((_addr, chan)) = iter.next() {
+        for (_addr, chan) in iter {
             chan.get_mut().delete_channel(chan_name)
         }
     }
@@ -151,7 +147,7 @@ pub async fn topic_has_consumers(topic: Guard<Topic>) {
                 }
 
                 _ = ticker.tick() => {
-                    for (_, chan) in &topic.get().channels {
+                    for chan in topic.get().channels.values() {
                         let rg = chan.get().clients.read();
                         if rg.len() != 0 {
                             let _ = notify_tx.send(());

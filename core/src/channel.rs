@@ -38,7 +38,7 @@ impl Channel {
         }
     }
 
-    pub fn builder(self: Self) -> Guard<Self> {
+    pub fn builder(self) -> Guard<Self> {
         Guard::new(self)
     }
 
@@ -49,8 +49,8 @@ impl Channel {
 
     pub async fn send_msg(&self, msg: Message) -> Result<()> {
         let rg = self.clients.read();
-        let mut iter = rg.iter();
-        while let Some((_addr, client)) = iter.next() {
+        let iter = rg.iter();
+        for (_addr, client) in iter {
             client.get().send_msg(msg.clone()).await?;
         }
         Ok(())

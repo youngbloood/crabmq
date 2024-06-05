@@ -113,10 +113,12 @@ where
         unsafe { self.inner.get().as_ref() }.unwrap()
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self) -> &mut T {
         unsafe { self.inner.get().as_mut() }.unwrap()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         Guard {
             inner: self.inner.clone(),

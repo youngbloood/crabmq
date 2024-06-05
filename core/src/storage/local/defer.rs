@@ -6,8 +6,7 @@ use anyhow::Result;
 use bytes::BytesMut;
 use common::util::check_and_create_filename;
 use parking_lot::RwLock;
-use std::fs::OpenOptions;
-use std::io::{SeekFrom, Write};
+use std::io::SeekFrom;
 use std::{
     collections::HashMap,
     fs::{read_to_string, write},
@@ -15,7 +14,6 @@ use std::{
     vec,
 };
 use tokio::{fs::File, io::AsyncSeekExt};
-use tracing::debug;
 
 #[derive(Debug)]
 pub struct DeferMessageMeta {
@@ -30,14 +28,12 @@ pub struct DeferMessageMeta {
     /// 读取的长度
     read_length: usize,
 
-    cache: Vec<Message>,
-
     /// defer中，record记录在meta文件中，剩余未消费消息的位置信息
     pub list: Vec<MessageRecord>,
 }
 
 impl DeferMessageMeta {
-    pub async fn next(&mut self) -> Result<Option<Message>> {
+    pub async fn next(&mut self, seek: bool) -> Result<Option<Message>> {
         let read_start = self.list.get(self.read_start);
         if read_start.is_none() {
             return Ok(None);
@@ -54,11 +50,13 @@ impl DeferMessageMeta {
         }
 
         let handler = wg.get_mut(filename_str).unwrap();
-        let offset = u.offset;
         handler.fd.seek(SeekFrom::Start(u.offset)).await?;
         let (msg_opt, _) = handler.parse_message().await?;
-        self.read_start += 1;
-        return Ok(msg_opt);
+        if !seek {
+            self.read_start += 1;
+        }
+
+        Ok(msg_opt)
     }
 }
 
@@ -69,13 +67,12 @@ impl MetaManager for DeferMessageMeta {
             read_start: 0,
             read_length: 0,
             list: vec![],
-            cache: vec![],
             cache_fds: RwLock::new(HashMap::new()),
         }
     }
 
     async fn consume(&mut self) -> Result<()> {
-        if self.list.len() == 0 {
+        if self.list.is_empty() {
             return Ok(());
         }
         self.list.remove(0);
@@ -91,17 +88,17 @@ impl MetaManager for DeferMessageMeta {
         let metafile = self.meta_filename();
         check_and_create_filename(metafile.as_str())?;
         let content = read_to_string(metafile)?;
-        if content.len() == 0 {
+        if content.is_empty() {
             return Ok(());
         }
 
         let lines: Vec<&str> = content.split(SPLIT_UNIT).collect();
-        let mut iter = lines.iter();
-        while let Some(line) = iter.next() {
-            if line.len() == 0 {
+        let iter = lines.iter();
+        for line in iter {
+            if line.is_empty() {
                 continue;
             }
-            let unit = MessageRecord::parse_from(*line)?;
+            let unit = MessageRecord::parse_from(line)?;
             self.list.push(unit);
         }
         self.read_length = calc_cache_length(self.list.len());
@@ -122,8 +119,8 @@ impl MetaManager for DeferMessageMeta {
 
     fn persist(&self) -> Result<()> {
         let mut content = BytesMut::new();
-        let mut iter = self.list.iter();
-        while let Some(unit) = iter.next() {
+        let iter = self.list.iter();
+        for unit in iter {
             content.extend(unit.format().as_bytes());
         }
         write(self.meta_filename(), content)?;
@@ -142,15 +139,39 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_defer_message_meta_next() {
-        let mut defer = DeferMessageMeta::new("../target/message/defer");
+    async fn test_defer_message_meta_next_seek_true() {
+        let mut defer = DeferMessageMeta::new("../target/message/default/defer");
+        // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
+        if let Err(e) = defer.load() {
+            panic!("{e}");
+        }
+
+        for i in 0..20 {
+            match defer.next(true).await {
+                Ok(msg_opt) => {
+                    if msg_opt.is_none() {
+                        break;
+                    }
+                    let msg = msg_opt.unwrap();
+                    println!("msg[{i}] = {msg:?}");
+                }
+                Err(e) => {
+                    panic!("{e}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_defer_message_meta_next_seek_false() {
+        let mut defer = DeferMessageMeta::new("../target/message/default/defer");
         // let mut inst = InstantMessageMeta::new("../tsuixuqd/message/default/instant");
         if let Err(e) = defer.load() {
             panic!("{e}");
         }
 
         loop {
-            match defer.next().await {
+            match defer.next(false).await {
                 Ok(msg_opt) => {
                     if msg_opt.is_none() {
                         break;

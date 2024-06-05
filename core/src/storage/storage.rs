@@ -2,13 +2,11 @@ use super::dummy::TopicDummyBase;
 use super::STORAGE_TYPE_DUMMY;
 use super::{dummy::Dummy, local::StorageLocal, STORAGE_TYPE_LOCAL};
 use crate::message::{convert_to_resp, Message};
-use crate::tsuixuq::Tsuixuq;
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use enum_dispatch::enum_dispatch;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};
@@ -47,11 +45,15 @@ pub trait TopicOperation: Send + Sync {
     /// return the next defer Message from Storage Media.
     ///
     /// If there is no message return. Storage Media should block this function until return Ok(Some(message))
+    ///
+    /// It should not return message that has been consumed, deleted, or not ready.
     async fn next_defer(&self) -> Result<Option<Message>>;
 
     /// return the next instant Message from Storage Media.
     ///
     /// If there is no message return. Storage Media should block this function until return Ok(Some(message))
+    ///
+    /// It should not return message that has been consumed, deleted, or not ready.
     async fn next_instant(&self) -> Result<Option<Message>>;
 
     /// push a message into topic.

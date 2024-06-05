@@ -57,8 +57,3 @@ impl Conn {
         .await
     }
 }
-
-// pub async fn write(writer: &mut OwnedWriteHalf, body: &[u8]) -> Result<()> {
-//     writer.write_all(body).await?;
-//     Ok(())
-// }

@@ -1,6 +1,5 @@
 use crate::client::{io_loop, Client};
 use crate::message::Message;
-use crate::protocol::*;
 use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use std::collections::HashMap;
@@ -40,7 +39,7 @@ impl TcpServer {
             out_recver: out_rx,
 
             opt,
-            tcp_listener: tcp_listener,
+            tcp_listener,
             clients: HashMap::new(),
             tsuixuq,
         }
@@ -91,7 +90,7 @@ impl TcpServer {
                     let (addr,mut msg) = msg_opt.unwrap();
                     let (resp, passed) = self.validate(addr.as_str(), &msg);
                     if !passed {
-                        let _ = self.out_sender.send((addr, resp.unwrap()));
+                        let _ = self.out_sender.send((addr, resp.unwrap())).await;
                         continue;
                     }
                     if let Err(e) = msg.init(){
