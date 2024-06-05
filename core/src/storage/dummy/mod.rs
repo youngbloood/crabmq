@@ -67,11 +67,11 @@ impl TopicOperation for TopicDummy {
         self.get().name.as_str()
     }
 
-    async fn next_defer(&self) -> Result<Option<Message>> {
+    async fn next_defer(&self, _: bool) -> Result<Option<Message>> {
         Ok(self.get().defer.pop().await)
     }
 
-    async fn next_instant(&self) -> Result<Option<Message>> {
+    async fn next_instant(&self, _: bool) -> Result<Option<Message>> {
         Ok(self.get().instant.pop().await)
     }
 

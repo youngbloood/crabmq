@@ -202,7 +202,7 @@ impl TopicOperation for TopicMessage {
         self.get().name.as_str()
     }
 
-    async fn next_defer(&self) -> Result<Option<Message>> {
+    async fn next_defer(&self, block: bool) -> Result<Option<Message>> {
         let mut ticker = interval(Duration::from_secs(1)).await;
         loop {
             select! {
@@ -221,6 +221,9 @@ impl TopicOperation for TopicMessage {
                                     Ok(None)
                                 }
                                 None => {
+                                    if !block{
+                                        return Ok(None)
+                                    }
                                     select! {
                                         _ = CANCEL_TOKEN.cancelled() =>{
                                             Err(anyhow!("process stopped"))
@@ -239,9 +242,16 @@ impl TopicOperation for TopicMessage {
                 } => {
                     match msg {
                         Ok(msg) => {
-                           if let Some(m) = msg {
-                                return Ok(Some(m));
-                           }
+                            match msg {
+                                Some(m) => {
+                                    return Ok(Some(m));
+                                }
+                                None => {
+                                    if !block{
+                                        return Ok(None);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             return Err(anyhow!(e));
@@ -252,7 +262,7 @@ impl TopicOperation for TopicMessage {
         }
     }
 
-    async fn next_instant(&self) -> Result<Option<Message>> {
+    async fn next_instant(&self, block: bool) -> Result<Option<Message>> {
         let mut ticker = interval(Duration::from_secs(1)).await;
         loop {
             select! {
@@ -271,6 +281,9 @@ impl TopicOperation for TopicMessage {
                                     Ok(None)
                                 }
                                 None => {
+                                    if !block {
+                                        return Ok(None)
+                                    }
                                     select! {
                                         _ = CANCEL_TOKEN.cancelled() =>{
                                             Err(anyhow!("process stopped"))
@@ -289,9 +302,16 @@ impl TopicOperation for TopicMessage {
                 } => {
                     match msg {
                         Ok(msg) => {
-                           if let Some(m) = msg {
-                                return Ok(Some(m));
-                           }
+                            match msg {
+                                Some(m) => {
+                                    return Ok(Some(m));
+                                }
+                                None => {
+                                    if !block{
+                                        return Ok(None);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             return Err(anyhow!(e));
@@ -701,7 +721,7 @@ pub mod tests {
         let _ = tracing_subscriber::fmt::try_init();
     }
 
-    async fn init_mm() -> StorageLocal {
+    async fn init_sl() -> StorageLocal {
         let p: &Path = Path::new("../target");
         let local = StorageLocal::new(p.join("message"), 10, 299);
         match local.init().await {
@@ -711,15 +731,15 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_manager_load() {
-        let local = init_mm().await;
+    async fn test_storage_local_load() {
+        let local = init_sl().await;
         // println!("msg_size = {}", local.instant.writer.msg_size);
         // println!("msg_num = {}", local.instant.writer.msg_num);
     }
 
     #[tokio::test]
-    async fn test_message_manager_defer_push_and_flush() {
-        let local = init_mm().await;
+    async fn test_storage_local_defer_push_and_flush() {
+        let local = init_sl().await;
         println!("load success");
         let mut head = ProtocolHead::new();
         assert!(head.set_version(1).is_ok());
@@ -755,22 +775,27 @@ pub mod tests {
         assert!(local.flush().await.is_ok());
     }
 
-    // #[tokio::test]
-    // async fn test_message_manager_defer_next() {
-    //     init_log();
-    //     let local = init_mm().await;
-    //     while let Ok(msg) = local.next_defer().await {
-    //         if let Some(m) = msg {
-    //             println!("msg = {m:?}");
-    //         } else {
-    //             break;
-    //         }
-    //     }
-    // }
+    #[tokio::test]
+    async fn test_storage_local_defer_next() {
+        init_log();
+        let local = init_sl().await;
+        let topic_mm = local
+            .get_or_create_topic("default")
+            .await
+            .expect("get_or_create_topic failed");
+
+        while let Ok(msg) = topic_mm.next_defer(false).await {
+            if let Some(m) = msg {
+                println!("msg = {m:?}");
+            } else {
+                break;
+            }
+        }
+    }
 
     #[tokio::test]
-    async fn test_message_manager_instant_push_and_flush() {
-        let local = init_mm().await;
+    async fn test_storage_local_instant_push_and_flush() {
+        let local = init_sl().await;
         println!("load success");
         let mut head = ProtocolHead::new();
         assert!(head.set_topic("default").is_ok());
@@ -806,23 +831,28 @@ pub mod tests {
         assert!(local.flush().await.is_ok());
     }
 
-    // #[tokio::test]
-    // async fn test_message_manager_instant_next() {
-    //     init_log();
-    //     let local = init_mm().await;
-    //     while let Ok(msg) = local.next_instant().await {
-    //         if let Some(m) = msg {
-    //             println!("msg = {m:?}");
-    //         } else {
-    //             break;
-    //         }
-    //     }
-    // }
+    #[tokio::test]
+    async fn test_storage_local_instant_next() {
+        init_log();
+        let local = init_sl().await;
+        let topic_mm = local
+            .get_or_create_topic("default")
+            .await
+            .expect("get_or_create_topic failed");
+
+        while let Ok(msg) = topic_mm.next_instant(false).await {
+            if let Some(m) = msg {
+                println!("msg = {m:?}");
+            } else {
+                break;
+            }
+        }
+    }
 
     // #[tokio::test]
-    // async fn test_message_manager_instant_consume() {
+    // async fn test_storage_local_instant_consume() {
     //     init_log();
-    //     let mm = init_mm().await;
+    //     let sl = init_sl().await;
     //     let pre = mm.instant.meta.get().now.left_num;
     //     assert_eq!(mm.instant.meta.get_mut().consume().await.is_ok(), true);
     //     let post = mm.instant.meta.get().now.left_num;

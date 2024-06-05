@@ -118,7 +118,7 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
             }
 
             // 不断获取defer message，并发送至defer_cache中
-            msg = guard.get().storage_topic.next_defer() => {
+            msg = guard.get().storage_topic.next_defer(true) => {
                 match msg {
                     Ok(msg) => {
                         if msg.is_none(){
@@ -136,7 +136,7 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
             }
 
             // 不断获取instant message，并发送至ready_queue中
-            msg = guard.get().storage_topic.next_instant() => {
+            msg = guard.get().storage_topic.next_instant(true) => {
                 match msg {
                     Ok(msg) => {
                         if msg.is_none(){

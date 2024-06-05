@@ -30,8 +30,8 @@ impl Message {
         match self {
             Message::Null => unreachable!(),
             Message::V1(ref mut v1) => {
-                let mut iter = v1.bodys.list.iter_mut();
-                while let Some(body) = iter.next() {
+                let iter = v1.bodys.list.iter_mut();
+                for body in iter {
                     let _ = body.with_body(Bytes::new());
                 }
                 Ok(())
@@ -41,75 +41,57 @@ impl Message {
 
     pub fn with(head: ProtocolHead, bodys: ProtocolBodys) -> Self {
         match head.version() {
-            1 => return Message::V1(MessageV1::with(head, bodys)),
-            _ => return Message::Null,
+            1 => Message::V1(MessageV1::with(head, bodys)),
+            _ => Message::Null,
         }
     }
 
-    pub fn with_one(head: ProtocolHead, body: ProtocolBody) -> Self {
-        match head.version() {
-            1 => return Message::V1(MessageV1::with_one(head, body)),
-            _ => return Message::Null,
-        }
-    }
-
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         match self {
-            Self::V1(v1) => return Message::V1(v1.clone()),
+            Self::V1(v1) => Message::V1(v1.clone()),
             _ => unreachable!(),
         }
     }
 
     pub fn get_topic(&self) -> &str {
         match self {
-            Self::V1(v1) => return v1.get_topic(),
+            Self::V1(v1) => v1.get_topic(),
             _ => unreachable!(),
         }
     }
 
     pub fn topic_ephemeral(&self) -> bool {
         match self {
-            Self::V1(v1) => return v1.head.topic_ephemeral(),
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn is_defer(&self) -> bool {
-        match self {
-            Self::V1(v1) => {
-                if v1.bodys.list.len() == 0 {
-                    return false;
-                }
-                return v1.bodys.list.get(0).unwrap().is_defer();
-            }
+            Self::V1(v1) => v1.head.topic_ephemeral(),
             _ => unreachable!(),
         }
     }
 
     pub fn get_channel(&self) -> &str {
         match self {
-            Self::V1(v1) => return v1.get_channel(),
+            Self::V1(v1) => v1.get_channel(),
             _ => unreachable!(),
         }
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
-            Self::V1(v1) => return v1.as_bytes(),
+            Self::V1(v1) => v1.as_bytes(),
             _ => unreachable!(),
         }
     }
 
     pub fn action(&self) -> u8 {
         match self {
-            Self::V1(v1) => return v1.action(),
+            Self::V1(v1) => v1.action(),
             _ => unreachable!(),
         }
     }
 
     pub fn validate(&self, max_msg_num: u8, max_msg_len: u64) -> StdResult<(), ProtocolError> {
         match self {
-            Self::V1(v1) => return Ok(v1.validate(max_msg_num, max_msg_len)?),
+            Self::V1(v1) => Ok(v1.validate(max_msg_num, max_msg_len)?),
             _ => unreachable!(),
         }
     }
@@ -128,20 +110,18 @@ impl Message {
         }
     }
 
-    pub fn id(&self) -> &str {
+    pub fn set_resp(&mut self) -> Result<()> {
+        self.reset_body()?;
         match self {
-            Self::V1(v1) => v1.bodys.list.get(0).unwrap().id.as_str(),
+            Self::V1(v1) => {
+                v1.head.set_flag_resq(true);
+                Ok(())
+            }
             _ => unreachable!(),
         }
     }
 
-    pub fn defer_time(&self) -> u64 {
-        match self {
-            Self::V1(v1) => v1.bodys.list.get(0).unwrap().defer_time(),
-            _ => unreachable!(),
-        }
-    }
-
+    /// split head-bodys into head-body, head-body, head-body...
     pub fn split(&self) -> Vec<Message> {
         match self {
             Self::V1(v1) => {
@@ -158,12 +138,35 @@ impl Message {
         }
     }
 
-    pub fn set_resp(&mut self) -> Result<()> {
-        self.reset_body()?;
+    //====================== just for head-body message ========================
+    pub fn with_one(head: ProtocolHead, body: ProtocolBody) -> Self {
+        match head.version() {
+            1 => Message::V1(MessageV1::with_one(head, body)),
+            _ => Message::Null,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::V1(v1) => v1.bodys.list.first().unwrap().id.as_str(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn defer_time(&self) -> u64 {
+        match self {
+            Self::V1(v1) => v1.bodys.list.first().unwrap().defer_time(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn is_defer(&self) -> bool {
         match self {
             Self::V1(v1) => {
-                v1.head.set_flag_resq(true);
-                Ok(())
+                if v1.bodys.list.is_empty() {
+                    return false;
+                }
+                return v1.bodys.list.first().unwrap().is_defer();
             }
             _ => unreachable!(),
         }
@@ -189,6 +192,7 @@ impl Message {
             _ => unreachable!(),
         }
     }
+    //====================== just for head-body message ========================
 }
 
 pub fn convert_to_resp(msg: Message) -> Message {

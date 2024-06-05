@@ -198,7 +198,6 @@ impl MetaManager for InstantMessageMeta {
 
     fn load(&mut self) -> Result<()> {
         let metafile = self.meta_filename();
-        println!("metafile = {metafile}");
         check_and_create_filename(metafile.as_str())?;
         self.now.parse_from(metafile.as_str())?;
         self.read_ptr.parse_from(metafile.as_str())?;

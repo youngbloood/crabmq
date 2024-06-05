@@ -44,23 +44,24 @@ pub trait TopicOperation: Send + Sync {
 
     /// return the next defer Message from Storage Media.
     ///
-    /// If there is no message return. Storage Media should block this function until return Ok(Some(message))
+    /// If there is no message return. This function weather block decide by [`block`].
     ///
     /// It should not return message that has been consumed, deleted, or not ready.
-    async fn next_defer(&self) -> Result<Option<Message>>;
+    async fn next_defer(&self, block: bool) -> Result<Option<Message>>;
 
     /// return the next instant Message from Storage Media.
     ///
-    /// If there is no message return. Storage Media should block this function until return Ok(Some(message))
+    /// If there is no message return. This function weather block decide by [`block`].
     ///
     /// It should not return message that has been consumed, deleted, or not ready.
-    async fn next_instant(&self) -> Result<Option<Message>>;
+    async fn next_instant(&self, block: bool) -> Result<Option<Message>>;
 
     /// push a message into topic.
     async fn push(&self, msg: Message) -> Result<()>;
 
+    // mark the message of id has been consumed.
+    // async fn comsume(&self, id: &str) -> Result<()>;
     // TODO: 增加如下接口
-    // comsume(&mut self,id:&str)->Result<()>;
     // ready(&mut self,id:&str)->Result<()>;
     // delete(&mut self,id:&str)->Result<()>;
 }
