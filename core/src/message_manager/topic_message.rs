@@ -79,20 +79,20 @@ impl TopicMessage {
     }
 
     /// push 至storage中进行持久化存储
-    pub async fn push(
-        &self,
-        out_sender: Sender<(String, Message)>,
-        addr: &str,
-        msg: Message,
-    ) -> Result<()> {
-        if !self.use_memory {
-            return self.storage_topic.push(msg).await;
-        }
-        if msg.is_defer() {
-            return self.defer_cache.push(msg).await;
-        }
-        return self.ready_queue.push(msg).await;
-    }
+    // pub async fn push(
+    //     &self,
+    //     out_sender: Sender<(String, Message)>,
+    //     addr: &str,
+    //     msg: Message,
+    // ) -> Result<()> {
+    //     if !self.use_memory {
+    //         return self.storage_topic.push(msg).await;
+    //     }
+    //     if msg.is_defer() {
+    //         return self.defer_cache.push(msg).await;
+    //     }
+    //     return self.ready_queue.push(msg).await;
+    // }
 
     /// 从cache中pop出一个Message
     pub async fn pop(&mut self) -> Option<Message> {

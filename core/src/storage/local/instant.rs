@@ -1,6 +1,7 @@
 use super::{
-    calc_cache_length, gen_filename, record::MessageRecordFile, FileHandler, MetaManager,
-    HEAD_SIZE_PER_FILE, SPLIT_CELL,
+    calc_cache_length, gen_filename,
+    record::{MessageRecord, MessageRecordFile},
+    FileHandler, MetaManager, HEAD_SIZE_PER_FILE, SPLIT_CELL,
 };
 use crate::message::Message;
 use anyhow::{anyhow, Result};
@@ -206,18 +207,18 @@ impl MetaManager for InstantMessageMeta {
         Ok(())
     }
 
-    fn update(&mut self, args: (u64, u64, u64, &str, u64)) {
-        if args.0 != 0 {
-            self.now.factor = args.0;
-        }
-        if args.0 != 0 {
-            self.now.offset = args.1;
-        }
-        if args.0 != 0 {
-            self.now.length = args.2;
-        }
-        self.now.msg_num += args.4;
-        self.now.left_num += args.4;
+    fn update(&mut self, item: MessageRecord) {
+        // if args.0 != 0 {
+        //     self.now.factor = args.0;
+        // }
+        // if args.0 != 0 {
+        //     self.now.offset = args.1;
+        // }
+        // if args.0 != 0 {
+        //     self.now.length = args.2;
+        // }
+        self.now.msg_num += 1;
+        self.now.left_num += 1;
     }
 }
 

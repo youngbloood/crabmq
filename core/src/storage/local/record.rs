@@ -1,7 +1,99 @@
 use super::{SPLIT_CELL, SPLIT_UNIT};
 use anyhow::{anyhow, Result};
 use common::util::check_and_create_filename;
-use std::fs::read_to_string;
+use std::{
+    cmp::Ordering,
+    fmt::format,
+    fs::{self, read_to_string},
+    path::PathBuf,
+};
+use tokio::fs::File;
+
+pub struct MessageRecordManager {
+    dir: PathBuf,
+
+    factor: u64,
+
+    // 每个文件记录的record大小
+    record_num_per_file: u64,
+
+    // 每个文件记录的record记录大小
+    record_size_per_file: u64,
+
+    writer: MessageRecordDisk,
+}
+
+impl MessageRecordManager {
+    pub fn new(dir: PathBuf, record_num_per_file: u64, record_size_per_file: u64) -> Self {
+        MessageRecordManager {
+            dir,
+            factor: 0,
+            record_num_per_file,
+            record_size_per_file,
+            writer: MessageRecordDisk::new(""),
+        }
+    }
+
+    pub async fn load(&mut self) -> Result<()> {
+        let dir = fs::read_dir(&self.dir)?;
+
+        let iter = dir.into_iter();
+        let mut max_record = 0_u64;
+        for entry in iter {
+            let entry = entry?;
+            let filename = entry.file_name().into_string().unwrap();
+            if filename.contains(".record") {
+                if let Ok(record) = filename.as_str().trim_end_matches(".record").parse::<u64>() {
+                    if record > max_record {
+                        max_record = record;
+                    }
+                }
+            }
+        }
+        self.factor = max_record;
+        self.writer = MessageRecordDisk::new(gen_record_filename(self.factor).as_str());
+
+        Ok(())
+    }
+
+    pub async fn push(&mut self, record: MessageRecord) -> Result<()> {
+        if record.calc_len() as u64 + self.writer.size > self.record_size_per_file
+            || self.writer.lines + 1 > self.record_num_per_file
+        {
+            self.persist().await?;
+            self.rorate()
+        }
+        Ok(())
+    }
+
+    fn rorate(&mut self) {}
+
+    async fn persist(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct MessageRecordDisk {
+    filename: String,
+
+    fd: Option<File>,
+
+    lines: u64,
+    size: u64,
+    records: Vec<MessageRecord>,
+}
+
+impl MessageRecordDisk {
+    fn new(filename: &str) -> Self {
+        MessageRecordDisk {
+            filename: filename.to_string(),
+            fd: None,
+            records: vec![],
+            lines: 0,
+            size: 0,
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct MessageRecord {
@@ -51,6 +143,10 @@ impl MessageRecord {
 
         Ok(unit)
     }
+
+    fn calc_len(&self) -> usize {
+        self.format().len()
+    }
 }
 
 /// instant消息的record单独存放在一个文件中
@@ -94,4 +190,8 @@ impl MessageRecordFile {
     pub async fn push(&mut self, record: MessageRecord) -> Result<()> {
         Ok(())
     }
+}
+
+fn gen_record_filename(factor: u64) -> String {
+    format!("{:0>15}.record", factor)
 }

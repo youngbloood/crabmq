@@ -28,6 +28,9 @@ pub trait StorageOperation {
     /// flush the messages to Storage Media.
     async fn flush(&self) -> Result<()>;
 
+    /// push a message into topic.
+    async fn push(&self, msg: Message) -> Result<()>;
+
     /// stop the Storage Media.
     async fn stop(&self) -> Result<()>;
 
@@ -55,9 +58,6 @@ pub trait TopicOperation: Send + Sync {
     ///
     /// It should not return message that has been consumed, deleted, or not ready.
     async fn next_instant(&self, block: bool) -> Result<Option<Message>>;
-
-    /// push a message into topic.
-    async fn push(&self, msg: Message) -> Result<()>;
 
     // mark the message of id has been consumed.
     // async fn comsume(&self, id: &str) -> Result<()>;
@@ -139,18 +139,22 @@ impl StorageWrapper {
         addr: &str,
         msg: Message,
     ) -> Result<()> {
-        let topic_storage = self
-            .get_or_create_topic(msg.get_topic(), msg.topic_ephemeral())
-            .await?;
+        // let topic_storage = self
+        //     .get_or_create_topic(msg.get_topic(), msg.topic_ephemeral())
+        //     .await?;
 
-        if self.persist_factor_now.load(SeqCst) > self.persist_factor {
+        if self.persist_factor_now.load(SeqCst) % self.persist_factor == 0 {
             self.inner.flush().await?;
         }
-        topic_storage.push(msg.clone()).await?;
+        self.inner.push(msg.clone()).await?;
         // 可能client已经关闭，忽略该err
         let _ = out_sender
             .send((addr.to_string(), convert_to_resp(msg)))
             .await;
+        self.persist_factor_now.fetch_add(1, SeqCst);
+        if self.persist_factor_now.load(SeqCst) == u64::MAX - 1 {
+            self.persist_factor_now.store(0, SeqCst)
+        }
         Ok(())
     }
 }

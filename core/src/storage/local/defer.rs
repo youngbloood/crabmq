@@ -105,15 +105,15 @@ impl MetaManager for DeferMessageMeta {
         Ok(())
     }
 
-    fn update(&mut self, args: (u64, u64, u64, &str, u64)) {
-        let mut unit = MessageRecord::default();
-        unit.factor = args.0;
-        unit.offset = args.1;
-        unit.length = args.2;
-        unit.id = args.3.to_string();
-        unit.defer_time = args.4;
+    fn update(&mut self, item: MessageRecord) {
+        // let mut unit = MessageRecord::default();
+        // unit.factor = args.0;
+        // unit.offset = args.1;
+        // unit.length = args.2;
+        // unit.id = args.3.to_string();
+        // unit.defer_time = args.4;
 
-        self.list.push(unit);
+        self.list.push(item);
         self.list.sort_by_key(|u| u.defer_time);
     }
 

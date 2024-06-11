@@ -3,6 +3,8 @@ use futures::executor::block_on;
 use futures::Future;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::{
     env::var,
     fs::{self, File},
@@ -37,8 +39,8 @@ pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u
     }
 }
 
-pub fn check_and_create_dir(dir: &str) -> Result<()> {
-    let dir_path = Path::new(dir);
+pub fn check_and_create_dir<P: AsRef<OsStr>>(dir: P) -> Result<()> {
+    let dir_path = Path::new(&dir);
     if !dir_path.exists() {
         fs::create_dir_all(dir_path).expect("create {dir} failed");
     } else if dir_path.is_file() {
@@ -52,8 +54,8 @@ pub fn check_and_create_dir(dir: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn check_and_create_filename(filename: &str) -> Result<()> {
-    let path = Path::new(filename);
+pub fn check_and_create_filename<P: AsRef<OsStr>>(filename: P) -> Result<()> {
+    let path = Path::new(&filename);
     if !path.exists() {
         File::create(path)?;
     } else if !path.is_file() {
@@ -67,34 +69,53 @@ pub fn check_and_create_filename(filename: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn check_exist(path: &str) -> bool {
-    let p = Path::new(path);
-    return p.exists();
+pub fn check_exist<P: AsRef<OsStr>>(path: P) -> bool {
+    let p = Path::new(&path);
+    p.exists()
 }
 
 pub fn is_debug() -> bool {
     let v: String = var("FOR_DEBUG").unwrap_or_default();
-    match v.to_lowercase().as_str() {
-        "t" | "true" | "1" | "on" | "open" => {
-            return true;
-        }
-        _ => {
-            return false;
-        }
-    }
+    matches!(
+        v.to_lowercase().as_str(),
+        "t" | "true" | "1" | "on" | "open"
+    )
 }
 
 pub fn random_str(length: usize) -> String {
-    let result = thread_rng()
+    thread_rng()
         .sample_iter(&Alphanumeric)
         .take(length)
         .map(char::from)
-        .collect();
-    result
+        .collect()
 }
 
 pub async fn interval(dur: Duration) -> Interval {
     let mut ticker = async_interval(dur);
     ticker.tick().await;
     ticker
+}
+
+pub fn dir_recursive(dir: PathBuf) -> Result<Vec<PathBuf>> {
+    if !check_exist(&dir) {
+        return Err(anyhow!("dir[{dir:?}] not exist"));
+    }
+
+    let dirs = fs::read_dir(&dir)
+        .expect("read dir[{dir:?}] failed")
+        .enumerate();
+
+    let mut list = vec![];
+    for (_, dr) in dirs {
+        assert!(dr.is_ok());
+        let entry = dr.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            let leaves = dir_recursive(dir.clone().join(entry.file_name()))?;
+            list.extend(leaves);
+            continue;
+        }
+        list.push(dir.join(entry.file_name()));
+    }
+
+    Ok(list)
 }

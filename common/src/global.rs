@@ -1,5 +1,6 @@
 use crate::{util::type_of, ArcMux};
 use anyhow::*;
+use chrono::Local;
 use lazy_static::*;
 use parking_lot::Mutex;
 use snowflake::SnowflakeIdBucket;
@@ -10,6 +11,7 @@ use tokio::sync::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
+use ulid_rs::Ulid;
 
 lazy_static! {
     // 全局cancel信号
@@ -21,6 +23,8 @@ lazy_static! {
     ///
     /// SnowflakeIdBucket具有buffer
     pub static ref SNOWFLAKE: SnowFlake = SnowFlake::new(1, 1);
+
+    pub static ref ULID: Ulid = Ulid::new(Local::now().timestamp() as _, ||4);
 
     /// 全局的client过期
     pub static ref CLIENT_DROP_GUARD: ClientDropGuard = ClientDropGuard::init();
@@ -133,6 +137,10 @@ impl<T> Drop for Guard<T> {
         debug!("drop the guard of type: {type_name}")
     }
 }
+
+// struct ULID {
+//     inner: Ulid,
+// }
 
 #[cfg(test)]
 mod tests {

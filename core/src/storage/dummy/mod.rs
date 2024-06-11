@@ -28,6 +28,10 @@ impl StorageOperation for Dummy {
         Ok(())
     }
 
+    async fn push(&self, msg: Message) -> Result<()> {
+        Ok(())
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -73,14 +77,5 @@ impl TopicOperation for TopicDummy {
 
     async fn next_instant(&self, _: bool) -> Result<Option<Message>> {
         Ok(self.get().instant.pop().await)
-    }
-
-    async fn push(&self, msg: Message) -> Result<()> {
-        if msg.is_defer() {
-            self.get().defer.push(msg).await?;
-        } else {
-            self.get().instant.push(msg).await?;
-        }
-        Ok(())
     }
 }

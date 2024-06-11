@@ -1,3 +1,7 @@
+/*!
+ * Deprecated
+ *
+ */
 mod defer;
 mod instant;
 mod record;
@@ -16,6 +20,7 @@ use common::{
     util::{check_and_create_dir, check_and_create_filename, check_exist, interval, is_debug},
 };
 use parking_lot::RwLock;
+use record::{MessageRecord, MessageRecordManager};
 use std::{
     collections::HashMap,
     fs,
@@ -97,7 +102,7 @@ impl StorageOperation for StorageLocal {
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name.to_str().unwrap());
             debug!("StorageLocal: load topic: {}", topic_name.to_str().unwrap());
 
-            let instant = Manager::new(
+            let instant = MessageManager::new(
                 parent.join("instant"),
                 InstantMessageMeta::new(parent.join("instant").to_str().unwrap()),
                 self.max_msg_num_per_file,
@@ -105,7 +110,7 @@ impl StorageOperation for StorageLocal {
             );
             instant.load().await?;
 
-            let defer = Manager::new(
+            let defer = MessageManager::new(
                 parent.join("defer"),
                 DeferMessageMeta::new(parent.join("defer").to_str().unwrap()),
                 self.max_msg_num_per_file,
@@ -124,6 +129,15 @@ impl StorageOperation for StorageLocal {
             );
         }
 
+        Ok(())
+    }
+
+    async fn push(&self, msg: Message) -> Result<()> {
+        // if msg.is_defer() {
+        //     self.get().defer.push(msg).await?;
+        //     return Ok(());
+        // }
+        // self.get().instant.push(msg).await?;
         Ok(())
     }
 
@@ -147,26 +161,26 @@ impl StorageOperation for StorageLocal {
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
             debug!("StorageLocal: load topic: {}", topic_name);
 
-            let instant = Manager::new(
+            // init the topic-message
+            let instant = MessageManager::new(
                 parent.join("instant"),
                 InstantMessageMeta::new(parent.join("instant").to_str().unwrap()),
                 self.max_msg_num_per_file,
                 self.max_size_per_file,
             );
-            instant.load().await?;
-
-            let defer = Manager::new(
+            let defer = MessageManager::new(
                 parent.join("defer"),
                 DeferMessageMeta::new(parent.join("defer").to_str().unwrap()),
                 self.max_msg_num_per_file,
                 self.max_size_per_file,
             );
-            defer.load().await?;
 
-            self.topics.write().insert(
-                topic_name.to_string(),
-                Guard::new(TopicMessageBase::new(topic_name, instant, defer)),
-            );
+            let mut topic_mm = TopicMessageBase::new(topic_name, instant, defer);
+            topic_mm.load().await?;
+
+            self.topics
+                .write()
+                .insert(topic_name.to_string(), Guard::new(topic_mm));
         }
         let rg = self.topics.read();
         let topic = rg.get(topic_name).unwrap();
@@ -178,21 +192,27 @@ type TopicMessage = Guard<TopicMessageBase>;
 
 struct TopicMessageBase {
     name: String,
-    instant: Manager<InstantMessageMeta>,
-    defer: Manager<DeferMessageMeta>,
+    instant: MessageManager<InstantMessageMeta>,
+    defer: MessageManager<DeferMessageMeta>,
 }
 
 impl TopicMessageBase {
     fn new(
         name: &str,
-        instant: Manager<InstantMessageMeta>,
-        defer: Manager<DeferMessageMeta>,
+        instant: MessageManager<InstantMessageMeta>,
+        defer: MessageManager<DeferMessageMeta>,
     ) -> Self {
         TopicMessageBase {
             name: name.to_string(),
             instant,
             defer,
         }
+    }
+
+    async fn load(&mut self) -> Result<()> {
+        self.instant.load().await?;
+        self.defer.load().await?;
+        Ok(())
     }
 }
 
@@ -322,17 +342,17 @@ impl TopicOperation for TopicMessage {
         }
     }
 
-    async fn push(&self, msg: Message) -> Result<()> {
-        if msg.is_defer() {
-            self.get().defer.push(msg).await?;
-            return Ok(());
-        }
-        self.get().instant.push(msg).await?;
-        Ok(())
-    }
+    // async fn push(&self, msg: Message) -> Result<()> {
+    //     if msg.is_defer() {
+    //         self.get().defer.push(msg).await?;
+    //         return Ok(());
+    //     }
+    //     self.get().instant.push(msg).await?;
+    //     Ok(())
+    // }
 }
 
-struct Manager<T: MetaManager> {
+struct MessageManager<T: MetaManager> {
     /// 消息存放目录
     dir: PathBuf,
 
@@ -352,12 +372,12 @@ struct Manager<T: MetaManager> {
     writer: RwLock<MessageDisk>,
 }
 
-impl<T> Manager<T>
+impl<T> MessageManager<T>
 where
     T: MetaManager,
 {
     pub fn new(dir: PathBuf, t: T, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
-        Manager {
+        MessageManager {
             dir,
             factor: AtomicU64::new(0),
             meta: Guard::new(t),
@@ -375,18 +395,16 @@ where
             self.rorate()?;
         }
 
-        if msg.is_defer() {
-            let id = msg.id();
-            self.meta.get_mut().update((
-                self.factor.load(SeqCst),
-                self.writer.read().msg_size,
-                msg.calc_len() as _,
-                id,
-                msg.defer_time(),
-            ));
-        } else {
-            self.meta.get_mut().update((0, 0, 0, "", 1));
-        }
+        let id = msg.id();
+        let item = MessageRecord {
+            factor: self.factor.load(SeqCst),
+            offset: self.writer.read().msg_size,
+            length: msg.calc_len() as _,
+            id: id.to_string(),
+            defer_time: msg.defer_time(),
+        };
+
+        self.meta.get_mut().update(item);
         self.writer.write().push(msg);
         Ok(())
     }
@@ -612,10 +630,6 @@ impl MessageDisk {
             Some(fd) => {
                 let mut fwg = fd.write();
 
-                // 写入msg_size
-                // fwg.seek(SeekFrom::Start(0)).await?;
-                // fwg.write_all(&self.msg_size.to_be_bytes()).await?;
-
                 // 写入msg_num
                 fwg.seek(SeekFrom::Start(0)).await?;
                 fwg.write_all(&self.msg_num.to_be_bytes()).await?;
@@ -639,7 +653,7 @@ trait MetaManager: Sync + Send + std::fmt::Debug {
     fn new(dir: &str) -> Self;
     async fn consume(&mut self) -> Result<()>;
     fn load(&mut self) -> Result<()>;
-    fn update(&mut self, args: (u64, u64, u64, &str, u64));
+    fn update(&mut self, _: MessageRecord);
     fn persist(&self) -> Result<()>;
     fn meta_filename(&self) -> String;
 }
@@ -705,7 +719,7 @@ pub mod tests {
     use bytes::Bytes;
     use common::util::{check_and_create_filename, random_str};
     use rand::Rng;
-    use std::path::Path;
+    use std::{fs, os, path::Path};
     use tokio::{
         fs::OpenOptions,
         io::{AsyncSeekExt, AsyncWriteExt},
@@ -763,7 +777,7 @@ pub mod tests {
                 .get_or_create_topic("default")
                 .await
                 .expect("get_or_create_topic failed");
-            assert!(topic_mm
+            assert!(local
                 .push(Message::with_one(head.clone(), body))
                 .await
                 .is_ok());
@@ -819,7 +833,7 @@ pub mod tests {
                 .get_or_create_topic("default")
                 .await
                 .expect("get_or_create_topic failed");
-            assert!(topic_mm
+            assert!(local
                 .push(Message::with_one(head.clone(), body))
                 .await
                 .is_ok());
@@ -887,5 +901,7 @@ pub mod tests {
         assert!(fd.rewind().await.is_ok());
         assert!(fd.write("ABC".as_bytes()).await.is_ok());
         assert!(fd.flush().await.is_ok());
+
+        let _ = fs::remove_file("./test_file_seek");
     }
 }
