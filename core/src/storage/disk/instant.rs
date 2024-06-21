@@ -1,20 +1,12 @@
 use super::{
     message_manager::MessageManager,
     record::{
-        FdCache, MessageRecord, NormalPtr, RecordManager, RecordManagerStrategy as _,
-        RecordManagerStrategyNormal,
+        FdCache, NormalPtr, RecordManager, RecordManagerStrategy as _, RecordManagerStrategyNormal,
     },
 };
 use crate::message::Message;
 use anyhow::{anyhow, Result};
-use common::util::check_exist;
-use crossbeam::sync::ShardedLock;
-use std::sync::atomic::Ordering::SeqCst;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::AtomicU64,
-};
+use std::path::PathBuf;
 
 pub struct Instant {
     dir: PathBuf,
@@ -117,7 +109,12 @@ impl Instant {
         Ok(())
     }
 
-    /// return next message in storage.
+    /// seek a message from Storage.
+    pub async fn seek(&self) -> Result<Option<Message>> {
+        Ok(None)
+    }
+
+    /// pop a message from Storage, then the read_ptr will rorate.
     pub async fn pop(&self) -> Result<Option<Message>> {
         Ok(None)
     }
@@ -159,15 +156,12 @@ impl Instant {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::protocol::{ProtocolBody, ProtocolHead};
     use bytes::Bytes;
     use common::util::random_str;
-    use fs::{File, OpenOptions};
     use rand::Rng as _;
-
-    use crate::protocol::{ProtocolBody, ProtocolHead};
-
-    use super::*;
-    use std::{io::Write, path::Path, time::Duration};
+    use std::path::Path;
 
     #[test]
     fn test_instant_new() {
@@ -238,6 +232,32 @@ mod tests {
                     Ok(msg_opt) => println!("msg_opt = {msg_opt:?}"),
                     Err(e) => eprintln!("err={e:?}"),
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_instant_meta_seek() {
+        let instant: Instant = get_instant(Path::new("../target/topic1").to_path_buf()).await;
+        println!("load success");
+
+        for i in 0..20 {
+            let result = instant.read_ptr.seek();
+            if result.is_err() {
+                panic!("{:?}", result.unwrap());
+            }
+            assert!(result.is_ok());
+            if let Some(record) = result.unwrap() {
+                println!("record = {record:?}");
+                match instant.message_manager.find_by(record).await {
+                    Ok(msg_opt) => println!("msg_opt = {msg_opt:?}\n"),
+                    Err(e) => eprintln!("err={e:?}"),
+                }
+            }
+
+            if i % 2 == 0 {
+                println!("\n\nrorate to next:\n");
+                let _ = instant.read_ptr.next();
             }
         }
     }

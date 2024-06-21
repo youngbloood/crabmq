@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-pub type Memory = DynamicQueue<Message>;
+use super::CacheOperation;
 
 pub struct MessageCache {
     sender: UnboundedSender<Message>,
@@ -41,9 +41,16 @@ impl Queue for MessageCache {
 }
 
 pub struct MessageCacheSlidingWindows {
+    /// 流量控制
     ctrl: FlowControl,
 
-    read_index: AtomicUsize,
+    /// 滑动窗口大小
+    slide_win: AtomicUsize,
+
+    /// 读取msgs的pos指针
+    read_ptr: AtomicUsize,
+
+    /// msgs消息列表
     msgs: RwLock<Vec<MessageWrapper>>,
 }
 
@@ -69,37 +76,50 @@ impl MessageWrapper {
 }
 
 impl MessageCacheSlidingWindows {
-    pub fn new(size: usize) -> Self {
+    pub fn new(cap: usize, slide_win: usize) -> Self {
+        let mut _slide_win = slide_win;
+        if _slide_win > cap {
+            _slide_win = cap;
+        }
         MessageCacheSlidingWindows {
-            ctrl: FlowControl::new(size),
-            read_index: AtomicUsize::default(),
+            ctrl: FlowControl::new(cap),
+            slide_win: AtomicUsize::new(_slide_win),
+            read_ptr: AtomicUsize::default(),
             msgs: RwLock::default(),
         }
     }
+}
 
-    pub fn seek_first(&self) -> Option<MessageWrapper> {
-        if self.read_index.load(SeqCst) >= self.msgs.read().len() {
-            return None;
+impl CacheOperation for MessageCacheSlidingWindows {
+    #[doc = " push a message into cache. it will be block if the cache is filled."]
+    async fn try_push(&self, msg: Message) -> Result<()> {
+        if self.ctrl.has_permit() {
+            return Err(anyhow!("not has permit to push msg"));
         }
-        let rd = self.msgs.read();
-        if let Some(first_wrapper) = rd.first() {
-            return Some(first_wrapper.clone());
-        }
-        None
+        self.push(msg).await
     }
 
-    pub fn seek_next(&self) -> Option<Message> {
-        if self.read_index.load(SeqCst) >= self.msgs.read().len() {
+    #[doc = " push a message into cache. it will be block if the cache is filled."]
+    async fn push(&self, msg: Message) -> Result<()> {
+        self.ctrl.grant(1).await;
+        let mut wd = self.msgs.write();
+        wd.push(MessageWrapper::new(msg));
+        Ok(())
+    }
+
+    #[doc = " pop a message from cache. if it is defer message, cache should control it pop when it\'s expired. or pop the None"]
+    async fn pop(&self) -> Option<Message> {
+        if self.read_ptr.load(SeqCst) >= self.slide_win.load(SeqCst) {
             return None;
         }
-        if let Some(msg_wrapper) = self.msgs.read().get(self.read_index.load(SeqCst)) {
+        if let Some(msg_wrapper) = self.msgs.read().get(self.read_ptr.load(SeqCst)) {
             return Some(msg_wrapper.msg.clone());
         }
-        self.read_index.fetch_add(1, SeqCst);
+        self.read_ptr.fetch_add(1, SeqCst);
         None
     }
 
-    pub async fn consume(&self, id: &str) -> Option<Message> {
+    async fn consume(&self, id: &str) -> Option<Message> {
         let mut wd = self.msgs.write();
         let mut index = -1;
         for (i, msg_wrapper) in wd.iter_mut().enumerate() {
@@ -113,23 +133,25 @@ impl MessageCacheSlidingWindows {
         if index == 0 {
             if let Some(msg_wrapper) = wd.pop() {
                 self.ctrl.revert(1).await;
+                if self.read_ptr.load(SeqCst) >= 1 {
+                    self.read_ptr.fetch_sub(1, SeqCst);
+                }
+
                 return Some(msg_wrapper.msg);
             }
         }
         None
     }
 
-    async fn push(&self, msg: Message) -> Result<()> {
-        self.ctrl.grant(1).await;
-        let mut wd = self.msgs.write();
-        wd.push(MessageWrapper::new(msg));
-        Ok(())
-    }
-
-    async fn try_push(&self, msg: Message) -> Result<()> {
-        if self.ctrl.has_permit() {
-            return Err(anyhow!("not has permit to push msg"));
+    #[doc = " resize the buffer length in cache."]
+    async fn resize(&self, cap: usize, slide_win: usize) {
+        self.ctrl.resize(cap);
+        let mut _slide_win = slide_win;
+        if _slide_win > cap {
+            _slide_win = cap;
         }
-        self.push(msg).await
+        self.slide_win
+            .store(_slide_win, std::sync::atomic::Ordering::SeqCst);
+        self.slide_win.store(_slide_win, SeqCst);
     }
 }

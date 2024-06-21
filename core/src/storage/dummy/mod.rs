@@ -1,12 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
-
 use super::{storage::StorageOperation, TopicOperation};
 use crate::{
-    cache::{cache::CacheWrapper, CACHE_TYPE_MEM},
+    cache::{CacheWrapper, CACHE_TYPE_MEM},
     message::Message,
 };
 use anyhow::Result;
 use common::global::Guard;
+use std::{collections::HashMap, sync::Arc};
 
 pub struct Dummy {
     buf: usize,
@@ -59,8 +58,8 @@ impl TopicDummyBase {
     pub fn new(name: &str, buf: usize) -> Self {
         TopicDummyBase {
             name: name.to_string(),
-            instant: CacheWrapper::new(CACHE_TYPE_MEM, buf),
-            defer: CacheWrapper::new(CACHE_TYPE_MEM, buf),
+            instant: CacheWrapper::new(CACHE_TYPE_MEM, buf, buf / 2),
+            defer: CacheWrapper::new(CACHE_TYPE_MEM, buf, buf / 2),
         }
     }
 }
@@ -71,8 +70,16 @@ impl TopicOperation for TopicDummy {
         self.get().name.as_str()
     }
 
+    async fn seek_defer(&self, _: bool) -> Result<Option<Message>> {
+        Ok(None)
+    }
+
     async fn next_defer(&self, _: bool) -> Result<Option<Message>> {
         Ok(self.get().defer.pop().await)
+    }
+
+    async fn seek_instant(&self, _: bool) -> Result<Option<Message>> {
+        Ok(None)
     }
 
     async fn next_instant(&self, _: bool) -> Result<Option<Message>> {

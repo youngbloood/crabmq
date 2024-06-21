@@ -454,13 +454,13 @@ impl TimePtr {
         }
     }
 
-    fn read(&self) -> Result<Option<MessageRecord>> {
+    fn read(&self) -> Result<(bool, Option<MessageRecord>)> {
         let record_rd = self
             .record_filename
             .read()
             .expect("get sharedlock write failed");
         if !check_exist(&*record_rd) {
-            return Ok(None);
+            return Ok((false, None));
         }
         let fd = self.fd_cache.get_or_create(&record_rd)?;
         let mut fwd = fd.write();
@@ -474,23 +474,28 @@ impl TimePtr {
 
         // println!("index={}, line.len={}", index, lines.len());
         if index < lines.len() as u64 {
-            self.index.fetch_add(1, SeqCst);
             let line = lines[index as usize];
             if line.is_empty() {
                 // println!("index={} is empty", index);
-                return Ok(None);
+                return Ok((true, None));
             }
             let mr = MessageRecord::parse_from(line)?;
-            return Ok(Some(mr));
+            return Ok((false, Some(mr)));
         }
-        Ok(None)
+        Ok((true, None))
+    }
+
+    pub fn seek(&self) -> Result<Option<MessageRecord>> {
+        match self.read() {
+            Ok((_, msg)) => Ok(msg),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn next(&self) -> Result<Option<MessageRecord>> {
         match self.read() {
-            Ok(val) => match val {
-                Some(msg) => Ok(Some(msg)),
-                None => {
+            Ok((over_line, val)) => {
+                if over_line {
                     let mut filenames = dir_recursive(self.defer_dir.clone()).unwrap();
                     filenames.sort();
                     for filename in filenames {
@@ -504,9 +509,15 @@ impl TimePtr {
                             break;
                         }
                     }
-                    self.read()
+                } else {
+                    self.index.fetch_add(1, SeqCst);
                 }
-            },
+
+                match val {
+                    Some(msg) => Ok(Some(msg)),
+                    None => Ok(None),
+                }
+            }
             Err(e) => Err(e),
         }
     }

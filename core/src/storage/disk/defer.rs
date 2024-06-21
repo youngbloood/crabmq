@@ -127,6 +127,12 @@ impl Defer {
         Ok(())
     }
 
+    /// seek a message from Storage.
+    pub async fn seek(&self) -> Result<Option<Message>> {
+        Ok(None)
+    }
+
+    /// pop a message from Storage, then the read_ptr will rorate.
     pub async fn pop(&self) -> Result<Option<Message>> {
         Ok(None)
     }
@@ -226,6 +232,30 @@ mod tests {
                     Ok(msg_opt) => println!("msg_opt = {msg_opt:?}"),
                     Err(e) => eprintln!("err={e:?}"),
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_defer_meta_seek() {
+        let defer = get_defer(Path::new("../target/topic1").to_path_buf()).await;
+        for i in 0..600 {
+            let result = defer.read_ptr.seek();
+            if result.is_err() {
+                panic!("{:?}", result.unwrap());
+            }
+            assert!(result.is_ok());
+            if let Some(record) = result.unwrap() {
+                println!("record = {record:?}");
+
+                match defer.message_manager.find_by(record).await {
+                    Ok(msg_opt) => println!("msg_opt = {msg_opt:?}"),
+                    Err(e) => eprintln!("err={e:?}"),
+                }
+            }
+            if i % 2 == 0 {
+                println!("rorate to next\n\n");
+                let _ = defer.read_ptr.next();
             }
         }
     }

@@ -1,13 +1,9 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use crate::{
-    cache::{cache::CacheWrapper, CACHE_TYPE_MEM},
+    cache::{CacheWrapper, CACHE_TYPE_MEM},
     message::Message,
-    storage::{new_storage_wrapper, StorageWrapper, TopicOperation, STORAGE_TYPE_DUMMY},
+    storage::{TopicOperation, STORAGE_TYPE_DUMMY},
     topic::topic::Topic,
     tsuixuq::TsuixuqOption,
 };
@@ -17,7 +13,7 @@ use common::{
     global::{Guard, CANCEL_TOKEN},
     util::interval,
 };
-use tokio::{select, sync::mpsc::Sender};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
@@ -57,8 +53,8 @@ impl TopicMessage {
                 start_message_loop: false,
                 start_defer_message_loop: false,
                 topic,
-                ready_queue: CacheWrapper::new(CACHE_TYPE_MEM, 100),
-                defer_cache: CacheWrapper::new(CACHE_TYPE_MEM, 100),
+                ready_queue: CacheWrapper::new(CACHE_TYPE_MEM, 100, 100),
+                defer_cache: CacheWrapper::new(CACHE_TYPE_MEM, 100, 100),
                 storage_topic: s,
                 stop: CancellationToken::new(),
             });
@@ -71,8 +67,8 @@ impl TopicMessage {
             start_message_loop: false,
             start_defer_message_loop: false,
             topic,
-            ready_queue: CacheWrapper::new(CACHE_TYPE_MEM, 100),
-            defer_cache: CacheWrapper::new(CACHE_TYPE_MEM, 100),
+            ready_queue: CacheWrapper::new(CACHE_TYPE_MEM, 100, 100),
+            defer_cache: CacheWrapper::new(CACHE_TYPE_MEM, 100, 100),
             storage_topic: s,
             stop: CancellationToken::new(),
         })
@@ -118,6 +114,26 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
             }
 
             // 不断获取defer message，并发送至defer_cache中
+            msg = guard.get().storage_topic.seek_defer(true) => {
+                match msg {
+                    Ok(msg) => {
+                        if msg.is_none(){
+                            continue;
+                        }
+                        debug!("topic[{topic_name}] get defer msg: {msg:?}");
+                        let msg = msg.unwrap();
+                        if (guard.get().defer_cache.try_push(msg).await).is_ok() {
+                           let _ = guard.get().storage_topic.next_defer(false).await;
+                        }
+                    }
+
+                    Err(e) => {
+                        error!("next instant err:{e}");
+                    }
+                }
+            }
+
+
             msg = guard.get().storage_topic.next_defer(true) => {
                 match msg {
                     Ok(msg) => {
@@ -136,7 +152,7 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
             }
 
             // 不断获取instant message，并发送至ready_queue中
-            msg = guard.get().storage_topic.next_instant(true) => {
+            msg = guard.get().storage_topic.seek_instant(true) => {
                 match msg {
                     Ok(msg) => {
                         if msg.is_none(){
@@ -144,7 +160,9 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
                         }
                         debug!("topic[{topic_name}] get instant msg: {msg:?}");
                         let msg = msg.unwrap();
-                        let _ = guard.get().ready_queue.push(msg).await;
+                        if  guard.get().ready_queue.push(msg).await.is_ok() {
+                            let _ = guard.get().storage_topic.next_instant(false).await;
+                        }
                     }
 
                     Err(e) => {

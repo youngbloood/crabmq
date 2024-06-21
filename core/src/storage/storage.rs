@@ -1,6 +1,7 @@
+use super::disk::StorageDisk;
 use super::dummy::TopicDummyBase;
 use super::STORAGE_TYPE_DUMMY;
-use super::{dummy::Dummy, local::StorageLocal, STORAGE_TYPE_LOCAL};
+use super::{dummy::Dummy, STORAGE_TYPE_LOCAL};
 use crate::message::{convert_to_resp, Message};
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
@@ -45,12 +46,22 @@ pub trait TopicOperation: Send + Sync {
     /// return the topic name.
     fn name(&self) -> &str;
 
+    /// return the seek defer Message from Storage Media.
+    ///
+    /// If there is no seek Message return. This function weather block decide by [`block`].
+    async fn seek_defer(&self, block: bool) -> Result<Option<Message>>;
+
     /// return the next defer Message from Storage Media.
     ///
     /// If there is no message return. This function weather block decide by [`block`].
     ///
     /// It should not return message that has been consumed, deleted, or not ready.
     async fn next_defer(&self, block: bool) -> Result<Option<Message>>;
+
+    /// return the seek instant Message from Storage Media.
+    ///
+    /// If there is no message return. This function weather block decide by [`block`].
+    async fn seek_instant(&self, block: bool) -> Result<Option<Message>>;
 
     /// return the next instant Message from Storage Media.
     ///
@@ -68,7 +79,7 @@ pub trait TopicOperation: Send + Sync {
 
 #[enum_dispatch(StorageOperation)]
 pub enum StorageEnum {
-    Local(StorageLocal),
+    Local(StorageDisk),
     Memory(Dummy),
 }
 
@@ -189,7 +200,7 @@ pub async fn new_storage_wrapper(
     persist_period: u64,
 ) -> Result<Guard<StorageWrapper>> {
     let storage = match storage_type {
-        STORAGE_TYPE_LOCAL => StorageEnum::Local(StorageLocal::new(
+        STORAGE_TYPE_LOCAL => StorageEnum::Local(StorageDisk::new(
             dir,
             max_msg_num_per_file,
             max_size_per_file,
@@ -197,7 +208,7 @@ pub async fn new_storage_wrapper(
 
         STORAGE_TYPE_DUMMY => StorageEnum::Memory(Dummy::new(100)),
 
-        _ => StorageEnum::Local(StorageLocal::new(
+        _ => StorageEnum::Local(StorageDisk::new(
             dir,
             max_msg_num_per_file,
             max_size_per_file,

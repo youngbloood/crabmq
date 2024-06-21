@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use semver::Op;
 use std::{
     collections::HashMap,
     fs,
@@ -181,6 +182,11 @@ impl TopicOperation for TopicMessage {
         self.get().name.as_str()
     }
 
+    async fn seek_defer(&self, block: bool) -> Result<Option<Message>> {
+        let msg = self.get().defer.seek().await?;
+        Ok(msg)
+    }
+
     async fn next_defer(&self, block: bool) -> Result<Option<Message>> {
         let mut ticker = interval(Duration::from_secs(1)).await;
         loop {
@@ -239,6 +245,11 @@ impl TopicOperation for TopicMessage {
                 }
             }
         }
+    }
+
+    async fn seek_instant(&self, block: bool) -> Result<Option<Message>> {
+        let msg = self.get().instant.seek().await?;
+        Ok(msg)
     }
 
     async fn next_instant(&self, block: bool) -> Result<Option<Message>> {
