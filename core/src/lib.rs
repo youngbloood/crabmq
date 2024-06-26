@@ -5,7 +5,7 @@ mod compress;
 pub mod conn;
 pub mod error;
 pub mod message;
-mod message_manager;
+mod message_sub;
 pub mod protocol;
 mod service;
 mod storage;

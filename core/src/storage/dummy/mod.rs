@@ -1,4 +1,4 @@
-use super::{storage::StorageOperation, TopicOperation};
+use super::{StorageOperation, TopicOperation};
 use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
     message::Message,
@@ -74,15 +74,15 @@ impl TopicOperation for TopicDummy {
         Ok(None)
     }
 
-    async fn next_defer(&self, _: bool) -> Result<Option<Message>> {
-        Ok(self.get().defer.pop().await)
+    async fn next_defer(&self, block: bool) -> Result<Option<Message>> {
+        Ok(self.get().defer.pop(block).await)
     }
 
     async fn seek_instant(&self, _: bool) -> Result<Option<Message>> {
         Ok(None)
     }
 
-    async fn next_instant(&self, _: bool) -> Result<Option<Message>> {
-        Ok(self.get().instant.pop().await)
+    async fn next_instant(&self, block: bool) -> Result<Option<Message>> {
+        Ok(self.get().instant.pop(block).await)
     }
 }

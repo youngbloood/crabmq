@@ -1,20 +1,20 @@
+use super::gen_filename;
+use super::record::{FdCache, MessageRecord};
 use crate::message::Message;
 use crate::protocol::{ProtocolBody, ProtocolHead};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use common::util::{check_and_create_filename, check_exist, is_debug};
+use common::util::{check_exist, is_debug};
 use parking_lot::RwLock;
-use std::fs;
-use std::io::SeekFrom;
+use std::fs::{self};
+use std::io::{Seek as _, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;
 use std::pin::Pin;
 use std::sync::atomic::Ordering::SeqCst;
 use std::{path::PathBuf, sync::atomic::AtomicU64};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+use tokio::fs::File as AsyncFile;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, warn};
-
-use super::gen_filename;
-use super::record::{FdCacheAync, MessageRecord};
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
@@ -26,7 +26,7 @@ pub struct MessageManager {
     /// 文件rorate因子
     factor: AtomicU64,
 
-    fd_cache: FdCacheAync,
+    fd_cache: FdCache,
 
     /// 每个文件最大消息数量
     max_msg_num_per_file: u64,
@@ -35,34 +35,34 @@ pub struct MessageManager {
     max_size_per_file: u64,
 
     /// 写入消息
-    writer: RwLock<MessageDisk>,
+    writer: MessageDisk,
 }
 
 impl MessageManager {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
-        let fd_cache = FdCacheAync::new(10);
+        let fd_cache = FdCache::new(10);
         MessageManager {
             dir: dir.clone(),
             factor: AtomicU64::new(0),
             fd_cache: fd_cache.clone(),
             max_msg_num_per_file,
             max_size_per_file,
-            writer: RwLock::new(MessageDisk::new(dir.join(gen_filename(0)), fd_cache)),
+            writer: MessageDisk::new(dir.join(gen_filename(0)), fd_cache),
         }
     }
 
     pub async fn push(&self, msg: Message) -> Result<MessageRecord> {
-        if self.writer.read().msg_num >= self.max_msg_num_per_file
-            || self.writer.read().msg_size + msg.calc_len() as u64 > self.max_size_per_file
+        if self.writer.msg_num.load(SeqCst) >= self.max_msg_num_per_file
+            || self.writer.msg_size.load(SeqCst) + msg.calc_len() as u64 > self.max_size_per_file
         {
-            self.writer.write().persist().await?;
+            self.writer.persist().await?;
             self.rorate()?;
         }
 
         let id = msg.id();
         let record = MessageRecord {
             factor: self.factor.load(SeqCst),
-            offset: self.writer.read().msg_size,
+            offset: self.writer.msg_size.load(SeqCst),
             length: msg.calc_len() as _,
             id: id.to_string(),
             defer_time: msg.defer_time(),
@@ -70,7 +70,7 @@ impl MessageManager {
             delete_time: 0,
         };
 
-        self.writer.write().push(msg);
+        self.writer.push(msg);
 
         Ok(record)
     }
@@ -78,9 +78,8 @@ impl MessageManager {
     pub fn rorate(&self) -> Result<()> {
         self.factor.fetch_add(1, SeqCst);
         let next_filename = self.dir.join(gen_filename(self.factor.load(SeqCst)));
-        let mut wg = self.writer.write();
-        wg.reset_with_filename(next_filename);
-        check_and_create_filename(&wg.filename)?;
+        self.writer.reset_with_filename(next_filename);
+        // check_and_create_filename(&self.writer.filename)?;
         Ok(())
     }
 
@@ -118,35 +117,27 @@ impl MessageManager {
         // 初始化Manager.factor和Manager.writer，为下次写入消息时发生文件滚动做准备
         self.factor.store(max_factor, SeqCst);
 
-        let mut wg = self.writer.write();
-        wg.filename = self.dir.join(gen_filename(self.factor.load(SeqCst)));
+        self.writer
+            .reset_with_filename(self.dir.join(gen_filename(self.factor.load(SeqCst))));
 
-        if check_exist(&wg.filename) {
-            wg.load().await?;
+        if check_exist(&*self.writer.filename.read()) {
+            self.writer.load().await?;
         }
 
         Ok(())
     }
 
     pub async fn persist(&self) -> Result<()> {
-        if self.writer.read().msgs.read().is_empty() {
+        if self.writer.msgs.read().is_empty() {
             return Ok(());
         }
-        self.writer.write().persist().await?;
+        self.writer.persist().await?;
         Ok(())
     }
 
     pub async fn find_by(&self, record: MessageRecord) -> Result<Option<Message>> {
         let filename = self.dir.join(gen_filename(record.factor));
-        let fd = self.fd_cache.get_or_create(&filename)?;
-
-        let mut fwd = fd.write();
-
-        let mut buf = BytesMut::new();
-        buf.resize(record.length as _, 0);
-        fwd.seek(SeekFrom::Start(record.offset)).await?;
-        fwd.read_exact(&mut buf).await?;
-
+        let buf = self.fd_cache.read_by_record(&filename, record)?;
         let msg = Message::parse_from(&buf).await?;
         Ok(Some(msg))
     }
@@ -157,34 +148,34 @@ impl MessageManager {
 /// 格式为<8-bytes msg-size><8-bytes msg-num><msg1><msg2>...<msgn>
 pub struct MessageDisk {
     /// 写入的文件
-    filename: PathBuf,
+    filename: RwLock<PathBuf>,
 
     /// 校验文件中的消息是否合法
     validate: bool,
 
     /// 持久化文件的句柄
-    fd_cache: FdCacheAync,
+    fd_cache: FdCache,
 
     /// push来的消存放在内存中
     msgs: RwLock<Vec<Message>>,
 
     /// 当前文件的消息大小
-    msg_size: u64,
+    msg_size: AtomicU64,
 
     /// 当前文件消息数量（8byte）
-    msg_num: u64,
+    msg_num: AtomicU64,
 
     /// 写入位置的offset
-    write_offset: u64,
+    write_offset: AtomicU64,
 }
 
 impl MessageDisk {
-    pub fn new(filename: PathBuf, fd_cache: FdCacheAync) -> Self {
+    pub fn new(filename: PathBuf, fd_cache: FdCache) -> Self {
         MessageDisk {
-            filename,
-            msg_size: HEAD_SIZE_PER_FILE,
-            msg_num: 0,
-            write_offset: HEAD_SIZE_PER_FILE,
+            filename: RwLock::new(filename),
+            msg_size: AtomicU64::new(HEAD_SIZE_PER_FILE),
+            msg_num: AtomicU64::new(0),
+            write_offset: AtomicU64::new(HEAD_SIZE_PER_FILE),
             msgs: RwLock::new(vec![]),
             // fd: None,
             fd_cache,
@@ -192,45 +183,52 @@ impl MessageDisk {
         }
     }
 
-    pub fn reset_with_filename(&mut self, filename: PathBuf) {
-        self.filename = filename;
+    pub fn reset_with_filename(&self, filename: PathBuf) {
+        let mut wg = self.filename.write();
+        *wg = filename;
         // self.fd = None;
-        self.msgs = RwLock::new(vec![]);
-        self.write_offset = HEAD_SIZE_PER_FILE;
-        self.msg_size = HEAD_SIZE_PER_FILE;
-        self.msg_num = 0;
+        self.msgs.write().clear();
+        self.write_offset.store(HEAD_SIZE_PER_FILE, SeqCst);
+        self.msg_size.store(HEAD_SIZE_PER_FILE, SeqCst);
+        self.msg_num.store(0, SeqCst);
     }
 
-    pub fn push(&mut self, msg: Message) {
-        self.msg_size += msg.calc_len() as u64;
-        self.msg_num += 1;
+    pub fn push(&self, msg: Message) {
+        self.msg_size.fetch_add(msg.calc_len() as u64, SeqCst);
+        self.msg_num.fetch_add(1, SeqCst);
         let mut rg = self.msgs.write();
         rg.push(msg);
     }
 
-    pub async fn load(&mut self) -> Result<()> {
+    pub async fn load(&self) -> Result<()> {
         debug!("load from filename: {:?}", &self.filename);
 
-        let fd = self.fd_cache.get_or_create(&self.filename)?;
+        let filename_rd = self.filename.read().clone();
+        let filename = filename_rd.as_path();
+        let mut fd = AsyncFile::open(filename).await?;
+        drop(filename_rd);
 
-        let mut fwd = fd.write();
         // init msg_size
-        let meta = fwd.metadata().await?;
-        self.msg_size = meta.size();
+        let meta = fd.metadata().await?;
+        self.msg_size.store(meta.size(), SeqCst);
 
-        let mut pfd = Pin::new(&mut *fwd);
+        let mut pfd = Pin::new(&mut fd);
+
         // load msg_num
         let mut num_buf = BytesMut::new();
         num_buf.resize(HEAD_SIZE_PER_FILE as _, 0);
         pfd.read_exact(&mut num_buf).await?;
-        self.msg_num = u64::from_be_bytes(
-            num_buf
-                .to_vec()
-                .try_into()
-                .expect("convert to u64 array failed"),
+        self.msg_num.store(
+            u64::from_be_bytes(
+                num_buf
+                    .to_vec()
+                    .try_into()
+                    .expect("convert to u64 array failed"),
+            ),
+            SeqCst,
         );
 
-        self.write_offset = self.msg_size;
+        self.write_offset.store(self.msg_size.load(SeqCst), SeqCst);
 
         if !self.validate {
             return Ok(());
@@ -250,7 +248,7 @@ impl MessageDisk {
                 Ok(body) => {
                     if is_debug() {
                         let msg = Message::with_one(head, body);
-                        println!("msg = {msg:?}");
+                        debug!("msg = {msg:?}");
                     }
                     // 不push到msgs中
                 }
@@ -266,7 +264,7 @@ impl MessageDisk {
         Ok(())
     }
 
-    pub async fn persist(&mut self) -> Result<()> {
+    pub async fn persist(&self) -> Result<()> {
         {
             let msgs_rg = self.msgs.read();
             if msgs_rg.len() == 0 {
@@ -282,19 +280,18 @@ impl MessageDisk {
             bts.extend(mu.as_bytes());
         }
 
-        let fd = self.fd_cache.get_or_create(&self.filename)?;
+        let fd = self.fd_cache.get_or_create(&self.filename.read())?;
         let mut fwg = fd.write();
 
         // 写入msg_num
-        fwg.seek(SeekFrom::Start(0)).await?;
-        fwg.write_all(&self.msg_num.to_be_bytes()).await?;
+        fwg.seek(SeekFrom::Start(0))?;
+        fwg.write_all(&self.msg_num.load(SeqCst).to_be_bytes())?;
 
         // 在offset位置写入内存中的msgs
-        fwg.seek(SeekFrom::Start(self.write_offset)).await?;
-        fwg.write_all(&bts).await?;
-
-        fwg.sync_all().await?;
-        self.write_offset = self.msg_size;
+        fwg.seek(SeekFrom::Start(self.write_offset.load(SeqCst)))?;
+        fwg.write_all(&bts)?;
+        fwg.sync_all()?;
+        self.write_offset.store(self.msg_size.load(SeqCst), SeqCst);
 
         msgs_wg.clear();
 

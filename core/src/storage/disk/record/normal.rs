@@ -26,9 +26,6 @@ pub struct RecordManagerStrategyNormal {
     writer: RwLock<RecordDisk>,
 }
 
-unsafe impl Send for RecordManagerStrategyNormal {}
-unsafe impl Sync for RecordManagerStrategyNormal {}
-
 impl RecordManagerStrategyNormal {
     pub fn new(
         dir: PathBuf,
@@ -382,7 +379,6 @@ impl NormalPtr {
     }
 
     pub fn persist(&self) -> Result<()> {
-        println!("index = {}", self.index.load(SeqCst));
         if self.filename.eq(&PathBuf::new()) && self.index.load(SeqCst) == 1 {
             return Ok(());
         }

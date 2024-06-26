@@ -1,17 +1,20 @@
 use anyhow::Result;
+use bytes::BytesMut;
 use common::util::{check_and_create_dir, check_exist};
 use crossbeam::sync::ShardedLock;
-use futures::{executor::block_on, join};
 use lru::LruCache;
 use parking_lot::RwLock;
 use std::{
     fs::{File, OpenOptions},
+    io::{Read as _, Seek as _, SeekFrom},
     num::NonZeroUsize,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::fs::{File as AsyncFile, OpenOptions as AsyncOpenOptions};
+use tokio::fs::File as AsyncFile;
+
+use super::MessageRecord;
 
 #[derive(Clone, Debug)]
 pub struct FileHandler {
@@ -88,6 +91,16 @@ impl FdCache {
             .expect("open filename[{key:?}] failed");
         Ok(self.get_or_insert(key, fd))
     }
+
+    pub fn read_by_record(&self, filename: &PathBuf, record: MessageRecord) -> Result<Vec<u8>> {
+        let fd = self.get_or_create(filename)?;
+        let mut fwd = fd.write();
+        let mut buf = BytesMut::new();
+        buf.resize(record.length as _, 0);
+        fwd.seek(SeekFrom::Start(record.offset))?;
+        fwd.read_exact(&mut buf)?;
+        Ok(buf.to_vec())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -151,15 +164,14 @@ impl FdCacheAync {
             }
         }
 
-        let mut opts = AsyncOpenOptions::new();
-        let fd_fur = opts
+        let mut opts = OpenOptions::new();
+        let std_fd = opts
             .write(true)
             .read(true)
             .create(true)
             .truncate(false)
-            .open(key.clone());
-        let fd = block_on(fd_fur)?;
-        Ok(self.get_or_insert(key, fd))
+            .open(key.clone())?;
+        Ok(self.get_or_insert(key, AsyncFile::from_std(std_fd)))
     }
 }
 

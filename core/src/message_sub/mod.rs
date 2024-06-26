@@ -1,11 +1,10 @@
-pub mod topic_message;
+pub mod topic_sub;
 use crate::{
     client::Client,
     message::{convert_to_resp, Message},
     protocol::*,
     storage::{
-        storage::{new_storage_wrapper, StorageWrapper},
-        STORAGE_TYPE_DUMMY,
+        STORAGE_TYPE_DUMMY, {new_storage_wrapper, StorageWrapper},
     },
     topic::topic::new_topic,
     tsuixuq::TsuixuqOption,
@@ -17,21 +16,21 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::sync::mpsc::Sender;
-pub use topic_message::TopicMessage;
-use topic_message::{new_topic_message, topic_message_loop, topic_message_loop_defer};
+pub use topic_sub::TopicSub;
+use topic_sub::{new_topic_message, topic_message_loop, topic_message_loop_defer};
 use tracing::info;
 
-pub struct MessageManager {
+pub struct MessageSub {
     opt: Guard<TsuixuqOption>,
-    topics: HashMap<String, Guard<TopicMessage>>,
+    topics: HashMap<String, Guard<TopicSub>>,
     /// 真实存储message的地方，可能是memory
     storage: Guard<StorageWrapper>,
 }
 
-impl MessageManager {
+impl MessageSub {
     pub async fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
-            return Ok(MessageManager {
+            return Ok(MessageSub {
                 opt,
                 topics: HashMap::new(),
                 storage: new_storage_wrapper(STORAGE_TYPE_DUMMY, PathBuf::new(), 0, 0, 0, 0)
@@ -49,10 +48,10 @@ impl MessageManager {
         )
         .await?;
 
-        Ok(MessageManager {
+        Ok(MessageSub {
             opt,
             topics: HashMap::new(),
-            storage: storage,
+            storage,
         })
     }
 
@@ -82,7 +81,7 @@ impl MessageManager {
         &mut self,
         topic_name: &str,
         ephemeral: bool,
-    ) -> Result<Guard<TopicMessage>> {
+    ) -> Result<Guard<TopicSub>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
             && topics_len >= (self.opt.get().topic_num_in_tsuixuq as _)
@@ -162,12 +161,12 @@ impl MessageManager {
             .get_or_create_topic(topic_name, msg.topic_ephemeral())
             .await
         {
-            Ok(topic_mm) => {
+            Ok(topic_sub) => {
                 // 有订阅某个topic的client时，才进行相应的loop消息循环
-                tokio::spawn(topic_message_loop(topic_mm.clone()));
-                tokio::spawn(topic_message_loop_defer(topic_mm.clone()));
+                tokio::spawn(topic_message_loop(topic_sub.clone()));
+                tokio::spawn(topic_message_loop_defer(topic_sub.clone()));
 
-                let chan = topic_mm
+                let chan = topic_sub
                     .get()
                     .topic
                     .get_mut()
@@ -188,8 +187,8 @@ impl MessageManager {
     //============================ Handle Action ==============================//
 }
 
-pub async fn new_message_manager(opt: Guard<TsuixuqOption>) -> Result<Guard<MessageManager>> {
-    let mm = MessageManager::new(opt).await?;
+pub async fn new_message_manager(opt: Guard<TsuixuqOption>) -> Result<Guard<MessageSub>> {
+    let mm = MessageSub::new(opt).await?;
     let guard = Guard::new(mm);
     Ok(guard)
 }

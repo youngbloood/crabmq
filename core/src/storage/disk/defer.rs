@@ -129,20 +129,46 @@ impl Defer {
 
     /// seek a message from Storage.
     pub async fn seek(&self) -> Result<Option<Message>> {
+        let record = self.read_ptr.seek()?;
+        if let Some(record) = record {
+            let msg = self.message_manager.find_by(record).await?;
+            return Ok(msg);
+        }
+
         Ok(None)
     }
 
     /// pop a message from Storage, then the read_ptr will rorate.
     pub async fn pop(&self) -> Result<Option<Message>> {
+        let record = self.read_ptr.next()?;
+        if let Some(record) = record {
+            let msg = self.message_manager.find_by(record).await?;
+            return Ok(msg);
+        }
+
         Ok(None)
     }
 
     pub async fn flush(&self) -> Result<()> {
-        self.ready_record_manager.persist().await?;
-        self.not_ready_record_manager.persist().await?;
-        self.delete_record_manager.persist().await?;
-        self.message_manager.persist().await?;
-        self.consume_ptr.persist()?;
+        self.ready_record_manager
+            .persist()
+            .await
+            .expect("persist ready_record_manager failed");
+        self.not_ready_record_manager
+            .persist()
+            .await
+            .expect("persist not_read_record_manager failed");
+        self.delete_record_manager
+            .persist()
+            .await
+            .expect("persist delete_record_manager failed");
+        self.message_manager
+            .persist()
+            .await
+            .expect("persist message_manager failed");
+        self.consume_ptr
+            .persist()
+            .expect("persist consume_ptr failed");
         // self.read_ptr.persist()?;
         Ok(())
     }

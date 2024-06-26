@@ -1,7 +1,7 @@
 use crate::client::Client;
 use crate::message::Message;
-use crate::message_manager::new_message_manager;
-use crate::message_manager::MessageManager;
+use crate::message_sub::new_message_manager;
+use crate::message_sub::MessageSub;
 use anyhow::Result;
 use clap::Parser;
 use common::global::Guard;
@@ -176,7 +176,7 @@ impl TsuixuqOption {
 
 pub struct Tsuixuq {
     opt: Guard<TsuixuqOption>,
-    mm: Guard<MessageManager>,
+    mm: Guard<MessageSub>,
     pub out_sender: Option<Sender<(String, Message)>>,
 }
 

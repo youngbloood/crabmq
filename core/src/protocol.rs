@@ -4,8 +4,12 @@ use bytes::{Bytes, BytesMut};
 use chrono::prelude::*;
 use common::global::{self, SNOWFLAKE};
 use rsbit::{BitFlagOperation, BitOperation};
-use std::{fmt::Debug, pin::Pin, result::Result as StdResult};
-use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
+use std::{fmt::Debug, fs::File, io::Read, pin::Pin, result::Result as StdResult};
+use tokio::fs::File as AsyncFile;
+use tokio::{
+    io::{duplex, AsyncReadExt, AsyncWriteExt},
+    net::tcp::OwnedReadHalf,
+};
 use tracing::debug;
 
 pub const SUPPORT_PROTOCOLS: [u8; 1] = [1];
@@ -145,6 +149,20 @@ impl ProtocolHead {
 
         Ok(())
     }
+
+    /// [`parse_from`] read the protocol head from bts.
+    // pub async fn parse_from_sync(fd: &mut Pin<&mut (impl Read + Send)>) -> Result<Self> {
+    //     let (mut client, mut server) = duplex(10);
+
+    //     tokio::spawn(async move {
+    //         let mut buf = vec![];
+    //         fd.read_to_end(&mut buf);
+    //         client.write_all(&buf);
+    //     });
+
+    //     let mut pfd = Pin::new(&mut server);
+    //     Self::parse_from(&mut pfd).await
+    // }
 
     /// [`parse_from`] read the protocol head from bts.
     pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {

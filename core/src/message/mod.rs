@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use bytes::Bytes;
 use std::{pin::Pin, result::Result as StdResult};
-use tokio::io::{duplex, AsyncWriteExt};
+use tokio::io::{duplex, AsyncWriteExt, BufReader};
 
 #[derive(Debug)]
 pub enum Message {
@@ -21,15 +21,13 @@ impl Message {
     }
 
     pub async fn parse_from(bts: &[u8]) -> Result<Self> {
-        let (mut client, mut server) = duplex(bts.len());
-        server.write_all(bts).await?;
-        server.shutdown().await?;
-        let mut pread = Pin::new(&mut client);
+        let mut reader = BufReader::new(bts);
+        let mut preader = Pin::new(&mut reader);
 
-        let head = ProtocolHead::parse_from(&mut pread).await?;
+        let head = ProtocolHead::parse_from(&mut preader).await?;
+
         let mut bodys = ProtocolBodys::new();
-
-        while let Ok(body) = ProtocolBody::parse_from(&mut pread).await {
+        while let Ok(body) = ProtocolBody::parse_from(&mut preader).await {
             bodys.push(body);
         }
 

@@ -58,7 +58,7 @@ impl Client {
         tsuixuq: Guard<Tsuixuq>,
     ) -> Self {
         let addr = remote_addr.to_string();
-        println!("new client {addr:?}");
+        info!("new client {addr:?}");
         debug!(addr = addr, "new client");
 
         let (tx, rx) = mpsc::channel(1);

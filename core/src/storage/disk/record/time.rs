@@ -35,9 +35,6 @@ pub struct RecordManagerStrategyTime {
     // writers: RwLock<HashMap<String, RecordDisk>>,
 }
 
-unsafe impl Send for RecordManagerStrategyTime {}
-unsafe impl Sync for RecordManagerStrategyTime {}
-
 impl RecordManagerStrategyTime {
     pub fn new(dir: PathBuf, validate: bool, template: &str, fd_cache_size: usize) -> Result<Self> {
         let regs = [r#"\{daily.*?\}"#, r#"\{hourly.*?\}"#, r#"\{minutely.*?\}"#];
@@ -108,7 +105,6 @@ impl RecordManagerStrategyTime {
                 continue;
             }
             let c = captures.unwrap();
-            // println!("c = {:?}", c.get(0).unwrap().as_str());
 
             if i == 0 {
                 daily = 1;
@@ -272,7 +268,7 @@ impl RecordManagerStrategy for RecordManagerStrategyTime {
 
         let mut wd = self.writers.write().expect("get sharedlock write failed");
         if let Some(record_disk) = wd.get(&filename) {
-            record_disk.load().await?;
+            record_disk.load()?;
             let index = record_disk.push(record, true);
             return Ok((filename, index));
         }
@@ -280,7 +276,7 @@ impl RecordManagerStrategy for RecordManagerStrategyTime {
         let record_disk: RecordDisk =
             RecordDisk::new(filename.clone(), self.validate, self.fd_cache.clone());
         let record_disk = wd.get_or_insert_mut(filename.clone(), || record_disk);
-        record_disk.load().await?;
+        record_disk.load()?;
         let index = record_disk.push(record, true);
         Ok((filename, index))
     }
@@ -340,7 +336,7 @@ impl RecordDisk {
         }
     }
 
-    async fn load(&self) -> Result<()> {
+    fn load(&self) -> Result<()> {
         if !check_exist(&self.filename) {
             self.loaded.store(true, SeqCst);
             return Ok(());
@@ -550,6 +546,11 @@ impl TimePtr {
     }
 
     pub fn persist(&self) -> Result<()> {
+        if let Some(parent) = self.filename.parent() {
+            if !check_exist(parent) {
+                return Ok(());
+            }
+        }
         fs::write(
             &self.filename,
             format!(

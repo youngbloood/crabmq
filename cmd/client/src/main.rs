@@ -201,6 +201,10 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         loop {
             select! {
+                _ = global::CANCEL_TOKEN.cancelled() => {
+                    return;
+                }
+
                 _ = loop_rx.recv() =>{
                     let input = Text::new("#=").with_help_message("\\? help").prompt();
                     match input {
@@ -217,10 +221,6 @@ async fn main() -> Result<()> {
                             return;
                         }
                     }
-                }
-
-                _ = global::CANCEL_TOKEN.cancelled() => {
-                    return;
                 }
             }
         }

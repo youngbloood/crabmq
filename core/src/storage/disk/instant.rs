@@ -97,7 +97,6 @@ impl Instant {
             self.not_ready_record_manager.push(record).await?;
         } else {
             let (record_filename, index) = self.ready_record_manager.push(record).await?;
-            println!("record_filename={record_filename:?}, index={index}");
             if self.consume_ptr.is_empty() {
                 self.consume_ptr.set(record_filename.clone(), index)?;
             }
@@ -111,11 +110,23 @@ impl Instant {
 
     /// seek a message from Storage.
     pub async fn seek(&self) -> Result<Option<Message>> {
+        let record = self.read_ptr.seek()?;
+        if let Some(record) = record {
+            let msg = self.message_manager.find_by(record).await?;
+            return Ok(msg);
+        }
+
         Ok(None)
     }
 
     /// pop a message from Storage, then the read_ptr will rorate.
     pub async fn pop(&self) -> Result<Option<Message>> {
+        let record = self.read_ptr.next()?;
+        if let Some(record) = record {
+            let msg = self.message_manager.find_by(record).await?;
+            return Ok(msg);
+        }
+
         Ok(None)
     }
 

@@ -1,5 +1,18 @@
+mod defer;
+mod instant;
+mod message_manager;
+mod record;
+
+use super::{StorageOperation, TopicOperation};
+use crate::message::Message;
 use anyhow::{anyhow, Result};
-use semver::Op;
+use common::{
+    global::{Guard, CANCEL_TOKEN},
+    util::{check_and_create_dir, interval},
+};
+use defer::Defer;
+use instant::Instant;
+use parking_lot::RwLock;
 use std::{
     collections::HashMap,
     fs,
@@ -8,25 +21,8 @@ use std::{
     time::Duration,
 };
 use tokio::select;
-
-use common::{
-    global::{Guard, CANCEL_TOKEN},
-    util::{check_and_create_dir, interval},
-};
-use defer::Defer;
-use instant::Instant;
-use parking_lot::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-
-use crate::message::Message;
-
-use super::{StorageOperation, TopicOperation};
-
-mod defer;
-mod instant;
-mod message_manager;
-mod record;
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
@@ -49,9 +45,6 @@ pub struct StorageDisk {
     cancel: CancellationToken,
 }
 
-// unsafe impl Send for StorageDisk {}
-// unsafe impl Sync for StorageDisk {}
-
 impl StorageDisk {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         StorageDisk {
@@ -61,6 +54,29 @@ impl StorageDisk {
             max_msg_num_per_file,
             max_size_per_file,
         }
+    }
+
+    async fn get_or_create_topic_inner(&self, topic_name: &str) -> Result<TopicMessage> {
+        if !self.topics.read().contains_key(topic_name) {
+            let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
+            debug!("StorageDisk: load topic: {}", topic_name);
+
+            // init the topic-message
+            let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
+            let instant = Instant::new(parent);
+
+            let mut topic_mb = TopicMessageBase::new(topic_name, instant, defer);
+            topic_mb.load().await?;
+
+            let topic = TopicMessage::new(topic_mb);
+            self.topics
+                .write()
+                .insert(topic_name.to_string(), topic.clone());
+            return Ok(topic);
+        }
+        let rg = self.topics.read();
+        let topic = rg.get(topic_name).unwrap();
+        Ok(topic.clone())
     }
 }
 
@@ -77,7 +93,7 @@ impl StorageOperation for StorageDisk {
 
             let topic_name = entry.file_name();
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name.to_str().unwrap());
-            debug!("StorageLocal: load topic: {}", topic_name.to_str().unwrap());
+            debug!("StorageDisk: load topic: {}", topic_name.to_str().unwrap());
 
             let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
             defer.load().await?;
@@ -88,7 +104,7 @@ impl StorageOperation for StorageDisk {
             let mut wg = self.topics.write();
             wg.insert(
                 topic_name.to_str().unwrap().to_string(),
-                Guard::new(TopicMessageBase::new(
+                TopicMessage::new(TopicMessageBase::new(
                     topic_name.to_str().unwrap(),
                     instant,
                     defer,
@@ -100,11 +116,8 @@ impl StorageOperation for StorageDisk {
     }
 
     async fn push(&self, msg: Message) -> Result<()> {
-        // if msg.is_defer() {
-        //     self.get().defer.push(msg).await?;
-        //     return Ok(());
-        // }
-        // self.get().instant.push(msg).await?;
+        let topic = self.get_or_create_topic_inner(msg.get_topic()).await?;
+        topic.push(msg).await?;
         Ok(())
     }
 
@@ -113,8 +126,20 @@ impl StorageOperation for StorageDisk {
         let iter = rg.iter();
         // let mut handles = Vec::with_capacity(rg.len() * 2);
         for (_, topic) in iter {
-            topic.clone().get().instant.flush().await?;
-            topic.clone().get().defer.flush().await?;
+            topic
+                .guard
+                .get()
+                .instant
+                .flush()
+                .await
+                .expect("flush instant failed");
+            topic
+                .guard
+                .get()
+                .defer
+                .flush()
+                .await
+                .expect("flush defer failed");
             // handles.push(topic.clone().get().instant.flush());
             // handles.push(topic.clone().get().defer.flush());
         }
@@ -128,37 +153,44 @@ impl StorageOperation for StorageDisk {
     }
 
     async fn get_or_create_topic(&self, topic_name: &str) -> Result<Arc<Box<dyn TopicOperation>>> {
-        if !self.topics.read().contains_key(topic_name) {
-            let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
-            debug!("StorageLocal: load topic: {}", topic_name);
-
-            // init the topic-message
-            let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
-            let instant = Instant::new(parent);
-
-            let mut topic_mm = TopicMessageBase::new(topic_name, instant, defer);
-            topic_mm.load().await?;
-
-            self.topics
-                .write()
-                .insert(topic_name.to_string(), Guard::new(topic_mm));
-        }
-        let rg = self.topics.read();
-        let topic = rg.get(topic_name).unwrap();
-        Ok(Arc::new(Box::new(topic.clone()) as Box<dyn TopicOperation>))
+        let topic = self.get_or_create_topic_inner(topic_name).await?;
+        Ok(Arc::new(Box::new(topic) as Box<dyn TopicOperation>))
     }
 }
 
-type TopicMessage = Guard<TopicMessageBase>;
+// type TopicMessage = Guard<TopicMessageBase>;
+struct TopicMessage {
+    guard: Guard<TopicMessageBase>,
+}
+
+impl TopicMessage {
+    fn new(topic_msg_base: TopicMessageBase) -> Self {
+        TopicMessage {
+            guard: Guard::new(topic_msg_base),
+        }
+    }
+
+    fn clone(&self) -> Self {
+        TopicMessage {
+            guard: self.guard.clone(),
+        }
+    }
+
+    async fn push(&self, msg: Message) -> Result<()> {
+        if msg.is_defer() {
+            self.guard.get().defer.handle_msg(msg).await?;
+            return Ok(());
+        }
+        self.guard.get().instant.handle_msg(msg).await?;
+        Ok(())
+    }
+}
 
 struct TopicMessageBase {
     name: String,
     instant: Instant,
     defer: Defer,
 }
-
-unsafe impl Send for TopicMessageBase {}
-unsafe impl Sync for TopicMessageBase {}
 
 impl TopicMessageBase {
     fn new(name: &str, instant: Instant, defer: Defer) -> Self {
@@ -179,12 +211,40 @@ impl TopicMessageBase {
 #[async_trait::async_trait]
 impl TopicOperation for TopicMessage {
     fn name(&self) -> &str {
-        self.get().name.as_str()
+        self.guard.get().name.as_str()
     }
 
     async fn seek_defer(&self, block: bool) -> Result<Option<Message>> {
-        let msg = self.get().defer.seek().await?;
-        Ok(msg)
+        let mut ticker = interval(Duration::from_millis(300)).await;
+
+        loop {
+            select! {
+                _ = CANCEL_TOKEN.cancelled() => {
+                    return Err(anyhow!("process stopped"));
+                }
+
+                msg = self.guard.get().defer.seek() => {
+                    match msg {
+                        Ok(msg) => {
+                            match msg {
+                                Some(msg) => {
+                                    return Ok(Some(msg));
+                                }
+                                None => {
+                                    if !block {
+                                        return Ok(None);
+                                    }
+                                    ticker.tick().await;
+                                    continue;
+                                }
+                            }
+                        },
+
+                        Err(e) => return Err(anyhow!(e)),
+                    }
+                }
+            }
+        }
     }
 
     async fn next_defer(&self, block: bool) -> Result<Option<Message>> {
@@ -196,7 +256,7 @@ impl TopicOperation for TopicMessage {
                 }
 
                 msg = async {
-                    match self.get().defer.pop().await {
+                    match self.guard.get().defer.pop().await {
                         Ok(msg) => {
                             match msg {
                                 Some(msg) => {
@@ -248,8 +308,35 @@ impl TopicOperation for TopicMessage {
     }
 
     async fn seek_instant(&self, block: bool) -> Result<Option<Message>> {
-        let msg = self.get().instant.seek().await?;
-        Ok(msg)
+        let mut ticker = interval(Duration::from_millis(300)).await;
+        loop {
+            select! {
+                _ = CANCEL_TOKEN.cancelled() => {
+                    return Err(anyhow!("process stopped"))
+                }
+
+                msg = self.guard.get().instant.seek() => {
+                    match msg {
+                        Ok(msg) => {
+                            match msg {
+                                Some(msg) => {
+                                    return Ok(Some(msg));
+                                }
+                                None => {
+                                    if !block {
+                                        return Ok(None)
+                                    }
+                                    ticker.tick().await;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        Err(e) => return Err(anyhow!(e)),
+                    }
+                }
+            }
+        }
     }
 
     async fn next_instant(&self, block: bool) -> Result<Option<Message>> {
@@ -261,7 +348,7 @@ impl TopicOperation for TopicMessage {
                 }
 
                 msg = async {
-                    match self.get().instant.pop().await {
+                    match self.guard.get().instant.pop().await {
                         Ok(msg) => {
                             match msg {
                                 Some(msg) => {

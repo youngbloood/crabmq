@@ -17,7 +17,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-pub struct TopicMessage {
+pub struct TopicSub {
     name: String,
     opt: Guard<TsuixuqOption>,
     use_memory: bool,
@@ -36,17 +36,14 @@ pub struct TopicMessage {
     stop: CancellationToken,
 }
 
-unsafe impl Sync for TopicMessage {}
-unsafe impl Send for TopicMessage {}
-
-impl TopicMessage {
+impl TopicSub {
     pub async fn new(
         opt: Guard<TsuixuqOption>,
         topic: Guard<Topic>,
         s: Arc<Box<dyn TopicOperation>>,
     ) -> Result<Self> {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
-            return Ok(TopicMessage {
+            return Ok(TopicSub {
                 opt,
                 name: topic.get().name.as_str().to_string(),
                 use_memory: true,
@@ -60,7 +57,7 @@ impl TopicMessage {
             });
         }
 
-        Ok(TopicMessage {
+        Ok(TopicSub {
             opt: opt.clone(),
             name: topic.get().name.as_str().to_string(),
             use_memory: false,
@@ -91,12 +88,12 @@ impl TopicMessage {
     // }
 
     /// 从cache中pop出一个Message
-    pub async fn pop(&mut self) -> Option<Message> {
-        self.ready_queue.pop().await
+    pub async fn pop(&mut self, block: bool) -> Option<Message> {
+        self.ready_queue.pop(block).await
     }
 }
 
-pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
+pub async fn topic_message_loop(guard: Guard<TopicSub>) {
     if guard.get().start_message_loop {
         return;
     }
@@ -117,32 +114,19 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
             msg = guard.get().storage_topic.seek_defer(true) => {
                 match msg {
                     Ok(msg) => {
-                        if msg.is_none(){
+                        if msg.is_none() {
                             continue;
                         }
                         debug!("topic[{topic_name}] get defer msg: {msg:?}");
                         let msg = msg.unwrap();
-                        if (guard.get().defer_cache.try_push(msg).await).is_ok() {
-                           let _ = guard.get().storage_topic.next_defer(false).await;
+                        match guard.get().defer_cache.try_push(msg).await {
+                            Ok(_) => {
+                                let _ = guard.get().storage_topic.next_defer(false).await;
+                            }
+                            Err(e) => {
+                                error!("push defer message to defer_cache failed: {e:?}");
+                            }
                         }
-                    }
-
-                    Err(e) => {
-                        error!("next instant err:{e}");
-                    }
-                }
-            }
-
-
-            msg = guard.get().storage_topic.next_defer(true) => {
-                match msg {
-                    Ok(msg) => {
-                        if msg.is_none(){
-                            continue;
-                        }
-                        debug!("topic[{topic_name}] get defer msg: {msg:?}");
-                        let msg = msg.unwrap();
-                        let _ = guard.get().defer_cache.push(msg).await;
                     }
 
                     Err(e) => {
@@ -160,8 +144,13 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
                         }
                         debug!("topic[{topic_name}] get instant msg: {msg:?}");
                         let msg = msg.unwrap();
-                        if  guard.get().ready_queue.push(msg).await.is_ok() {
-                            let _ = guard.get().storage_topic.next_instant(false).await;
+                        match  guard.get().ready_queue.try_push(msg).await {
+                            Ok(_) => {
+                                let _ = guard.get().storage_topic.next_instant(false).await;
+                            }
+                            Err(e) => {
+                                error!("push instant message to ready_queue failed: {e:?}");
+                            }
                         }
                     }
 
@@ -172,7 +161,7 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
             }
 
             // 不断从ready_queue中取得消息，下发至topic下的channel中
-            msg = guard.get().ready_queue.pop() => {
+            msg = guard.get().ready_queue.pop(true) => {
                 if msg.is_none(){
                     continue;
                 }
@@ -184,7 +173,7 @@ pub async fn topic_message_loop(guard: Guard<TopicMessage>) {
     }
 }
 
-pub async fn topic_message_loop_defer(guard: Guard<TopicMessage>) {
+pub async fn topic_message_loop_defer(guard: Guard<TopicSub>) {
     if guard.get().start_defer_message_loop {
         return;
     }
@@ -201,7 +190,7 @@ pub async fn topic_message_loop_defer(guard: Guard<TopicMessage>) {
                 return;
             }
 
-            msg = guard.get().defer_cache.pop() => {
+            msg = guard.get().defer_cache.pop(true) => {
                 if msg.is_none(){
                     continue;
                 }
@@ -236,8 +225,8 @@ pub async fn new_topic_message(
     opt: Guard<TsuixuqOption>,
     topic: Guard<Topic>,
     s: Arc<Box<dyn TopicOperation>>,
-) -> Result<Guard<TopicMessage>> {
-    let tm = TopicMessage::new(opt, topic, s).await?;
+) -> Result<Guard<TopicSub>> {
+    let tm = TopicSub::new(opt, topic, s).await?;
     let guard = Guard::new(tm);
     Ok(guard)
 }
