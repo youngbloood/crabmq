@@ -13,12 +13,10 @@ use futures::executor::block_on;
 use inquire::Text;
 use std::env::args;
 use tokio::fs;
-use tokio::net::unix::SocketAddr;
 use tokio::net::TcpSocket;
 use tokio::select;
 use tokio::signal;
 use tokio::sync::mpsc;
-use tracing::info;
 
 const DEFAULT_NAME: &str = "default";
 
@@ -105,8 +103,8 @@ impl Args {
             return Err(anyhow!("not found head in message"));
         }
         let mut head = ProtocolHead::new();
-        head.set_topic(&self.head.as_ref().unwrap().topic_name.as_str())?;
-        head.set_channel(&self.head.as_ref().unwrap().channel_name.as_str())?;
+        head.set_topic(self.head.as_ref().unwrap().topic_name.as_str())?;
+        head.set_channel(self.head.as_ref().unwrap().channel_name.as_str())?;
         head.set_action(action_to_u8(self.head.as_ref().unwrap().action.as_str()))
             .set_topic_ephemeral(self.head.as_ref().unwrap().topic_ephemeral)
             .set_channel_ephemeral(self.head.as_ref().unwrap().channel_ephemeral)
@@ -133,13 +131,13 @@ impl Args {
             }
 
             if let Some(id) = msg.id.as_ref() {
-                body.with_id(&id).expect("set id err");
+                body.with_id(id).expect("set id err");
             }
 
             bodys.push(body);
         });
 
-        let mut msg = Message::with(head, bodys);
+        let msg = Message::with(head, bodys);
         msg.validate(u8::MAX, u64::MAX)?;
         // msg.post_fill();
         Ok(msg)
@@ -160,7 +158,7 @@ impl Args {
 }
 
 fn action_to_u8(action: &str) -> u8 {
-    let a: u8;
+    let mut a = 0;
     match action.to_lowercase().as_str() {
         "fin" => a = 1,
         "rdy" => a = 2,
@@ -231,87 +229,84 @@ async fn main() -> Result<()> {
     let mut args = Args::new();
     loop {
         select! {
-            input = input_rx.recv() =>{
-                match input {
-                    Some(cmd) =>{
-                        let mut cmds = cmd.split_whitespace();
-                        let cmds_clone = cmds.clone();
-                        let first = cmds.next();
-                        if let Some(v) = first {
-                            match v {
-                                "\\?" => {
-                                    println!("TODO: print help info");
-                                }
+            input = input_rx.recv() => {
+                if let Some(cmd) = input {
+                    let mut cmds = cmd.split_whitespace();
+                    let cmds_clone = cmds.clone();
+                    let first = cmds.next();
+                    if let Some(v) = first {
+                        match v {
+                            "\\?" => {
+                                println!("TODO: print help info");
+                            }
 
-                                "\\q" => {
-                                    global::cancel();
-                                    break;
-                                }
+                            "\\q" => {
+                                global::cancel();
+                                break;
+                            }
 
-                                "head" => {
-                                    match HeadArgs::try_parse_from(cmds_clone){
-                                        Ok(head) => {
-                                            println!("set head:{head:?}");
-                                            let _ = args.set_head(head);
-                                        }
-                                        Err(e) => {
-                                            eprintln!("parse head command err: {e}");
-                                        }
+                            "head" => {
+                                match HeadArgs::try_parse_from(cmds_clone){
+                                    Ok(head) => {
+                                        println!("set head:{head:?}");
+                                        let _ = args.set_head(head);
                                     }
-                                }
-
-                                "msg" => {
-                                    match MsgArgs::try_parse_from(cmds_clone){
-                                        Ok(body) =>{
-                                            println!("push body:{body:?}");
-                                            if let Err(e) = args.push_body(body) {
-                                                eprintln!("{e}");
-                                            }
-                                        }
-                                        Err(e) =>{
-                                            eprintln!("parse msg command err: {e:?}");
-                                        }
+                                    Err(e) => {
+                                        eprintln!("parse head command err: {e}");
                                     }
-                                }
-
-                                "send" => {
-                                    println!("send args: {args:?}");
-                                    match args.builder(){
-                                        Ok(msg) => {
-                                            let bts = &msg.as_bytes();
-                                            println!("send bts: {bts:?}");
-                                            if let Err(e) = conn.write(&msg.as_bytes(), 30).await
-                                            {
-                                                eprintln!("write err: {e}");
-                                            }
-                                        },
-                                        Err(e) => {
-                                            eprintln!("builder err: {e}");
-                                        },
-                                    }
-                                    args.reset();
-                                }
-
-                                _ => {
-                                    println!("black branch");
-                                    use std::process::Command as std_command;
-                                    let output = std_command::new("/bin/bash")
-                                        .arg("-c")
-                                        .arg(cmd)
-                                        .output()
-                                        .expect("failed");
-                                    let stdout =
-                                        String::from_utf8(output.stdout).expect("convert to string failed");
-                                    println!("{stdout}");
                                 }
                             }
-                        }
-                        let _= loop_tx.send(1).await;
-                    }
-                    None =>{}
-                }
 
+                            "msg" => {
+                                match MsgArgs::try_parse_from(cmds_clone){
+                                    Ok(body) =>{
+                                        println!("push body:{body:?}");
+                                        if let Err(e) = args.push_body(body) {
+                                            eprintln!("{e}");
+                                        }
+                                    }
+                                    Err(e) =>{
+                                        eprintln!("parse msg command err: {e:?}");
+                                    }
+                                }
+                            }
+
+                            "send" => {
+                                println!("send args: {args:?}");
+                                match args.builder(){
+                                    Ok(msg) => {
+                                        let bts = &msg.as_bytes();
+                                        println!("send bts: {bts:?}");
+                                        if let Err(e) = conn.write(&msg.as_bytes(), 30).await
+                                        {
+                                            eprintln!("write err: {e}");
+                                        }
+                                    },
+                                    Err(e) => {
+                                        eprintln!("builder err: {e}");
+                                    },
+                                }
+                                args.reset();
+                            }
+
+                            _ => {
+                                println!("black branch");
+                                use std::process::Command as std_command;
+                                let output = std_command::new("/bin/bash")
+                                    .arg("-c")
+                                    .arg(cmd)
+                                    .output()
+                                    .expect("failed");
+                                let stdout =
+                                    String::from_utf8(output.stdout).expect("convert to string failed");
+                                println!("{stdout}");
+                            }
+                        }
+                    }
+                    let _= loop_tx.send(1).await;
+                }
             }
+
             resp = conn.read_parse(30) =>{
                 match resp {
                     Ok(msg) => {
