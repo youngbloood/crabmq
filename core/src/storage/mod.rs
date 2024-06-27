@@ -13,7 +13,6 @@ use dummy::{Dummy, TopicDummyBase};
 use enum_dispatch::enum_dispatch;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};

@@ -4,7 +4,7 @@ use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
     message::Message,
     storage::{TopicOperation, STORAGE_TYPE_DUMMY},
-    topic::topic::Topic,
+    topic::Topic,
     tsuixuq::TsuixuqOption,
 };
 use anyhow::Result;

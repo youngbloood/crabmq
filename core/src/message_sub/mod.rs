@@ -6,7 +6,7 @@ use crate::{
     storage::{
         STORAGE_TYPE_DUMMY, {new_storage_wrapper, StorageWrapper},
     },
-    topic::topic::new_topic,
+    topic::new_topic,
     tsuixuq::TsuixuqOption,
 };
 use anyhow::{anyhow, Result};

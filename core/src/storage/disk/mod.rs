@@ -1,3 +1,4 @@
+mod config;
 mod defer;
 mod instant;
 mod message_manager;
