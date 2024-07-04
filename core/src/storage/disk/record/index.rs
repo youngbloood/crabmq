@@ -1,5 +1,5 @@
 /*!
- *
+ * MessageRecord Indexing
  */
 
 use super::MessageRecord;
