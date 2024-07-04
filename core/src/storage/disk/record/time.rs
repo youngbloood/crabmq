@@ -286,16 +286,29 @@ impl RecordManagerStrategy for RecordManagerStrategyTime {
     }
 
     async fn find(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>> {
-        let result = Command::new(format!("grep {id} -r {:?}", self.dir)).output()?;
-        let result = String::from_utf8(result.stdout)?;
-        let cells: Vec<&str> = result.split(':').collect();
-        if cells.len() != 2 {
-            return Ok(None);
+        match self.index.find(id)? {
+            Some(record) => Ok(Some((PathBuf::new(), record))),
+            None => {
+                let dir: PathBuf = self.dir.clone();
+                let id = id.to_string();
+                tokio::spawn(async move {
+                    let result = Command::new("/bin/bash")
+                        .arg("-c")
+                        .arg(format!(
+                            r#"if [[ -d {:?} ]]; then grep {id} -r {:?} else echo "notexist";fi"#,
+                            dir, dir
+                        ))
+                        .output()
+                        .expect("execute grep failed");
+                    let result = String::from_utf8(result.stdout).expect("convert to string");
+                    if result != "notexist" {
+                        error!("found record[id={id}] in dir[{:?}] success: {result}", dir);
+                    }
+                });
+
+                Ok(None)
+            }
         }
-        Ok(Some((
-            PathBuf::from(cells.first().unwrap()),
-            MessageRecord::parse_from(cells.last().unwrap())?,
-        )))
     }
 
     async fn persist(&self) -> Result<()> {

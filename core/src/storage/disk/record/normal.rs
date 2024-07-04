@@ -1,7 +1,7 @@
 use super::index::{Index, IndexTantivy};
 use super::{gen_filename, FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use common::util::check_exist;
 use crossbeam::sync::ShardedLock;
 use parking_lot::RwLock;
@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::AtomicU64,
 };
+use tracing::error;
 
 /// RecordManager普通策略：适用于instant record信息的记录
 pub struct RecordManagerStrategyNormal {
@@ -105,32 +106,30 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
     }
 
     async fn find(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>> {
-        let record = self.index.find(id)?;
-        return match record {
+        return match self.index.find(id)? {
             Some(record) => Ok(Some((PathBuf::new(), record))),
-            None => Ok(None),
-        };
+            None => {
+                let dir = self.dir.clone();
+                let id = id.to_string();
+                tokio::spawn(async move {
+                    let result = Command::new("/bin/bash")
+                        .arg("-c")
+                        .arg(format!(
+                            r#"if [[ -d {:?} ]]; then grep {id} -r {:?} else echo "notexist";fi"#,
+                            dir, dir
+                        ))
+                        .output()
+                        .expect("execute cmd error");
+                    let result =
+                        String::from_utf8(result.stdout).expect("convert to string failed");
+                    if result != "notexist" {
+                        error!("found record[id={id}] in dir[{:?}] success: {result}", dir);
+                    }
+                });
 
-        let result = Command::new("/bin/bash")
-            .arg("-c")
-            .arg(format!(
-                r#"if [[ -d {:?} ]]; then grep {id} -r {:?} else echo "notexist";fi"#,
-                self.dir, self.dir
-            ))
-            .output()
-            .expect("execute cmd error");
-        let result = String::from_utf8(result.stdout).expect("convert to string failed");
-        if result == "notexist" {
-            return Ok(None);
-        }
-        let cells: Vec<&str> = result.split(':').collect();
-        if cells.len() != 2 {
-            return Ok(None);
-        }
-        Ok(Some((
-            PathBuf::from(cells.first().unwrap()),
-            MessageRecord::parse_from(cells.last().unwrap())?,
-        )))
+                Ok(None)
+            }
+        };
     }
 
     async fn persist(&self) -> Result<()> {
