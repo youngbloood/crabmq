@@ -1,4 +1,5 @@
 mod fd_cache;
+mod index;
 mod normal;
 mod time;
 
@@ -69,6 +70,18 @@ impl MessageRecord {
             "{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{:0>16}{SPLIT_CELL}{:0>16}\n",
             self.factor, self.offset, self.length, self.id, self.defer_time, self.consume_time,self.delete_time
         )
+    }
+
+    pub fn clone(&self) -> Self {
+        MessageRecord {
+            factor: self.factor,
+            offset: self.offset,
+            length: self.length,
+            id: self.id.as_str().to_string(),
+            defer_time: self.defer_time,
+            consume_time: self.consume_time,
+            delete_time: self.delete_time,
+        }
     }
 
     pub fn parse_from(line: &str) -> Result<Self> {

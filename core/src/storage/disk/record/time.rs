@@ -1,3 +1,4 @@
+use super::index::{Index, IndexTantivy};
 use super::{FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
@@ -32,7 +33,7 @@ pub struct RecordManagerStrategyTime {
     fd_cache: FdCache,
 
     writers: ShardedLock<LruCache<PathBuf, RecordDisk>>,
-    // writers: RwLock<HashMap<String, RecordDisk>>,
+    index: Box<dyn Index>,
 }
 
 impl RecordManagerStrategyTime {
@@ -70,11 +71,12 @@ impl RecordManagerStrategyTime {
         }
 
         let rmst = RecordManagerStrategyTime {
-            dir,
+            dir: dir.clone(),
             validate,
             fd_cache: FdCache::new(10),
             template: template.to_string(),
             writers: ShardedLock::new(LruCache::new(NonZeroUsize::new(fd_cache_size).unwrap())),
+            index: Box::new(IndexTantivy::new(dir.join("index"), 15000000)?),
         };
         let (daily, hourly, minutely) = rmst.parse_template();
         // if daily.1 != 0 && daily.1  != 1 {
@@ -264,8 +266,9 @@ impl RecordManagerStrategy for RecordManagerStrategyTime {
     }
 
     async fn push(&self, record: MessageRecord) -> Result<(PathBuf, usize)> {
-        let filename = self.dir.join(self.deduce_filename(record.defer_time));
+        self.index.push(record.clone())?;
 
+        let filename = self.dir.join(self.deduce_filename(record.defer_time));
         let mut wd = self.writers.write().expect("get sharedlock write failed");
         if let Some(record_disk) = wd.get(&filename) {
             record_disk.load()?;

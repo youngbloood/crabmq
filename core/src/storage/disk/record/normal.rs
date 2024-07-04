@@ -1,3 +1,4 @@
+use super::index::{Index, IndexTantivy};
 use super::{gen_filename, FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -23,7 +24,9 @@ pub struct RecordManagerStrategyNormal {
     record_num_per_file: u64,
     record_size_per_file: u64,
     fd_cache: FdCache,
+
     writer: RwLock<RecordDisk>,
+    index: Box<dyn Index>,
 }
 
 impl RecordManagerStrategyNormal {
@@ -33,19 +36,21 @@ impl RecordManagerStrategyNormal {
         record_num_per_file: u64,
         record_size_per_file: u64,
         fd_cache_size: usize,
-    ) -> Self {
+    ) -> Result<Self> {
         let fd_cache = FdCache::new(fd_cache_size);
         let record_disk = RecordDisk::new(dir.join(gen_filename(0)), validate, fd_cache.clone());
 
-        RecordManagerStrategyNormal {
-            dir,
+        Ok(RecordManagerStrategyNormal {
+            dir: dir.clone(),
             validate,
             record_num_per_file,
             record_size_per_file,
-            writer: RwLock::new(record_disk),
             factor: AtomicU64::new(0),
             fd_cache,
-        }
+
+            writer: RwLock::new(record_disk),
+            index: Box::new(IndexTantivy::new(dir.join("index"), 15000000)?),
+        })
     }
 
     pub fn with_fd_cache(&mut self, fd_cache: FdCache) {
@@ -86,6 +91,8 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
     }
 
     async fn push(&self, record: MessageRecord) -> Result<(PathBuf, usize)> {
+        self.index.push(record.clone())?;
+
         if self.writer.read().record_size + record.calc_len() as u64 > self.record_size_per_file
             || self.writer.read().record_num + 1 > self.record_num_per_file
         {
@@ -98,6 +105,12 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
     }
 
     async fn find(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>> {
+        let record = self.index.find(id)?;
+        return match record {
+            Some(record) => Ok(Some((PathBuf::new(), record))),
+            None => Ok(None),
+        };
+
         let result = Command::new("/bin/bash")
             .arg("-c")
             .arg(format!(
@@ -431,7 +444,8 @@ mod tests {
             10,
             50000,
             2,
-        );
+        )
+        .unwrap();
 
         assert!(rmsc.load().await.is_ok());
         println!("factor = {}", rmsc.factor.load(SeqCst));
@@ -447,7 +461,8 @@ mod tests {
             100000,
             5000000,
             2,
-        );
+        )
+        .unwrap();
         assert!(rmsc.load().await.is_ok());
 
         let mut rng = rand::thread_rng();
@@ -479,7 +494,8 @@ mod tests {
             10,
             50000,
             2,
-        );
+        )
+        .unwrap();
 
         let out = rmsc.find("0dqlRXBTJyTQA3BTlPq0QNclO3Vh0dEYuShhlG").await;
         assert!(out.is_ok());

@@ -64,7 +64,7 @@ impl StorageDisk {
 
             // init the topic-message
             let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
-            let instant = Instant::new(parent);
+            let instant = Instant::new(parent)?;
 
             let mut topic_mb = TopicMessageBase::new(topic_name, instant, defer);
             topic_mb.load().await?;
@@ -99,7 +99,7 @@ impl StorageOperation for StorageDisk {
             let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
             defer.load().await?;
 
-            let instant = Instant::new(parent);
+            let instant = Instant::new(parent)?;
             instant.load().await?;
 
             let mut wg = self.topics.write();

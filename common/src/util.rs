@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use futures::executor::block_on;
 use futures::Future;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -11,7 +10,6 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tokio::join;
 use tokio::time::Interval;
 use tokio::{select, time::interval as async_interval};
 
@@ -34,7 +32,7 @@ pub async fn execute_timeout<T>(fut: impl Future<Output = Result<T>>, timeout: u
             }
         },
         _ = ticker.tick() => {
-            return Err(anyhow!("execute timeout"));
+             Err(anyhow!("execute timeout"))
         }
     }
 }
