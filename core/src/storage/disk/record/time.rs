@@ -11,6 +11,7 @@ use std::cmp::Ordering;
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::Ordering::SeqCst;
 use std::{
     num::NonZeroUsize,
@@ -314,6 +315,8 @@ struct RecordDisk {
     has_change: AtomicBool,
 
     loaded: AtomicBool,
+
+    last_defer_time: AtomicU64,
     /// 该文件对应的records
     records: ShardedLock<Vec<MessageRecord>>,
 }
@@ -335,6 +338,7 @@ impl RecordDisk {
             fd_cache,
             loaded: AtomicBool::new(false),
             has_change: AtomicBool::new(false),
+            last_defer_time: AtomicU64::new(0),
             records: ShardedLock::new(Vec::new()),
         }
     }
@@ -392,12 +396,21 @@ impl RecordDisk {
     }
 
     fn push(&self, record: MessageRecord, sort: bool) -> usize {
-        // TODO: 优化性能
         self.has_change.store(true, SeqCst);
+        let defer_time = record.defer_time;
         self.records
             .write()
             .expect("get sharedlock write failed")
             .push(record);
+        if defer_time < self.last_defer_time.load(Relaxed) {
+            self.records
+                .write()
+                .expect("get sharedlock write failed")
+                .sort_by(|a, b| a.defer_time.cmp(&b.defer_time));
+        } else {
+            self.last_defer_time.store(defer_time, Relaxed);
+        }
+
         0
     }
 
