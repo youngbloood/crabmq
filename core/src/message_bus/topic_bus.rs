@@ -1,11 +1,9 @@
-use std::{sync::Arc, time::Duration};
-
 use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
+    crab::CrabMQOption,
     message::Message,
     storage::{PersistTopicOperation, STORAGE_TYPE_DUMMY},
     topic::Topic,
-    tsuixuq::TsuixuqOption,
 };
 use anyhow::Result;
 use chrono::Local;
@@ -13,13 +11,14 @@ use common::{
     global::{Guard, CANCEL_TOKEN},
     util::interval,
 };
+use std::{sync::Arc, time::Duration};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 pub struct TopicBus {
     name: String,
-    opt: Guard<TsuixuqOption>,
+    opt: Guard<CrabMQOption>,
     use_memory: bool,
     start_message_loop: bool,
     start_defer_message_loop: bool,
@@ -41,7 +40,7 @@ pub struct TopicBus {
 
 impl TopicBus {
     pub async fn new(
-        opt: Guard<TsuixuqOption>,
+        opt: Guard<CrabMQOption>,
         topic: Guard<Topic>,
         s: Arc<Box<dyn PersistTopicOperation>>,
     ) -> Result<Self> {
@@ -244,7 +243,7 @@ pub async fn topic_message_loop_defer(guard: Guard<TopicBus>) {
 }
 
 pub async fn new_topic_message(
-    opt: Guard<TsuixuqOption>,
+    opt: Guard<CrabMQOption>,
     topic: Guard<Topic>,
     s: Arc<Box<dyn PersistTopicOperation>>,
 ) -> Result<Guard<TopicBus>> {

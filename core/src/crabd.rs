@@ -1,21 +1,21 @@
 use crate::{
+    crab::{Crab, CrabMQOption},
     tcp::TcpServer,
-    tsuixuq::{Tsuixuq, TsuixuqOption},
 };
 use anyhow::{anyhow, Result};
 use common::global::{self, Guard};
 use tokio::{net::TcpListener, select};
 use tracing::info;
 
-pub struct Tsuixuqd {
-    opt: Guard<TsuixuqOption>,
-    tsuixuq: Guard<Tsuixuq>,
+pub struct CrabMQD {
+    opt: Guard<CrabMQOption>,
+    crab: Guard<Crab>,
 }
 
-impl Tsuixuqd {
-    pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
-        Ok(Tsuixuqd {
-            tsuixuq: Guard::new(Tsuixuq::new(opt.clone())?),
+impl CrabMQD {
+    pub fn new(opt: Guard<CrabMQOption>) -> Result<Self> {
+        Ok(CrabMQD {
+            crab: Guard::new(Crab::new(opt.clone())?),
             opt,
         })
     }
@@ -29,7 +29,7 @@ impl Tsuixuqd {
             // tcp server
             r1 =  tokio::spawn(Self::serve_tcp(
                 self.opt.clone(),
-                self.tsuixuq.clone(),
+                self.crab.clone(),
             )) => {
                 match r1{
                     Ok(v)=>{
@@ -51,13 +51,13 @@ impl Tsuixuqd {
         Ok(())
     }
 
-    async fn serve_tcp(opt: Guard<TsuixuqOption>, tsuixuq: Guard<Tsuixuq>) -> Result<()> {
+    async fn serve_tcp(opt: Guard<CrabMQOption>, crab: Guard<Crab>) -> Result<()> {
         // start tcp serve
         let tcp_port = opt.get().tcp_port;
-        let tsuixuq_clone: Guard<Tsuixuq> = tsuixuq.clone();
+        let crab_clone: Guard<Crab> = crab.clone();
         let opt_arc = opt.clone();
 
-        match tokio::spawn(binding(tcp_port, opt_arc, tsuixuq_clone)).await {
+        match tokio::spawn(binding(tcp_port, opt_arc, crab_clone)).await {
             Ok(v) => {
                 if let Err(e) = v {
                     return Err(anyhow!(e));
@@ -73,14 +73,14 @@ impl Tsuixuqd {
     }
 }
 
-async fn binding(port: u32, opt: Guard<TsuixuqOption>, tsuixuq: Guard<Tsuixuq>) -> Result<()> {
+async fn binding(port: u32, opt: Guard<CrabMQOption>, crab: Guard<Crab>) -> Result<()> {
     info!("start listen port: {}", port);
     match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
         Err(err) => Err(anyhow!("listen port failed: {err}")),
         Ok(tcp_listener) => {
             // 将处理tcp_listener单独放到一个Future中处理
             tokio::spawn(async move {
-                let mut tcp_server = TcpServer::new(opt, tcp_listener, tsuixuq);
+                let mut tcp_server = TcpServer::new(opt, tcp_listener, crab);
                 tcp_server.serve().await;
             });
 

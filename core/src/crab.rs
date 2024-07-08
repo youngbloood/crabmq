@@ -16,7 +16,7 @@ const DEFAULT_FACTOR: u16 = 100;
 const DEFAULT_NUM: u64 = 10000;
 
 #[derive(Parser, Debug, serde::Deserialize)]
-pub struct TsuixuqOption {
+pub struct CrabMQOption {
     #[arg(long = "log-dir", default_value = "")]
     pub log_dir: String,
 
@@ -66,9 +66,9 @@ pub struct TsuixuqOption {
     /// 一个topic下的channel数量
     pub channel_num_in_topic: u64,
 
-    #[arg(long = "topic-num-in-tsuixuq", default_value_t = DEFAULT_BUFFER)]
-    /// 一个tsuixuq下的topic数量
-    pub topic_num_in_tsuixuq: u64,
+    #[arg(long = "max-topic-num", default_value_t = DEFAULT_BUFFER)]
+    /// 一个crabmq下的topic数量
+    pub max_topic_num: u64,
 
     #[arg(long = "client-heartbeat-interval", default_value_t = 30)]
     /// 一个client收到心跳包的时间间隔，单位(s)
@@ -126,9 +126,9 @@ pub struct TsuixuqOption {
     pub message_cache_type: String,
 }
 
-impl TsuixuqOption {
-    pub fn from_config(filename: &str) -> Result<TsuixuqOption> {
-        let mut opt = TsuixuqOption::parse();
+impl CrabMQOption {
+    pub fn from_config(filename: &str) -> Result<CrabMQOption> {
+        let mut opt = CrabMQOption::parse();
         if !filename.is_empty() {
             let cfg = Config::builder()
                 .add_source(File::with_name(filename))
@@ -174,18 +174,18 @@ impl TsuixuqOption {
     }
 }
 
-pub struct Tsuixuq {
-    opt: Guard<TsuixuqOption>,
+pub struct Crab {
+    opt: Guard<CrabMQOption>,
     mb: Guard<MessageBus>,
     pub out_sender: Option<Sender<(String, Message)>>,
 }
 
-unsafe impl Sync for Tsuixuq {}
-unsafe impl Send for Tsuixuq {}
+unsafe impl Sync for Crab {}
+unsafe impl Send for Crab {}
 
-impl Tsuixuq {
-    pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
-        let tsuixuq = Tsuixuq {
+impl Crab {
+    pub fn new(opt: Guard<CrabMQOption>) -> Result<Self> {
+        let crab = Crab {
             mb: block_on(new_message_manager(opt.clone()))?,
             out_sender: None,
             opt,
@@ -206,7 +206,7 @@ impl Tsuixuq {
         //     tsuixuq.get_or_create_topic(topic_name.to_str().unwrap(), false)?;
         // }
 
-        Ok(tsuixuq)
+        Ok(crab)
     }
 
     // pub fn get_or_create_topic(

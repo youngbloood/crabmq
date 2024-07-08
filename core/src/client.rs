@@ -1,6 +1,6 @@
 use crate::conn::Conn;
+use crate::crab::{Crab, CrabMQOption};
 use crate::message::Message;
-use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use std::cell::UnsafeCell;
@@ -27,7 +27,7 @@ pub struct Client {
     // 链接远程地址
     remote_addr: SocketAddr,
     //
-    opt: Guard<TsuixuqOption>,
+    opt: Guard<CrabMQOption>,
     // 超时ticker
     ticker: UnsafeCell<Interval>,
     defeat_count: AtomicU16,
@@ -37,7 +37,7 @@ pub struct Client {
 
     state: ClientState,
 
-    tsuixuq: Guard<Tsuixuq>,
+    crab: Guard<Crab>,
 }
 
 unsafe impl Sync for Client {}
@@ -54,8 +54,8 @@ impl Client {
     pub fn new(
         socket: TcpStream,
         remote_addr: SocketAddr,
-        opt: Guard<TsuixuqOption>,
-        tsuixuq: Guard<Tsuixuq>,
+        opt: Guard<CrabMQOption>,
+        crab: Guard<Crab>,
     ) -> Self {
         let addr = remote_addr.to_string();
         info!("new client {addr:?}");
@@ -64,7 +64,7 @@ impl Client {
         let (tx, rx) = mpsc::channel(1);
         Client {
             remote_addr,
-            tsuixuq,
+            crab,
             conn: UnsafeCell::new(Conn::new(socket)),
             ticker: UnsafeCell::new(time::interval(Duration::from_secs(
                 opt.get().client_heartbeat_interval as _,
@@ -128,12 +128,12 @@ impl Client {
                         Ok(msg)=>{
                             match sender.send((self.remote_addr.to_string(),msg)).await{
                                 Ok(())=>{
-                                    info!(addr = addr, "send msg to tsuixuq success");
+                                    info!(addr = addr, "send msg to crabmq success");
                                     continue
                                 }
                                 Err(e) =>{
                                     read_timeout_count += 1;
-                                    error!(addr = addr, "send msg to tsuixuq err: {e:?}");
+                                    error!(addr = addr, "send msg to crabmq err: {e:?}");
                                     continue
                                 }
                             }

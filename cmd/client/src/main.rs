@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
 
     let mut args = args();
     if args.len() < 2 {
-        panic!("must specify the target of the Tsuixuq");
+        panic!("must specify the target of the crabmqd");
     }
     let first = args.nth(1);
     let target = first.as_ref().unwrap().as_str();

@@ -1,6 +1,6 @@
 use crate::channel::Channel;
+use crate::crab::CrabMQOption;
 use crate::message::Message;
-use crate::tsuixuq::TsuixuqOption;
 use anyhow::{anyhow, Result};
 use common::global::{Guard, CANCEL_TOKEN};
 use common::Name;
@@ -12,7 +12,7 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 pub struct Topic {
-    opt: Guard<TsuixuqOption>,
+    opt: Guard<CrabMQOption>,
 
     pub name: Name,
     message_count: u64, // 消息的数量
@@ -29,7 +29,7 @@ pub struct Topic {
 }
 
 impl Topic {
-    pub fn new(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Self> {
+    pub fn new(opt: Guard<CrabMQOption>, name: &str, ephemeral: bool) -> Result<Self> {
         let n = Name::new(name);
         let mut topic = Topic {
             opt,
@@ -137,7 +137,7 @@ impl Topic {
     }
 }
 
-pub fn new_topic(opt: Guard<TsuixuqOption>, name: &str, ephemeral: bool) -> Result<Guard<Topic>> {
+pub fn new_topic(opt: Guard<CrabMQOption>, name: &str, ephemeral: bool) -> Result<Guard<Topic>> {
     let guard = Guard::new(Topic::new(opt, name, ephemeral)?);
     Ok(guard)
 }

@@ -1,13 +1,11 @@
 pub mod topic_bus;
 use crate::{
     client::Client,
+    crab::CrabMQOption,
     message::{convert_to_resp, Message},
     protocol::*,
-    storage::{
-        STORAGE_TYPE_DUMMY, {new_storage_wrapper, StorageWrapper},
-    },
+    storage::{new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY},
     topic::new_topic,
-    tsuixuq::TsuixuqOption,
 };
 use anyhow::{anyhow, Result};
 use common::global::Guard;
@@ -21,14 +19,14 @@ use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer}
 use tracing::info;
 
 pub struct MessageBus {
-    opt: Guard<TsuixuqOption>,
+    opt: Guard<CrabMQOption>,
     topics: HashMap<String, Guard<TopicBus>>,
     /// 真实存储message的地方，可能是memory
     storage: Guard<StorageWrapper>,
 }
 
 impl MessageBus {
-    pub async fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
+    pub async fn new(opt: Guard<CrabMQOption>) -> Result<Self> {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
             return Ok(MessageBus {
                 opt,
@@ -84,7 +82,7 @@ impl MessageBus {
     ) -> Result<Guard<TopicBus>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
-            && topics_len >= (self.opt.get().topic_num_in_tsuixuq as _)
+            && topics_len >= (self.opt.get().max_topic_num as _)
         {
             return Err(anyhow!("exceed upper limit of topic"));
         }
@@ -187,7 +185,7 @@ impl MessageBus {
     //============================ Handle Action ==============================//
 }
 
-pub async fn new_message_manager(opt: Guard<TsuixuqOption>) -> Result<Guard<MessageBus>> {
+pub async fn new_message_manager(opt: Guard<CrabMQOption>) -> Result<Guard<MessageBus>> {
     let mm = MessageBus::new(opt).await?;
     let guard = Guard::new(mm);
     Ok(guard)

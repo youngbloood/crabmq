@@ -1,2 +1,2 @@
 [workspace]
-members = ["tsuixuqd", "common", "core", "cmd/client"]
+members = ["crabmqd", "common", "core", "cmd/client"]

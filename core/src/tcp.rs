@@ -1,6 +1,6 @@
 use crate::client::{io_loop, Client};
+use crate::crab::{Crab, CrabMQOption};
 use crate::message::Message;
-use crate::tsuixuq::{Tsuixuq, TsuixuqOption};
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -16,21 +16,17 @@ pub struct TcpServer {
     out_sender: Sender<(String, Message)>,
     out_recver: Receiver<(String, Message)>,
 
-    opt: Guard<TsuixuqOption>,
+    opt: Guard<CrabMQOption>,
     tcp_listener: TcpListener,
     clients: HashMap<String, Guard<Client>>,
-    tsuixuq: Guard<Tsuixuq>,
+    crab: Guard<Crab>,
 }
 
 impl TcpServer {
-    pub fn new(
-        opt: Guard<TsuixuqOption>,
-        tcp_listener: TcpListener,
-        tsuixuq: Guard<Tsuixuq>,
-    ) -> Self {
+    pub fn new(opt: Guard<CrabMQOption>, tcp_listener: TcpListener, crab: Guard<Crab>) -> Self {
         let (in_tx, in_rx) = mpsc::channel(10000);
         let (out_tx, out_rx) = mpsc::channel(10000);
-        tsuixuq.get_mut().out_sender = Some(out_tx.clone());
+        crab.get_mut().out_sender = Some(out_tx.clone());
         TcpServer {
             in_sender: in_tx,
             in_recver: in_rx,
@@ -41,7 +37,7 @@ impl TcpServer {
             opt,
             tcp_listener,
             clients: HashMap::new(),
-            tsuixuq,
+            crab,
         }
     }
 
@@ -60,9 +56,9 @@ impl TcpServer {
                         Ok((socket,addr)) => {
                             info!("recieve connection from {addr:?}");
                             let opt = self.opt.clone();
-                            let tsuixuq = self.tsuixuq.clone();
+                            let crab = self.crab.clone();
 
-                            let client = Client::new(socket,addr,opt,tsuixuq);
+                            let client = Client::new(socket,addr,opt,crab);
                             let guard = client.builder();
                             self.clients.insert(addr.to_string(),guard.clone());
 
@@ -98,7 +94,7 @@ impl TcpServer {
                         continue;
                     }
                     let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
-                    self.tsuixuq.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),msg).await;
+                    self.crab.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),msg).await;
                 }
 
                 // 处理响应至客户端的消息
@@ -114,7 +110,7 @@ impl TcpServer {
                     info!("drop client message");
                     let address = addr.as_str();
                     self.clients.remove(addr.as_str());
-                    self.tsuixuq.get_mut().delete_client_from_channel(addr.as_str()).await;
+                    self.crab.get_mut().delete_client_from_channel(addr.as_str()).await;
                     info!("client[{address}] timeout, remove it from TcpServer and Channel");
                 }
             }

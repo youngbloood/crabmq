@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use common::global::{self, Guard};
-use core::{tsuixuq::TsuixuqOption, tsuixuqd::Tsuixuqd};
+use core::{crab::CrabMQOption, crabd::CrabMQD};
 use tokio::{select, signal};
 
 #[derive(Parser, Debug)]
@@ -14,11 +14,11 @@ pub struct Config {
 async fn main() -> Result<()> {
     // 解析是否有配置文件
     let cfg = Config::parse();
-    let opt = TsuixuqOption::from_config(cfg.filename.as_str())?;
+    let opt = CrabMQOption::from_config(cfg.filename.as_str())?;
     // 初始化日志subcriber
     opt.init_log()?;
 
-    let mut daemon = Tsuixuqd::new(Guard::new(opt))?;
+    let mut daemon = CrabMQD::new(Guard::new(opt))?;
     select! {
         result =  daemon.serve() => {
             if let Err(err) = result{
