@@ -23,14 +23,17 @@ pub struct TopicSub {
     use_memory: bool,
     start_message_loop: bool,
     start_defer_message_loop: bool,
-    /// 存放已经准备消费的消息buffer
+
+    /// 缓存已经准备消费的消息buffer
     ready_queue: CacheWrapper,
-    /// 存放从storage中超前加载的defer message，不一定到期
+
+    /// 缓存从storage中超前加载的defer message，不一定到期
     defer_cache: CacheWrapper,
-    /// 真实存储message的地方，可能是memory
-    // storage: Guard<StorageWrapper>,
+
+    /// 内存中的topic
     pub topic: Guard<Topic>,
 
+    /// 真实存储message的地方，可能是memory
     storage_topic: Arc<Box<dyn TopicOperation>>,
 
     stop: CancellationToken,
@@ -97,16 +100,20 @@ pub async fn topic_message_loop(guard: Guard<TopicSub>) {
     if guard.get().start_message_loop {
         return;
     }
+
+    let mut ticker = interval(Duration::from_millis(300)).await;
     guard.get_mut().start_message_loop = true;
     let topic_name = guard.get().name.as_str();
-    info!("LOOP: load topic[{topic_name}] message from storage...");
     loop {
+        info!("LOOP: load topic[{topic_name}] message from storage...");
         select! {
             _ = CANCEL_TOKEN.cancelled() => {
                 return;
             }
 
             _ = guard.get().stop.cancelled() => {
+                let topic_name = guard.get().name.as_str();
+                info!("topic[{topic_name}] stopped. then will exit the 'topic_message_loop'");
                 return;
             }
 
@@ -169,6 +176,18 @@ pub async fn topic_message_loop(guard: Guard<TopicSub>) {
                 let msg = msg.unwrap();
                 let _ = guard.get().topic.get().deliver_message(msg).await;
             }
+
+            // 检查是否topic是否应该退出
+            _ = async {
+                loop {
+                    if guard.get().topic.get().is_client_empty().await {
+                        guard.get().stop.cancel();
+                        return;
+                    }else{
+                        ticker.tick().await;
+                    }
+                }
+            } => {}
         }
     }
 }
@@ -179,17 +198,20 @@ pub async fn topic_message_loop_defer(guard: Guard<TopicSub>) {
     }
     guard.get_mut().start_defer_message_loop = true;
     let topic_name = guard.get().name.as_str();
-    info!("LOOP: load topic[{topic_name}] defer message from storage...");
     loop {
+        info!("LOOP: load topic[{topic_name}] defer message from storage...");
         select! {
             _ = CANCEL_TOKEN.cancelled() => {
                 return;
             }
 
             _ = guard.get().stop.cancelled() => {
+                let topic_name = guard.get().name.as_str();
+                info!("topic[{topic_name}] stopped. then will exit the 'topic_message_loop_defer'");
                 return;
             }
 
+            // 处理defer message
             msg = guard.get().defer_cache.pop(true) => {
                 if msg.is_none(){
                     continue;

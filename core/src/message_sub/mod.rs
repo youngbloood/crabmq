@@ -66,8 +66,8 @@ impl MessageSub {
     }
 
     pub async fn delete_client_from_channel(&mut self, client_addr: &str) {
-        let mut iter = self.topics.iter();
-        while let Some((_, topic)) = iter.next() {
+        let iter = self.topics.iter();
+        for (_, topic) in iter {
             let _ = topic
                 .get_mut()
                 .topic

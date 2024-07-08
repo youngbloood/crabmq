@@ -123,8 +123,17 @@ impl Topic {
         let iter = self.channels.iter_mut();
 
         for (_addr, chan) in iter {
-            chan.get_mut().delete_channel(chan_name)
+            chan.get_mut().delete_client(chan_name)
         }
+    }
+
+    pub async fn is_client_empty(&self) -> bool {
+        for chan in self.channels.values() {
+            if !chan.get().is_client_empty().await {
+                return false;
+            }
+        }
+        true
     }
 }
 

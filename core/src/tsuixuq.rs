@@ -176,7 +176,7 @@ impl TsuixuqOption {
 
 pub struct Tsuixuq {
     opt: Guard<TsuixuqOption>,
-    mm: Guard<MessageSub>,
+    mb: Guard<MessageSub>,
     pub out_sender: Option<Sender<(String, Message)>>,
 }
 
@@ -186,7 +186,7 @@ unsafe impl Send for Tsuixuq {}
 impl Tsuixuq {
     pub fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
         let tsuixuq = Tsuixuq {
-            mm: block_on(new_message_manager(opt.clone()))?,
+            mb: block_on(new_message_manager(opt.clone()))?,
             out_sender: None,
             opt,
         };
@@ -237,7 +237,7 @@ impl Tsuixuq {
         addr: &str,
         msg: Message,
     ) {
-        self.mm
+        self.mb
             .get_mut()
             .handle_message(client, out_sender, addr, msg)
             .await;
@@ -253,7 +253,7 @@ impl Tsuixuq {
     // }
 
     pub async fn delete_client_from_channel(&mut self, client_addr: &str) {
-        self.mm
+        self.mb
             .get_mut()
             .delete_client_from_channel(client_addr)
             .await;

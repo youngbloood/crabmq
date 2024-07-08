@@ -24,7 +24,9 @@ pub trait CacheOperation {
     /// pop a message from cache. if it is defer message, cache should control it pop when it's expired. or pop the None
     async fn pop(&self, _: bool) -> Option<Message>;
 
+    /// consume a message by id.
     async fn consume(&self, id: &str) -> Option<Message>;
+
     /// resize the buffer length in cache.
     async fn resize(&self, cap: usize, slide_win: usize);
 }

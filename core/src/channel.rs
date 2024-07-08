@@ -64,8 +64,13 @@ impl Channel {
         // self.pub_num.increase();
     }
 
-    pub fn delete_channel(&self, chan_name: &str) {
+    pub fn delete_client(&self, client_addr: &str) {
         let mut wg = self.clients.write();
-        wg.remove(chan_name);
+        wg.remove(client_addr);
+    }
+
+    pub async fn is_client_empty(&self) -> bool {
+        let rd = self.clients.read();
+        rd.is_empty()
     }
 }
