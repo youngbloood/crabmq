@@ -17,7 +17,7 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-pub struct TopicSub {
+pub struct TopicBus {
     name: String,
     opt: Guard<TsuixuqOption>,
     use_memory: bool,
@@ -39,14 +39,14 @@ pub struct TopicSub {
     stop: CancellationToken,
 }
 
-impl TopicSub {
+impl TopicBus {
     pub async fn new(
         opt: Guard<TsuixuqOption>,
         topic: Guard<Topic>,
         s: Arc<Box<dyn TopicOperation>>,
     ) -> Result<Self> {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
-            return Ok(TopicSub {
+            return Ok(TopicBus {
                 opt,
                 name: topic.get().name.as_str().to_string(),
                 use_memory: true,
@@ -60,7 +60,7 @@ impl TopicSub {
             });
         }
 
-        Ok(TopicSub {
+        Ok(TopicBus {
             opt: opt.clone(),
             name: topic.get().name.as_str().to_string(),
             use_memory: false,
@@ -96,7 +96,7 @@ impl TopicSub {
     }
 }
 
-pub async fn topic_message_loop(guard: Guard<TopicSub>) {
+pub async fn topic_message_loop(guard: Guard<TopicBus>) {
     if guard.get().start_message_loop {
         return;
     }
@@ -192,7 +192,7 @@ pub async fn topic_message_loop(guard: Guard<TopicSub>) {
     }
 }
 
-pub async fn topic_message_loop_defer(guard: Guard<TopicSub>) {
+pub async fn topic_message_loop_defer(guard: Guard<TopicBus>) {
     if guard.get().start_defer_message_loop {
         return;
     }
@@ -247,8 +247,8 @@ pub async fn new_topic_message(
     opt: Guard<TsuixuqOption>,
     topic: Guard<Topic>,
     s: Arc<Box<dyn TopicOperation>>,
-) -> Result<Guard<TopicSub>> {
-    let tm = TopicSub::new(opt, topic, s).await?;
+) -> Result<Guard<TopicBus>> {
+    let tm = TopicBus::new(opt, topic, s).await?;
     let guard = Guard::new(tm);
     Ok(guard)
 }

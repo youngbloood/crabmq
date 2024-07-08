@@ -1,4 +1,4 @@
-pub mod topic_sub;
+pub mod topic_bus;
 use crate::{
     client::Client,
     message::{convert_to_resp, Message},
@@ -16,21 +16,21 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::sync::mpsc::Sender;
-pub use topic_sub::TopicSub;
-use topic_sub::{new_topic_message, topic_message_loop, topic_message_loop_defer};
+pub use topic_bus::TopicBus;
+use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer};
 use tracing::info;
 
-pub struct MessageSub {
+pub struct MessageBus {
     opt: Guard<TsuixuqOption>,
-    topics: HashMap<String, Guard<TopicSub>>,
+    topics: HashMap<String, Guard<TopicBus>>,
     /// 真实存储message的地方，可能是memory
     storage: Guard<StorageWrapper>,
 }
 
-impl MessageSub {
+impl MessageBus {
     pub async fn new(opt: Guard<TsuixuqOption>) -> Result<Self> {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
-            return Ok(MessageSub {
+            return Ok(MessageBus {
                 opt,
                 topics: HashMap::new(),
                 storage: new_storage_wrapper(STORAGE_TYPE_DUMMY, PathBuf::new(), 0, 0, 0, 0)
@@ -48,7 +48,7 @@ impl MessageSub {
         )
         .await?;
 
-        Ok(MessageSub {
+        Ok(MessageBus {
             opt,
             topics: HashMap::new(),
             storage,
@@ -81,7 +81,7 @@ impl MessageSub {
         &mut self,
         topic_name: &str,
         ephemeral: bool,
-    ) -> Result<Guard<TopicSub>> {
+    ) -> Result<Guard<TopicBus>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
             && topics_len >= (self.opt.get().topic_num_in_tsuixuq as _)
@@ -187,8 +187,8 @@ impl MessageSub {
     //============================ Handle Action ==============================//
 }
 
-pub async fn new_message_manager(opt: Guard<TsuixuqOption>) -> Result<Guard<MessageSub>> {
-    let mm = MessageSub::new(opt).await?;
+pub async fn new_message_manager(opt: Guard<TsuixuqOption>) -> Result<Guard<MessageBus>> {
+    let mm = MessageBus::new(opt).await?;
     let guard = Guard::new(mm);
     Ok(guard)
 }
