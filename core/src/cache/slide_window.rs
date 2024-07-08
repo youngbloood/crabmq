@@ -117,6 +117,40 @@ impl CacheOperation for MessageCacheSlidingWindows {
         Ok(())
     }
 
+    async fn seek(&self, block: bool) -> Option<Message> {
+        let mut ticker = interval(Duration::from_millis(300)).await;
+
+        loop {
+            select! {
+                _ = CANCEL_TOKEN.cancelled() => {
+                    return None
+                }
+
+                msg = async {
+                    let read_ptr = self.read_ptr.load(SeqCst);
+                    let rd = self.msgs.read();
+                    if read_ptr >= rd.len() {
+                        return None;
+                    }
+                    Some(rd.get(read_ptr).unwrap().msg.clone())
+                } => {
+                    match msg {
+                        Some(msg) => {
+                            return Some(msg);
+                        }
+                        None => {
+                            if block {
+                                ticker.tick().await;
+                            }else{
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[doc = " pop a message from cache. if it is defer message, cache should control it pop when it\'s expired. or pop the None"]
     async fn pop(&self, block: bool) -> Option<Message> {
         let mut ticker = interval(Duration::from_millis(300)).await;
@@ -131,6 +165,7 @@ impl CacheOperation for MessageCacheSlidingWindows {
                         return None;
                     }
                     if let Some(msg_wrapper) = self.msgs.read().get(self.read_ptr.load(SeqCst)) {
+                        // rorate the read_ptr
                         self.read_ptr.fetch_add(1, SeqCst);
                         return Some(msg_wrapper.msg.clone());
                     }
@@ -177,6 +212,7 @@ impl CacheOperation for MessageCacheSlidingWindows {
         if index == 0 {
             if let Some(msg_wrapper) = self.pop_really() {
                 self.ctrl.revert(1).await;
+                // rorate the read_ptr
                 if self.read_ptr.load(SeqCst) >= 1 {
                     self.read_ptr.fetch_sub(1, SeqCst);
                 }

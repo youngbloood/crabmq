@@ -90,7 +90,7 @@ impl MessageBus {
         }
 
         if !self.topics.contains_key(topic_name) {
-            let topic_storage = self
+            let (_, topic_storage) = self
                 .storage
                 .get_mut()
                 .get_or_create_topic(topic_name, ephemeral)

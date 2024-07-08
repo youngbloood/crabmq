@@ -4,7 +4,7 @@ mod instant;
 mod message_manager;
 mod record;
 
-use super::{StorageOperation, TopicOperation};
+use super::{PersistStorageOperation, PersistTopicOperation};
 use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::{
@@ -57,6 +57,15 @@ impl StorageDisk {
         }
     }
 
+    fn get_topic(&self, topic_name: &str) -> Option<TopicMessage> {
+        if !self.topics.read().contains_key(topic_name) {
+            return None;
+        }
+        let rg = self.topics.read();
+        let topic = rg.get(topic_name).unwrap();
+        Some(topic.clone())
+    }
+
     async fn get_or_create_topic_inner(&self, topic_name: &str) -> Result<TopicMessage> {
         if !self.topics.read().contains_key(topic_name) {
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
@@ -82,7 +91,7 @@ impl StorageDisk {
 }
 
 #[async_trait::async_trait]
-impl StorageOperation for StorageDisk {
+impl PersistStorageOperation for StorageDisk {
     async fn init(&self) -> Result<()> {
         check_and_create_dir(self.dir.to_str().unwrap())?;
 
@@ -153,9 +162,18 @@ impl StorageOperation for StorageDisk {
         Ok(())
     }
 
-    async fn get_or_create_topic(&self, topic_name: &str) -> Result<Arc<Box<dyn TopicOperation>>> {
+    /// get a topic.
+    async fn get(&self, topic_name: &str) -> Option<Arc<Box<dyn PersistTopicOperation>>> {
+        self.get_topic(topic_name)
+            .map(|topic| Arc::new(Box::new(topic) as Box<dyn PersistTopicOperation>))
+    }
+
+    async fn get_or_create_topic(
+        &self,
+        topic_name: &str,
+    ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
         let topic = self.get_or_create_topic_inner(topic_name).await?;
-        Ok(Arc::new(Box::new(topic) as Box<dyn TopicOperation>))
+        Ok(Arc::new(Box::new(topic) as Box<dyn PersistTopicOperation>))
     }
 }
 
@@ -210,7 +228,7 @@ impl TopicMessageBase {
 }
 
 #[async_trait::async_trait]
-impl TopicOperation for TopicMessage {
+impl PersistTopicOperation for TopicMessage {
     fn name(&self) -> &str {
         self.guard.get().name.as_str()
     }

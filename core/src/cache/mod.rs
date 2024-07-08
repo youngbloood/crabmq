@@ -21,6 +21,9 @@ pub trait CacheOperation {
     /// push a message into cache. it will be block if the cache is filled.
     async fn push(&self, _: Message) -> Result<()>;
 
+    /// seek a message from cache. if it is defer message, cache should control it pop when it's expired. or pop the None
+    async fn seek(&self, _: bool) -> Option<Message>;
+
     /// pop a message from cache. if it is defer message, cache should control it pop when it's expired. or pop the None
     async fn pop(&self, _: bool) -> Option<Message>;
 
@@ -64,8 +67,16 @@ impl CacheWrapper {
         self.inner.push(msg).await
     }
 
+    pub async fn seek(&self, block: bool) -> Option<Message> {
+        self.inner.seek(block).await
+    }
+
     pub async fn pop(&self, block: bool) -> Option<Message> {
         self.inner.pop(block).await
+    }
+
+    pub async fn consume(&self, id: &str) -> Option<Message> {
+        self.inner.consume(id).await
     }
 
     pub async fn resize(&self, cap: usize, slide_win: usize) {

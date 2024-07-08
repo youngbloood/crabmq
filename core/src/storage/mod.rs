@@ -9,10 +9,8 @@ use crate::message::{convert_to_resp, Message};
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use disk::StorageDisk;
-use dummy::{Dummy, TopicDummyBase};
+use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
-use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};
@@ -28,12 +26,18 @@ pub const STORAGE_TYPE_LOCAL: &str = "local";
 
 #[async_trait::async_trait]
 #[enum_dispatch]
-pub trait StorageOperation {
+pub trait PersistStorageOperation {
     /// init the Storage Media.
     async fn init(&self) -> Result<()>;
 
-    /// get or create a topic
-    async fn get_or_create_topic(&self, topic_name: &str) -> Result<Arc<Box<dyn TopicOperation>>>;
+    /// get a topic.
+    async fn get(&self, topic_name: &str) -> Option<Arc<Box<dyn PersistTopicOperation>>>;
+
+    /// get or create a topic.
+    async fn get_or_create_topic(
+        &self,
+        topic_name: &str,
+    ) -> Result<Arc<Box<dyn PersistTopicOperation>>>;
 
     /// flush the messages to Storage Media.
     async fn flush(&self) -> Result<()>;
@@ -51,7 +55,7 @@ pub trait StorageOperation {
 }
 
 #[async_trait::async_trait]
-pub trait TopicOperation: Send + Sync {
+pub trait PersistTopicOperation: Send + Sync {
     /// return the topic name.
     fn name(&self) -> &str;
 
@@ -86,14 +90,14 @@ pub trait TopicOperation: Send + Sync {
     // delete(&mut self,id:&str)->Result<()>;
 }
 
-#[enum_dispatch(StorageOperation)]
+#[enum_dispatch(PersistStorageOperation)]
 pub enum StorageEnum {
     Local(StorageDisk),
     Memory(Dummy),
 }
 
 pub struct StorageWrapper {
-    inner: StorageEnum,
+    storage: StorageEnum,
 
     /// 持久化周期，单位：ms
     persist_period: u64,
@@ -104,20 +108,23 @@ pub struct StorageWrapper {
     persist_singal_tx: Sender<()>,
     persist_singla_rx: Receiver<()>,
 
-    ephemeral_topics: RwLock<HashMap<String, Arc<Box<dyn TopicOperation>>>>,
+    dummy: Dummy,
+    // ephemeral_topics: RwLock<HashMap<String, Arc<Box<dyn PersistTopicOperation>>>>,
 }
 
 impl StorageWrapper {
     fn new(inner: StorageEnum, persist_period: u64, persist_factor: u64) -> Self {
         let (singal_tx, singal_rx) = mpsc::channel(1);
         StorageWrapper {
-            inner,
+            storage: inner,
             persist_period,
             persist_factor,
             persist_factor_now: AtomicU64::new(0),
             persist_singal_tx: singal_tx,
             persist_singla_rx: singal_rx,
-            ephemeral_topics: RwLock::new(HashMap::new()),
+
+            dummy: Dummy::new(10),
+            // ephemeral_topics: RwLock::new(HashMap::new()),
         }
     }
 
@@ -125,23 +132,22 @@ impl StorageWrapper {
         &self,
         topic_name: &str,
         ephemeral: bool,
-    ) -> Result<Arc<Box<dyn TopicOperation>>> {
-        if ephemeral {
-            if !self.ephemeral_topics.read().contains_key(topic_name) {
-                let topic = Arc::new(Box::new(Guard::new(TopicDummyBase::new(topic_name, 100)))
-                    as Box<dyn TopicOperation>);
-                self.ephemeral_topics
-                    .write()
-                    .insert(topic_name.to_string(), topic.clone());
-            }
-            return Ok(self
-                .ephemeral_topics
-                .read()
-                .get(topic_name)
-                .unwrap()
-                .clone());
+    ) -> Result<(bool, Arc<Box<dyn PersistTopicOperation>>)> {
+        // 已经存在，直接返回
+        if self.dummy.contains_key(topic_name) {
+            return Ok((true, self.dummy.get(topic_name).await.unwrap().clone()));
         }
-        self.inner.get_or_create_topic(topic_name).await
+        if let Some(topic) = self.storage.get(topic_name).await {
+            return Ok((false, topic));
+        }
+
+        // 不存在，则直接插入
+        if ephemeral {
+            self.dummy.insert(topic_name);
+            return Ok((true, self.dummy.get(topic_name).await.unwrap().clone()));
+        }
+        let topic = self.storage.get_or_create_topic(topic_name).await?;
+        Ok((false, topic))
     }
 
     pub async fn send_persist_singal(&self) -> Result<()> {
@@ -159,14 +165,17 @@ impl StorageWrapper {
         addr: &str,
         msg: Message,
     ) -> Result<()> {
-        // let topic_storage = self
-        //     .get_or_create_topic(msg.get_topic(), msg.topic_ephemeral())
-        //     .await?;
+        let topic_name = msg.get_topic();
+        let (ephemeral, _) = self
+            .get_or_create_topic(topic_name, msg.topic_ephemeral())
+            .await?;
 
-        if self.persist_factor_now.load(SeqCst) % self.persist_factor == 0 {
-            self.inner.flush().await?;
+        if ephemeral {
+            self.dummy.push(msg.clone()).await?;
+        } else {
+            self.storage.push(msg.clone()).await?;
         }
-        self.inner.push(msg.clone()).await?;
+
         // 可能client已经关闭，忽略该err
         let _ = out_sender
             .send((addr.to_string(), convert_to_resp(msg)))
@@ -193,7 +202,7 @@ async fn storage_wrapper_loop(guard: Guard<StorageWrapper>) {
 
             _ = guard.get_mut().recv_persist_singal() => {
                 // info!("persist all message to storaga media.");
-                if let Err(e) = guard.get_mut().inner.flush().await{
+                if let Err(e) = guard.get_mut().storage.flush().await{
                     eprintln!("persist MessageQueueDisk err: {e:?}");
                 }
             }

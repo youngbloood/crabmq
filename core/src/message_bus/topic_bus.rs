@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
     message::Message,
-    storage::{TopicOperation, STORAGE_TYPE_DUMMY},
+    storage::{PersistTopicOperation, STORAGE_TYPE_DUMMY},
     topic::Topic,
     tsuixuq::TsuixuqOption,
 };
@@ -34,7 +34,7 @@ pub struct TopicBus {
     pub topic: Guard<Topic>,
 
     /// 真实存储message的地方，可能是memory
-    storage_topic: Arc<Box<dyn TopicOperation>>,
+    storage_topic: Arc<Box<dyn PersistTopicOperation>>,
 
     stop: CancellationToken,
 }
@@ -43,7 +43,7 @@ impl TopicBus {
     pub async fn new(
         opt: Guard<TsuixuqOption>,
         topic: Guard<Topic>,
-        s: Arc<Box<dyn TopicOperation>>,
+        s: Arc<Box<dyn PersistTopicOperation>>,
     ) -> Result<Self> {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
             return Ok(TopicBus {
@@ -246,7 +246,7 @@ pub async fn topic_message_loop_defer(guard: Guard<TopicBus>) {
 pub async fn new_topic_message(
     opt: Guard<TsuixuqOption>,
     topic: Guard<Topic>,
-    s: Arc<Box<dyn TopicOperation>>,
+    s: Arc<Box<dyn PersistTopicOperation>>,
 ) -> Result<Guard<TopicBus>> {
     let tm = TopicBus::new(opt, topic, s).await?;
     let guard = Guard::new(tm);

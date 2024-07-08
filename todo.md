@@ -12,6 +12,10 @@
 - [ ] action: cls
 - [ ] action: auth
 
+## Feature
+
+- [ ] ephemeral topic
+
 ## Protocol
 
 - [ ] protocol: 延时消息支持设定过期时间
