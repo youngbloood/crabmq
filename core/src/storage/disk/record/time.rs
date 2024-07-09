@@ -12,7 +12,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::Ordering::SeqCst;
 use std::{
     num::NonZeroUsize,
     os::unix::fs::MetadataExt,
@@ -358,13 +357,13 @@ impl RecordDisk {
 
     fn load(&self) -> Result<()> {
         if !check_exist(&self.filename) {
-            self.loaded.store(true, SeqCst);
+            self.loaded.store(true, Relaxed);
             return Ok(());
         }
-        if self.loaded.load(SeqCst) {
+        if self.loaded.load(Relaxed) {
             return Ok(());
         }
-        self.loaded.store(true, SeqCst);
+        self.loaded.store(true, Relaxed);
 
         let fd = OpenOptions::new()
             .read(true)
@@ -409,7 +408,7 @@ impl RecordDisk {
     }
 
     fn push(&self, record: MessageRecord, sort: bool) -> usize {
-        self.has_change.store(true, SeqCst);
+        self.has_change.store(true, Relaxed);
         let defer_time = record.defer_time;
         self.records
             .write()
@@ -428,7 +427,7 @@ impl RecordDisk {
     }
 
     fn persist(&self) -> Result<()> {
-        if !self.has_change.load(SeqCst) {
+        if !self.has_change.load(Relaxed) {
             return Ok(());
         }
         let fd = self
@@ -447,7 +446,7 @@ impl RecordDisk {
         wfd.seek(SeekFrom::Start(0))?;
         wfd.write_all(&bts)?;
         drop(wfd);
-        self.has_change.store(false, SeqCst);
+        self.has_change.store(false, Relaxed);
         Ok(())
     }
 }
@@ -495,7 +494,7 @@ impl TimePtr {
         fwd.read_to_string(&mut content)?;
         let lines: Vec<&str> = content.split('\n').collect();
 
-        let index = self.index.load(SeqCst);
+        let index = self.index.load(Relaxed);
 
         // println!("index={}, line.len={}", index, lines.len());
         if index < lines.len() as u64 {
@@ -530,12 +529,12 @@ impl TimePtr {
                             .expect("get sharedlock write failed");
                         if filename.cmp(&record_wd) == Ordering::Greater {
                             *record_wd = filename;
-                            self.index.store(0, SeqCst);
+                            self.index.store(0, Relaxed);
                             break;
                         }
                     }
                 } else {
-                    self.index.fetch_add(1, SeqCst);
+                    self.index.fetch_add(1, Relaxed);
                 }
 
                 match val {
@@ -568,7 +567,7 @@ impl TimePtr {
                     .unwrap()
                     .parse::<u64>()
                     .expect("convert to index failed"),
-                SeqCst,
+                Relaxed,
             )
         }
         Ok(())
@@ -589,7 +588,7 @@ impl TimePtr {
                     .expect("get sharedlock read failed")
                     .to_str()
                     .unwrap(),
-                self.index.load(SeqCst)
+                self.index.load(Relaxed)
             ),
         )?;
         Ok(())
@@ -608,7 +607,7 @@ impl TimePtr {
             .write()
             .expect("get sharedlock write failed");
         wd.clone_from(&record_filename);
-        self.index.store(index as _, SeqCst);
+        self.index.store(index as _, Relaxed);
         Ok(())
     }
 }

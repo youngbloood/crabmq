@@ -4,7 +4,7 @@ use common::global::CANCEL_TOKEN;
 use common::{global::Guard, util::interval};
 use dynamic_queue::{DynamicQueue, FlowControl, Queue};
 use parking_lot::RwLock;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::Relaxed;
 use std::{sync::atomic::AtomicUsize, time::Duration};
 use tokio::select;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -127,7 +127,7 @@ impl CacheOperation for MessageCacheSlidingWindows {
                 }
 
                 msg = async {
-                    let read_ptr = self.read_ptr.load(SeqCst);
+                    let read_ptr = self.read_ptr.load(Relaxed);
                     let rd = self.msgs.read();
                     if read_ptr >= rd.len() {
                         return None;
@@ -161,12 +161,12 @@ impl CacheOperation for MessageCacheSlidingWindows {
                 }
 
                 msg = async {
-                    if self.read_ptr.load(SeqCst) >= self.slide_win.load(SeqCst) {
+                    if self.read_ptr.load(Relaxed) >= self.slide_win.load(Relaxed) {
                         return None;
                     }
-                    if let Some(msg_wrapper) = self.msgs.read().get(self.read_ptr.load(SeqCst)) {
+                    if let Some(msg_wrapper) = self.msgs.read().get(self.read_ptr.load(Relaxed)) {
                         // rorate the read_ptr
-                        self.read_ptr.fetch_add(1, SeqCst);
+                        self.read_ptr.fetch_add(1, Relaxed);
                         return Some(msg_wrapper.msg.clone());
                     }
 
@@ -213,8 +213,8 @@ impl CacheOperation for MessageCacheSlidingWindows {
             if let Some(msg_wrapper) = self.pop_really() {
                 self.ctrl.revert(1).await;
                 // rorate the read_ptr
-                if self.read_ptr.load(SeqCst) >= 1 {
-                    self.read_ptr.fetch_sub(1, SeqCst);
+                if self.read_ptr.load(Relaxed) >= 1 {
+                    self.read_ptr.fetch_sub(1, Relaxed);
                 }
 
                 return Some(msg_wrapper.msg);
@@ -231,8 +231,8 @@ impl CacheOperation for MessageCacheSlidingWindows {
             _slide_win = cap;
         }
         self.slide_win
-            .store(_slide_win, std::sync::atomic::Ordering::SeqCst);
-        self.slide_win.store(_slide_win, SeqCst);
+            .store(_slide_win, std::sync::atomic::Ordering::Relaxed);
+        self.slide_win.store(_slide_win, Relaxed);
     }
 }
 

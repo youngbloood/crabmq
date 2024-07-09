@@ -10,7 +10,7 @@ use std::fs::{self};
 use std::io::{Seek as _, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;
 use std::pin::Pin;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::Relaxed;
 use std::{path::PathBuf, sync::atomic::AtomicU64};
 use tokio::fs::File as AsyncFile;
 use tokio::io::AsyncReadExt;
@@ -52,8 +52,8 @@ impl MessageManager {
     }
 
     pub async fn push(&self, msg: Message) -> Result<MessageRecord> {
-        if self.writer.msg_num.load(SeqCst) >= self.max_msg_num_per_file
-            || self.writer.msg_size.load(SeqCst) + msg.calc_len() as u64 > self.max_size_per_file
+        if self.writer.msg_num.load(Relaxed) >= self.max_msg_num_per_file
+            || self.writer.msg_size.load(Relaxed) + msg.calc_len() as u64 > self.max_size_per_file
         {
             self.writer.persist().await?;
             self.rorate()?;
@@ -61,8 +61,8 @@ impl MessageManager {
 
         let id = msg.id();
         let record = MessageRecord {
-            factor: self.factor.load(SeqCst),
-            offset: self.writer.msg_size.load(SeqCst),
+            factor: self.factor.load(Relaxed),
+            offset: self.writer.msg_size.load(Relaxed),
             length: msg.calc_len() as _,
             id: id.to_string(),
             defer_time: msg.defer_time(),
@@ -76,8 +76,8 @@ impl MessageManager {
     }
 
     pub fn rorate(&self) -> Result<()> {
-        self.factor.fetch_add(1, SeqCst);
-        let next_filename = self.dir.join(gen_filename(self.factor.load(SeqCst)));
+        self.factor.fetch_add(1, Relaxed);
+        let next_filename = self.dir.join(gen_filename(self.factor.load(Relaxed)));
         self.writer.reset_with_filename(next_filename);
         // check_and_create_filename(&self.writer.filename)?;
         Ok(())
@@ -115,10 +115,10 @@ impl MessageManager {
         }
 
         // 初始化Manager.factor和Manager.writer，为下次写入消息时发生文件滚动做准备
-        self.factor.store(max_factor, SeqCst);
+        self.factor.store(max_factor, Relaxed);
 
         self.writer
-            .reset_with_filename(self.dir.join(gen_filename(self.factor.load(SeqCst))));
+            .reset_with_filename(self.dir.join(gen_filename(self.factor.load(Relaxed))));
 
         if check_exist(&*self.writer.filename.read()) {
             self.writer.load().await?;
@@ -128,9 +128,6 @@ impl MessageManager {
     }
 
     pub async fn persist(&self) -> Result<()> {
-        if self.writer.msgs.read().is_empty() {
-            return Ok(());
-        }
         self.writer.persist().await?;
         Ok(())
     }
@@ -188,16 +185,16 @@ impl MessageDisk {
         *wg = filename;
         // self.fd = None;
         self.msgs.write().clear();
-        self.write_offset.store(HEAD_SIZE_PER_FILE, SeqCst);
-        self.msg_size.store(HEAD_SIZE_PER_FILE, SeqCst);
-        self.msg_num.store(0, SeqCst);
+        self.write_offset.store(HEAD_SIZE_PER_FILE, Relaxed);
+        self.msg_size.store(HEAD_SIZE_PER_FILE, Relaxed);
+        self.msg_num.store(0, Relaxed);
     }
 
     pub fn push(&self, msg: Message) {
-        self.msg_size.fetch_add(msg.calc_len() as u64, SeqCst);
-        self.msg_num.fetch_add(1, SeqCst);
-        let mut rg = self.msgs.write();
-        rg.push(msg);
+        self.msg_size.fetch_add(msg.calc_len() as u64, Relaxed);
+        self.msg_num.fetch_add(1, Relaxed);
+        let mut wg = self.msgs.write();
+        wg.push(msg);
     }
 
     pub async fn load(&self) -> Result<()> {
@@ -210,7 +207,7 @@ impl MessageDisk {
 
         // init msg_size
         let meta = fd.metadata().await?;
-        self.msg_size.store(meta.size(), SeqCst);
+        self.msg_size.store(meta.size(), Relaxed);
 
         let mut pfd = Pin::new(&mut fd);
 
@@ -225,10 +222,11 @@ impl MessageDisk {
                     .try_into()
                     .expect("convert to u64 array failed"),
             ),
-            SeqCst,
+            Relaxed,
         );
 
-        self.write_offset.store(self.msg_size.load(SeqCst), SeqCst);
+        self.write_offset
+            .store(self.msg_size.load(Relaxed), Relaxed);
 
         if !self.validate {
             return Ok(());
@@ -265,16 +263,13 @@ impl MessageDisk {
     }
 
     pub async fn persist(&self) -> Result<()> {
-        {
-            let msgs_rg = self.msgs.read();
-            if msgs_rg.len() == 0 {
-                return Ok(());
-            }
+        let msgs_rd = self.msgs.read();
+        if msgs_rd.is_empty() {
+            return Ok(());
         }
 
         // 准备待写入的bts
-        let mut msgs_wg = self.msgs.write();
-        let iter = msgs_wg.iter();
+        let iter = msgs_rd.iter();
         let mut bts = vec![];
         for mu in iter {
             bts.extend(mu.as_bytes());
@@ -285,15 +280,17 @@ impl MessageDisk {
 
         // 写入msg_num
         fwg.seek(SeekFrom::Start(0))?;
-        fwg.write_all(&self.msg_num.load(SeqCst).to_be_bytes())?;
+        fwg.write_all(&self.msg_num.load(Relaxed).to_be_bytes())?;
 
         // 在offset位置写入内存中的msgs
-        fwg.seek(SeekFrom::Start(self.write_offset.load(SeqCst)))?;
+        fwg.seek(SeekFrom::Start(self.write_offset.load(Relaxed)))?;
         fwg.write_all(&bts)?;
         fwg.sync_all()?;
-        self.write_offset.store(self.msg_size.load(SeqCst), SeqCst);
+        self.write_offset
+            .store(self.msg_size.load(Relaxed), Relaxed);
 
-        msgs_wg.clear();
+        drop(msgs_rd);
+        self.msgs.write().clear();
 
         Ok(())
     }

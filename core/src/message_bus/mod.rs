@@ -31,7 +31,7 @@ impl MessageBus {
             return Ok(MessageBus {
                 opt,
                 topics: HashMap::new(),
-                storage: new_storage_wrapper(STORAGE_TYPE_DUMMY, PathBuf::new(), 0, 0, 0, 0)
+                storage: new_storage_wrapper(STORAGE_TYPE_DUMMY, PathBuf::new(), 10, 100, 10, 300)
                     .await?,
             });
         }

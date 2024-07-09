@@ -11,7 +11,7 @@ use common::global::{Guard, CANCEL_TOKEN};
 use disk::StorageDisk;
 use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};
 use tokio::{
@@ -19,7 +19,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
-use tracing::info;
+use tracing::{error, info};
 
 pub const STORAGE_TYPE_DUMMY: &str = "dummy";
 pub const STORAGE_TYPE_LOCAL: &str = "local";
@@ -180,9 +180,9 @@ impl StorageWrapper {
         let _ = out_sender
             .send((addr.to_string(), convert_to_resp(msg)))
             .await;
-        self.persist_factor_now.fetch_add(1, SeqCst);
-        if self.persist_factor_now.load(SeqCst) == u64::MAX - 1 {
-            self.persist_factor_now.store(0, SeqCst)
+        self.persist_factor_now.fetch_add(1, Relaxed);
+        if self.persist_factor_now.load(Relaxed) == u64::MAX {
+            self.persist_factor_now.store(0, Relaxed)
         }
         Ok(())
     }
@@ -203,7 +203,9 @@ async fn storage_wrapper_loop(guard: Guard<StorageWrapper>) {
             _ = guard.get_mut().recv_persist_singal() => {
                 // info!("persist all message to storaga media.");
                 if let Err(e) = guard.get_mut().storage.flush().await{
-                    eprintln!("persist MessageQueueDisk err: {e:?}");
+                    error!("persist MessageQueueDisk err: {e:?}");
+                }else{
+                    info!("persist MessageQueueDisk success.");
                 }
             }
         }

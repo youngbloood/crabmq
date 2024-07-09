@@ -26,9 +26,7 @@ pub trait Index: Send + Sync {
 
 pub struct IndexTantivy {
     dir: PathBuf,
-
-    schema: Schema,
-    fields: Vec<Field>,
+    budget_in_bytes: usize,
 
     // flush
     flush_factor_target: AtomicU64,
@@ -36,9 +34,7 @@ pub struct IndexTantivy {
     need_flush: AtomicBool,
 
     // index
-    index: TanIndex,
-    writer: RefCell<IndexWriter>,
-    reader: IndexReader,
+    index: RefCell<Option<IndexWrapper>>,
 }
 
 unsafe impl Send for IndexTantivy {}
@@ -46,54 +42,36 @@ unsafe impl Sync for IndexTantivy {}
 
 impl IndexTantivy {
     pub fn new(dir: PathBuf, budget_in_bytes: usize) -> Result<Self> {
-        let mut schema_builder = Schema::builder();
-        schema_builder.add_text_field("record", TEXT | STORED);
-        let schema = schema_builder.build();
-        let record = schema.get_field("record")?;
-
-        if check_exist(&dir) {
-            let index = TanIndex::open_in_dir(dir.clone())?;
-            return Ok(IndexTantivy {
-                dir,
-                schema,
-                fields: vec![record],
-                flush_factor_target: AtomicU64::new(0),
-                flush_factor_now: AtomicU64::new(0),
-                need_flush: AtomicBool::new(false),
-                writer: RefCell::new(index.writer(budget_in_bytes)?),
-                reader: index.reader()?,
-                index,
-            });
-        }
-
-        check_and_create_dir(&dir)?;
-        let index = TanIndex::create_in_dir(dir.clone(), schema.clone())?;
         Ok(IndexTantivy {
             dir,
-            schema,
-            fields: vec![record],
+            budget_in_bytes,
             flush_factor_target: AtomicU64::new(0),
             flush_factor_now: AtomicU64::new(0),
             need_flush: AtomicBool::new(false),
-            writer: index.writer(budget_in_bytes)?.into(),
-            reader: index
-                .reader_builder()
-                .reload_policy(ReloadPolicy::OnCommitWithDelay)
-                .try_into()?,
-            index,
+            index: RefCell::new(None),
         })
+    }
+
+    fn init_index(&self) -> Result<()> {
+        let mut index = self.index.borrow_mut();
+        if index.is_some() {
+            return Ok(());
+        }
+        let index_wrapper = IndexWrapper::new(self.dir.clone(), self.budget_in_bytes)?;
+        *index = Some(index_wrapper);
+        Ok(())
     }
 }
 
 impl Index for IndexTantivy {
     fn push(&self, record: MessageRecord) -> Result<()> {
-        let mut writer = self.writer.borrow_mut();
-        writer.add_document(doc! {
-            *self.fields.first().unwrap() => record.format()
-        })?;
+        self.init_index()?;
+
+        let index = self.index.borrow_mut();
+        index.as_ref().unwrap().push(record)?;
         self.flush_factor_now.fetch_add(1, Relaxed);
         if self.flush_factor_now.load(Relaxed) >= self.flush_factor_target.load(Relaxed) {
-            writer.commit()?;
+            index.as_ref().unwrap().writer_commit()?;
             self.flush_factor_now.store(0, Relaxed);
             self.need_flush.store(false, Relaxed);
             return Ok(());
@@ -104,11 +82,78 @@ impl Index for IndexTantivy {
     }
 
     fn find(&self, id: &str) -> Result<Option<MessageRecord>> {
+        let index = self.index.borrow_mut();
+        if index.is_none() {
+            return Ok(None);
+        }
         if self.need_flush.load(Relaxed) {
-            let mut writer = self.writer.borrow_mut();
-            writer.commit()?;
-            self.reader.reload()?;
+            index.as_ref().unwrap().writer_commit()?;
             self.need_flush.store(false, Relaxed);
+        }
+
+        index.as_ref().unwrap().find(id)
+    }
+}
+
+struct IndexWrapper {
+    schema: Schema,
+    fields: Vec<Field>,
+
+    need_reload: AtomicBool,
+    // index
+    index: TanIndex,
+    writer: RefCell<IndexWriter>,
+    reader: IndexReader,
+}
+
+impl IndexWrapper {
+    fn new(dir: PathBuf, budget_in_bytes: usize) -> Result<Self> {
+        let mut schema_builder = Schema::builder();
+        schema_builder.add_text_field("record", TEXT | STORED);
+        let schema = schema_builder.build();
+        let record = schema.get_field("record")?;
+
+        if check_exist(&dir) {
+            let index = TanIndex::open_in_dir(dir.clone())?;
+            return Ok(IndexWrapper {
+                schema,
+                fields: vec![record],
+                need_reload: AtomicBool::new(false),
+                writer: RefCell::new(index.writer(budget_in_bytes)?),
+                reader: index.reader()?,
+                index,
+            });
+        }
+
+        check_and_create_dir(&dir)?;
+        let index = TanIndex::create_in_dir(dir.clone(), schema.clone())?;
+
+        Ok(IndexWrapper {
+            schema,
+            fields: vec![record],
+            need_reload: AtomicBool::new(false),
+            writer: index.writer(budget_in_bytes)?.into(),
+            reader: index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                .try_into()?,
+            index,
+        })
+    }
+
+    fn push(&self, record: MessageRecord) -> Result<()> {
+        let writer = self.writer.borrow_mut();
+        writer.add_document(doc! {
+            *self.fields.first().unwrap() => record.format()
+        })?;
+
+        Ok(())
+    }
+
+    fn find(&self, id: &str) -> Result<Option<MessageRecord>> {
+        if self.need_reload.load(Relaxed) {
+            self.reader.reload()?;
+            self.need_reload.store(false, Relaxed);
         }
 
         let searcher = self.reader.searcher();
@@ -130,5 +175,11 @@ impl Index for IndexTantivy {
         let record = MessageRecord::parse_from(record_content)?;
 
         Ok(Some(record))
+    }
+
+    fn writer_commit(&self) -> Result<()> {
+        self.writer.borrow_mut().commit()?;
+        self.need_reload.store(true, Relaxed);
+        Ok(())
     }
 }

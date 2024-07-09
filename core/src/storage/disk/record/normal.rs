@@ -7,7 +7,7 @@ use crossbeam::sync::ShardedLock;
 use parking_lot::RwLock;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::process::Command;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::Relaxed;
 use std::{
     fs::{self},
     io::SeekFrom,
@@ -26,7 +26,7 @@ pub struct RecordManagerStrategyNormal {
     record_size_per_file: u64,
     fd_cache: FdCache,
 
-    writer: RwLock<RecordDisk>,
+    writer: RecordDisk,
     index: Box<dyn Index>,
 }
 
@@ -48,8 +48,7 @@ impl RecordManagerStrategyNormal {
             record_size_per_file,
             factor: AtomicU64::new(0),
             fd_cache,
-
-            writer: RwLock::new(record_disk),
+            writer: record_disk,
             index: Box::new(IndexTantivy::new(dir.join("index"), 15000000)?),
         })
     }
@@ -59,10 +58,9 @@ impl RecordManagerStrategyNormal {
     }
 
     fn rorate(&self) {
-        self.factor.fetch_add(1, SeqCst);
-        let mut wg = self.writer.write();
-        wg.reset_with_filename(
-            Path::new(&self.dir).join(gen_filename(self.factor.load(SeqCst)).as_str()),
+        self.factor.fetch_add(1, Relaxed);
+        self.writer.reset_with_filename(
+            Path::new(&self.dir).join(gen_filename(self.factor.load(Relaxed)).as_str()),
         );
     }
 }
@@ -83,26 +81,26 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
                 }
             }
         }
-        self.factor.store(max_factor, SeqCst);
-        self.writer
-            .write()
-            .reset_with_filename(Path::new(&self.dir).join(gen_filename(self.factor.load(SeqCst))));
-        self.writer.write().load(false)?;
+        self.factor.store(max_factor, Relaxed);
+        self.writer.reset_with_filename(
+            Path::new(&self.dir).join(gen_filename(self.factor.load(Relaxed))),
+        );
+        self.writer.load(false)?;
         Ok(())
     }
 
     async fn push(&self, record: MessageRecord) -> Result<(PathBuf, usize)> {
         self.index.push(record.clone())?;
 
-        if self.writer.read().record_size + record.calc_len() as u64 > self.record_size_per_file
-            || self.writer.read().record_num + 1 > self.record_num_per_file
+        if self.writer.record_size.load(Relaxed) + record.calc_len() as u64
+            > self.record_size_per_file
+            || self.writer.record_num.load(Relaxed) + 1 > self.record_num_per_file
         {
             self.persist().await?;
             self.rorate();
         }
-        let mut wd = self.writer.write();
-        let index = wd.push(record, false);
-        Ok((PathBuf::from(&wd.filename), index))
+        let index = self.writer.push(record, false);
+        Ok((PathBuf::from(&*self.writer.filename.read()), index))
     }
 
     async fn find(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>> {
@@ -133,27 +131,27 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
     }
 
     async fn persist(&self) -> Result<()> {
-        self.writer.write().persist()?;
+        self.writer.persist()?;
         Ok(())
     }
 }
 
 struct RecordDisk {
-    filename: PathBuf,
+    filename: RwLock<PathBuf>,
     validate: bool,
 
     fd_cache: FdCache,
 
     /// 该文件中records的大小
-    record_size: u64,
+    record_size: AtomicU64,
 
     /// records数量
-    record_num: u64,
+    record_num: AtomicU64,
 
-    write_offset: u64,
+    write_offset: AtomicU64,
 
     /// 该文件对应的records
-    records: Vec<MessageRecord>,
+    records: RwLock<Vec<MessageRecord>>,
 }
 
 // impl Default for RecordDisk {
@@ -173,43 +171,47 @@ struct RecordDisk {
 impl RecordDisk {
     fn new(filename: PathBuf, validate: bool, fd_cache: FdCache) -> Self {
         RecordDisk {
-            filename,
+            filename: RwLock::new(filename),
             validate,
             fd_cache,
-            record_size: 21,
-            record_num: 0,
-            write_offset: 21,
-            records: Vec::new(),
+            record_size: AtomicU64::new(21),
+            record_num: AtomicU64::new(0),
+            write_offset: AtomicU64::new(21),
+            records: RwLock::new(Vec::new()),
         }
     }
 
-    fn load(&mut self, load: bool) -> Result<()> {
-        if !check_exist(&self.filename) {
+    fn load(&self, load: bool) -> Result<()> {
+        if !check_exist(&*self.filename.read()) {
             return Ok(());
         }
 
-        let fd = self.fd_cache.get_or_create(&self.filename)?;
+        let fd = self.fd_cache.get_or_create(&self.filename.read())?;
 
         let mut wfd = fd.write();
         let meta = wfd.metadata()?;
-        self.record_size = meta.size();
-        self.write_offset = self.record_size;
+        let file_size = meta.size();
+        self.record_size.store(file_size, Relaxed);
+        self.write_offset.store(file_size, Relaxed);
 
         let mut buf = BytesMut::new();
         buf.resize(21, 0);
         wfd.read_exact(&mut buf)?;
 
         let record_num_str = String::from_utf8(buf.to_vec())?;
-        self.record_num = record_num_str
-            .trim_end()
-            .parse::<u64>()
-            .expect("convert to record_num failed");
+        self.record_num.store(
+            record_num_str
+                .trim_end()
+                .parse::<u64>()
+                .expect("convert to record_num failed"),
+            Relaxed,
+        );
 
         if !self.validate {
             return Ok(());
         }
 
-        buf.resize(self.record_size as usize - 21, 0);
+        buf.resize(file_size as usize - 21, 0);
         wfd.read_exact(&mut buf)?;
         let buf_vec = buf.to_vec();
         let cells = buf_vec.split(|n| *n == b'\n');
@@ -217,54 +219,60 @@ impl RecordDisk {
             let line = String::from_utf8(cs.to_vec())?;
             let record = MessageRecord::parse_from(&line)?;
             if load {
-                self.records.push(record);
+                self.records.write().push(record);
             }
         }
         if load {
-            self.records.sort_by_key(|c| c.defer_time);
+            self.records.write().sort_by_key(|c| c.defer_time);
         }
         Ok(())
     }
 
-    fn reset_with_filename(&mut self, filename: PathBuf) {
-        self.filename = filename;
-        self.record_size = 0;
-        self.record_num = 0;
-        self.write_offset = 21;
-        self.records = vec![];
+    fn reset_with_filename(&self, filename: PathBuf) {
+        let mut fn_wd = self.filename.write();
+        *fn_wd = filename;
+        self.record_size.store(0, Relaxed);
+        self.record_num.store(0, Relaxed);
+        self.write_offset.store(21, Relaxed);
+        self.records.write().clear();
     }
 
-    fn push(&mut self, record: MessageRecord, sort: bool) -> usize {
-        self.record_num += 1;
-        self.record_size += record.calc_len() as u64;
-        self.records.push(record);
-        self.record_num as usize
+    fn push(&self, record: MessageRecord, sort: bool) -> usize {
+        self.record_num.fetch_add(1, Relaxed);
+        self.record_size
+            .fetch_add(record.calc_len() as u64, Relaxed);
+        self.records.write().push(record);
+        self.record_num.load(Relaxed) as usize
     }
 
-    fn persist(&mut self) -> Result<()> {
-        if self.record_num == 0 {
+    fn persist(&self) -> Result<()> {
+        if self.record_num.load(Relaxed) == 0 {
             return Ok(());
         }
 
         let mut bts = BytesMut::new();
 
-        let fd = self.fd_cache.get_or_create(&self.filename)?;
+        let fd = self.fd_cache.get_or_create(&self.filename.read())?;
         let mut wfd = fd.write();
         // write record_num
         wfd.seek(SeekFrom::Start(0))?;
-        wfd.write_all(format!("{}\n", gen_filename(self.record_num)).as_bytes())?;
+        wfd.write_all(format!("{}\n", gen_filename(self.record_num.load(Relaxed))).as_bytes())?;
 
         // write records
-        wfd.seek(SeekFrom::Start(self.write_offset))?;
-        let iter = self.records.iter();
+        wfd.seek(SeekFrom::Start(self.write_offset.load(Relaxed)))?;
+
+        let records_rd = self.records.read();
+        let iter = records_rd.iter();
         for record in iter {
             let record_str = record.format();
             let record_bts = record_str.as_bytes();
-            self.write_offset += record_bts.len() as u64;
+            self.write_offset
+                .fetch_add(record_bts.len() as u64, Relaxed);
             bts.extend(record_bts);
         }
         wfd.write_all(&bts)?;
-        self.records.clear();
+        drop(records_rd);
+        self.records.write().clear();
         Ok(())
     }
 }
@@ -308,7 +316,7 @@ impl NormalPtr {
         fwd.read_to_string(&mut content)?;
         let lines: Vec<&str> = content.split('\n').collect();
 
-        let index = self.index.load(SeqCst);
+        let index = self.index.load(Relaxed);
         if index < lines.len() as u64 {
             let line = lines[index as usize];
             if line.is_empty() {
@@ -348,10 +356,10 @@ impl NormalPtr {
                     if let Some(parent) = record_wd.parent() {
                         *record_wd = parent.join(gen_filename(factor));
                     }
-                    self.index.store(1, SeqCst);
+                    self.index.store(1, Relaxed);
                     drop(record_wd);
                 } else {
-                    self.index.fetch_add(1, SeqCst);
+                    self.index.fetch_add(1, Relaxed);
                 }
 
                 match val {
@@ -384,14 +392,14 @@ impl NormalPtr {
                     .unwrap()
                     .parse::<u64>()
                     .expect("convert to index failed"),
-                SeqCst,
+                Relaxed,
             )
         }
         Ok(())
     }
 
     pub fn persist(&self) -> Result<()> {
-        if self.filename.eq(&PathBuf::new()) && self.index.load(SeqCst) == 1 {
+        if self.filename.eq(&PathBuf::new()) && self.index.load(Relaxed) == 1 {
             return Ok(());
         }
         fs::write(
@@ -404,7 +412,7 @@ impl NormalPtr {
                     .expect("get sharedlock read failed")
                     .to_str()
                     .unwrap(),
-                self.index.load(SeqCst)
+                self.index.load(Relaxed)
             ),
         )?;
         Ok(())
@@ -423,7 +431,7 @@ impl NormalPtr {
             .write()
             .expect("get sharedlock write failed");
         wd.set_file_name(record_filename);
-        self.index.store(index as _, SeqCst);
+        self.index.store(index as _, Relaxed);
         Ok(())
     }
 }
@@ -447,9 +455,9 @@ mod tests {
         .unwrap();
 
         assert!(rmsc.load().await.is_ok());
-        println!("factor = {}", rmsc.factor.load(SeqCst));
-        println!("record_size = {}", rmsc.writer.read().record_size);
-        println!("record_num = {}", rmsc.writer.read().record_num);
+        println!("factor = {}", rmsc.factor.load(Relaxed));
+        println!("record_size = {}", rmsc.writer.record_size.load(Relaxed));
+        println!("record_num = {}", rmsc.writer.record_num.load(Relaxed));
     }
 
     #[tokio::test]

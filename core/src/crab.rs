@@ -31,7 +31,7 @@ pub struct CrabMQOption {
     pub log_rolling: String,
 
     #[arg(short = 'p', long = "port", default_value_t = 3890)]
-    /// tcp监听端口
+    /// [`tcp`] 监听端口
     pub tcp_port: u32,
 
     #[arg(long = "msg-num-buffer", default_value_t = DEFAULT_BUFFER as u16)]
@@ -39,68 +39,60 @@ pub struct CrabMQOption {
     pub msg_num_buffer: u16,
 
     #[arg(long = "memory-msg-size", default_value_t = DEFAULT_BUFFER)]
-    /// 内存中存储message的大小
+    /// 内存中存储消息体的大小
     pub memory_message_size: u64,
 
     #[arg(long = "memory-msg-count", default_value_t = DEFAULT_BUFFER)]
-    /// 内存中存储message的数量
+    /// 内存中存储消息的数量
     pub memory_message_count: u64,
 
-    #[arg(long = "msg-flush-factor", default_value_t = DEFAULT_FACTOR)]
-    /// messag flush至disk因子
-    pub message_flush_factor: u16,
-
-    #[arg(long = "msg-flush-interval", default_value_t = DEFAULT_FACTOR as u64)]
-    /// messaage flush至disk的时间间隔
-    pub message_flush_interval: u64,
-
     #[arg(long = "topic-msg-buffer", default_value_t = DEFAULT_BUFFER)]
-    /// topic中message数量缓存数
+    /// [`topic`] 中消息数量缓存数
     pub topic_message_buffer: u64,
 
     #[arg(long = "channel-msg-buffer", default_value_t = DEFAULT_BUFFER)]
-    /// channel中的message数量缓存数
+    /// [`channel`] 中的消息数量缓存数
     pub channel_message_buffer: u64,
 
     #[arg(long = "channel-num-in-topic", default_value_t = DEFAULT_BUFFER)]
-    /// 一个topic下的channel数量
+    /// 一个 [`topic`] 下的 [`channel`] 数量
     pub channel_num_in_topic: u64,
 
     #[arg(long = "max-topic-num", default_value_t = DEFAULT_BUFFER)]
-    /// 一个crabmq下的topic数量
+    /// 一个 [`crabmq`] 下的topic数量
     pub max_topic_num: u64,
 
     #[arg(long = "client-heartbeat-interval", default_value_t = 30)]
-    /// 一个client收到心跳包的时间间隔，单位(s)
+    /// 一个 [`client`] 收到心跳包的时间间隔，单位(s)
     pub client_heartbeat_interval: u16,
 
     #[arg(long = "client-expire-count", default_value_t = 3)]
-    /// 一个client超时次数限制，超过该限制client会主动断开
+    /// 一个 [`client超时次数限制，超过该限制client会主动断开
     ///
     /// 超时定义：固定[`client_heartbeat_interval`]时间内未收到包为超时
     pub client_expire_count: u16,
 
     #[arg(long = "client-read-timeout", default_value_t = 30)]
-    /// 一个client读取数据超时时间
+    /// 一个 [`client`] 读取数据超时时间
     pub client_read_timeout: u64,
 
     #[arg(long = "client-read-timeout-count", default_value_t = 3)]
-    /// 一个client读取数据超时次数，超过该次数会断开链接
+    /// 一个 [`client`] 读取数据超时次数，超过该次数会断开链接
     pub client_read_timeout_count: u64,
 
     #[arg(long = "client-write-timeout", default_value_t = 30)]
-    /// 一个client写入数据超时时间
+    /// 一个 [`client`] 写入数据超时时间
     pub client_write_timeout: u64,
 
     #[arg(long = "client-write-timeout-count", default_value_t = 3)]
-    /// 一个client写入数据超时次数，超过该次数会断开链接
+    /// 一个 [`client`] 写入数据超时次数，超过该次数会断开链接
     pub client_write_timeout_count: u64,
 
     #[arg(long = "message-dir", default_value = "./message")]
-    /// message默认存放的位置
+    /// 消息默认存放的位置
     pub message_dir: String,
 
-    /// max_num_per_file * 100 约等于 10G
+    /// [`max_num_per_file`] * 100 约等于 10G
     #[arg(long = "max-num-per-file", default_value_t = 107374180)]
     /// 每个文件最多存放消息数量
     pub max_num_per_file: u64,
@@ -110,19 +102,19 @@ pub struct CrabMQOption {
     pub max_size_per_file: u64,
 
     #[arg(long = "persist-message-factor", default_value_t = 50)]
-    /// 每persist_message_factor条消息触发一次消息持久化至磁盘
+    /// 每 [`persist_message_factor`] 条消息触发一次消息持久化至磁盘
     pub persist_message_factor: u64,
 
-    #[arg(long = "persist-message-period", default_value_t = 50)]
-    /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
+    #[arg(long = "persist-message-period", default_value_t = 500)]
+    /// 每 [`persist_message_period`] 时长触发一次消息持久化至磁盘，单位：ms
     pub persist_message_period: u64,
 
     #[arg(long = "message-storage-type", default_value = "local")]
-    /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
+    /// 设置消息持久化类型
     pub message_storage_type: String,
 
     #[arg(long = "message-cache-type", default_value = "memory")]
-    /// 每persist_message_period时长触发一次消息持久化至磁盘，单位：ms
+    /// 设置消息 [`cache`] 类型，从 [`message-storage-type`] 中读取的消息会放入该 [`cache`] 中
     pub message_cache_type: String,
 }
 

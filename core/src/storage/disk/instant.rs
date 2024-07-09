@@ -132,10 +132,10 @@ impl Instant {
     }
 
     pub async fn flush(&self) -> Result<()> {
+        self.message_manager.persist().await?;
         self.ready_record_manager.persist().await?;
         self.not_ready_record_manager.persist().await?;
         self.delete_record_manager.persist().await?;
-        self.message_manager.persist().await?;
         self.consume_ptr.persist()?;
         // self.read_ptr.persist()?;
         Ok(())
@@ -171,9 +171,10 @@ mod tests {
     use super::*;
     use crate::protocol::{ProtocolBody, ProtocolHead};
     use bytes::Bytes;
-    use common::util::random_str;
+    use common::util::{interval, random_str};
     use rand::Rng as _;
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
+    use tokio::select;
 
     #[test]
     fn test_instant_new() {
