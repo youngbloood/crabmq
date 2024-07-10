@@ -9,13 +9,13 @@ use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::{
     global::{Guard, CANCEL_TOKEN},
-    util::{check_and_create_dir, interval},
+    util::{check_and_create_dir, check_exist, interval},
 };
 use defer::Defer;
 use instant::Instant;
 use parking_lot::RwLock;
 use std::{
-    collections::HashMap,
+    collections::{btree_map::Entry, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, info};
 
 const SPLIT_UNIT: char = '\n';
 const SPLIT_CELL: char = ',';
@@ -57,13 +57,36 @@ impl StorageDisk {
         }
     }
 
-    fn get_topic(&self, topic_name: &str) -> Option<TopicMessage> {
+    async fn get_topic_from_dir(&self, dir_name: PathBuf) -> Result<()> {
+        let topic_name = dir_name.file_name().unwrap().to_str().unwrap();
+        info!("LAZY: load topic[{topic_name}]...");
+        let defer = Defer::new(dir_name.clone(), "{daily}/{hourly}/{minutely:5}")?;
+        defer.load().await?;
+
+        let instant = Instant::new(dir_name.clone())?;
+        instant.load().await?;
+
+        let mut wg = self.topics.write();
+        wg.insert(
+            topic_name.to_string(),
+            TopicMessage::new(TopicMessageBase::new(topic_name, instant, defer)),
+        );
+        Ok(())
+    }
+
+    async fn get_topic(&self, topic_name: &str) -> Result<Option<TopicMessage>> {
         if !self.topics.read().contains_key(topic_name) {
-            return None;
+            let parent = self.dir.join(topic_name);
+            if !check_exist(&parent) {
+                return Ok(None);
+            }
+
+            info!("LAZY: load topic[{topic_name}]...");
+            self.get_topic_from_dir(parent).await?;
         }
         let rg = self.topics.read();
         let topic = rg.get(topic_name).unwrap();
-        Some(topic.clone())
+        Ok(Some(topic.clone()))
     }
 
     async fn get_or_create_topic_inner(&self, topic_name: &str) -> Result<TopicMessage> {
@@ -92,36 +115,18 @@ impl StorageDisk {
 
 #[async_trait::async_trait]
 impl PersistStorageOperation for StorageDisk {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self, validate: bool) -> Result<()> {
         check_and_create_dir(self.dir.to_str().unwrap())?;
-
-        for entry in fs::read_dir(self.dir.to_str().unwrap())? {
+        if !validate {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            if entry.file_type()?.is_file() {
                 continue;
             }
-
-            let topic_name = entry.file_name();
-            let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name.to_str().unwrap());
-            debug!("StorageDisk: load topic: {}", topic_name.to_str().unwrap());
-
-            let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
-            defer.load().await?;
-
-            let instant = Instant::new(parent)?;
-            instant.load().await?;
-
-            let mut wg = self.topics.write();
-            wg.insert(
-                topic_name.to_str().unwrap().to_string(),
-                TopicMessage::new(TopicMessageBase::new(
-                    topic_name.to_str().unwrap(),
-                    instant,
-                    defer,
-                )),
-            );
+            self.get_topic_from_dir(entry.path()).await?;
         }
-
         Ok(())
     }
 
@@ -163,9 +168,14 @@ impl PersistStorageOperation for StorageDisk {
     }
 
     /// get a topic.
-    async fn get(&self, topic_name: &str) -> Option<Arc<Box<dyn PersistTopicOperation>>> {
-        self.get_topic(topic_name)
-            .map(|topic| Arc::new(Box::new(topic) as Box<dyn PersistTopicOperation>))
+    async fn get(&self, topic_name: &str) -> Result<Option<Arc<Box<dyn PersistTopicOperation>>>> {
+        if let Some(topic) = self.get_topic(topic_name).await? {
+            return Ok(Some(Arc::new(
+                Box::new(topic) as Box<dyn PersistTopicOperation>
+            )));
+        }
+
+        Ok(None)
     }
 
     async fn get_or_create_topic(

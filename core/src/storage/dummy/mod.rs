@@ -47,7 +47,7 @@ impl Dummy {
 
 #[async_trait::async_trait]
 impl PersistStorageOperation for Dummy {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self, _: bool) -> Result<()> {
         Ok(())
     }
 
@@ -66,13 +66,13 @@ impl PersistStorageOperation for Dummy {
     }
 
     /// get a topic.
-    async fn get(&self, topic_name: &str) -> Option<Arc<Box<dyn PersistTopicOperation>>> {
+    async fn get(&self, topic_name: &str) -> Result<Option<Arc<Box<dyn PersistTopicOperation>>>> {
         let rd = self.topics.read();
         if let Some(t) = rd.get(topic_name) {
-            return Some(Arc::new(Box::new(t.clone())));
+            return Ok(Some(Arc::new(Box::new(t.clone()))));
         }
 
-        None
+        Ok(None)
     }
 
     async fn get_or_create_topic(

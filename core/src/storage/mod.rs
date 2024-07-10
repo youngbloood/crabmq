@@ -28,10 +28,10 @@ pub const STORAGE_TYPE_LOCAL: &str = "local";
 #[enum_dispatch]
 pub trait PersistStorageOperation {
     /// init the Storage Media.
-    async fn init(&self) -> Result<()>;
+    async fn init(&self, validate: bool) -> Result<()>;
 
     /// get a topic.
-    async fn get(&self, topic_name: &str) -> Option<Arc<Box<dyn PersistTopicOperation>>>;
+    async fn get(&self, topic_name: &str) -> Result<Option<Arc<Box<dyn PersistTopicOperation>>>>;
 
     /// get or create a topic.
     async fn get_or_create_topic(
@@ -135,16 +135,24 @@ impl StorageWrapper {
     ) -> Result<(bool, Arc<Box<dyn PersistTopicOperation>>)> {
         // 已经存在，直接返回
         if self.dummy.contains_key(topic_name) {
-            return Ok((true, self.dummy.get(topic_name).await.unwrap().clone()));
+            return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
-        if let Some(topic) = self.storage.get(topic_name).await {
-            return Ok((false, topic));
+
+        match self.storage.get(topic_name).await {
+            Ok(topic) => {
+                if let Some(topic) = topic {
+                    return Ok((true, topic));
+                }
+            }
+            Err(e) => {
+                error!("get topic[{topic_name}] from storage failed: {e:?}")
+            }
         }
 
         // 不存在，则直接插入
         if ephemeral {
             self.dummy.insert(topic_name);
-            return Ok((true, self.dummy.get(topic_name).await.unwrap().clone()));
+            return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
         let topic = self.storage.get_or_create_topic(topic_name).await?;
         Ok((false, topic))
@@ -204,8 +212,6 @@ async fn storage_wrapper_loop(guard: Guard<StorageWrapper>) {
                 // info!("persist all message to storaga media.");
                 if let Err(e) = guard.get_mut().storage.flush().await{
                     error!("persist MessageQueueDisk err: {e:?}");
-                }else{
-                    info!("persist MessageQueueDisk success.");
                 }
             }
         }
@@ -235,7 +241,7 @@ pub async fn new_storage_wrapper(
             max_size_per_file,
         )),
     };
-    storage.init().await?;
+    storage.init(false).await?;
 
     let storage_wrapper = StorageWrapper::new(storage, persist_period, persist_factor);
     let guard = Guard::new(storage_wrapper);

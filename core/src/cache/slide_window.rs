@@ -2,7 +2,7 @@ use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::global::CANCEL_TOKEN;
 use common::{global::Guard, util::interval};
-use dynamic_queue::{DynamicQueue, FlowControl, Queue};
+use dynamic_queue::{FlowControl, Queue};
 use parking_lot::RwLock;
 use std::sync::atomic::Ordering::Relaxed;
 use std::{sync::atomic::AtomicUsize, time::Duration};
