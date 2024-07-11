@@ -20,8 +20,12 @@ use tracing::info;
 
 pub struct MessageBus {
     opt: Guard<CrabMQOption>,
+
+    /// topics map，当某个客户端订阅topic时，从storage中获取到topic接口，并初始化一个TopicBus，循环从TopicBus中读取消息
     topics: HashMap<String, Guard<TopicBus>>,
     /// 真实存储message的地方，可能是memory
+    ///
+    /// 写入message的入口
     storage: Guard<StorageWrapper>,
 }
 

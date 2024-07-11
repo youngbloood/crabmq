@@ -19,7 +19,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
-use tracing::{error, info};
+use tracing::error;
 
 pub const STORAGE_TYPE_DUMMY: &str = "dummy";
 pub const STORAGE_TYPE_LOCAL: &str = "local";
@@ -97,8 +97,6 @@ pub enum StorageEnum {
 }
 
 pub struct StorageWrapper {
-    storage: StorageEnum,
-
     /// 持久化周期，单位：ms
     persist_period: u64,
 
@@ -108,23 +106,22 @@ pub struct StorageWrapper {
     persist_singal_tx: Sender<()>,
     persist_singla_rx: Receiver<()>,
 
+    storage: StorageEnum,
     dummy: Dummy,
-    // ephemeral_topics: RwLock<HashMap<String, Arc<Box<dyn PersistTopicOperation>>>>,
 }
 
 impl StorageWrapper {
     fn new(inner: StorageEnum, persist_period: u64, persist_factor: u64) -> Self {
         let (singal_tx, singal_rx) = mpsc::channel(1);
         StorageWrapper {
-            storage: inner,
             persist_period,
             persist_factor,
             persist_factor_now: AtomicU64::new(0),
             persist_singal_tx: singal_tx,
             persist_singla_rx: singal_rx,
 
+            storage: inner,
             dummy: Dummy::new(10),
-            // ephemeral_topics: RwLock::new(HashMap::new()),
         }
     }
 

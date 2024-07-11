@@ -11,11 +11,10 @@ use common::{
     global::{Guard, CANCEL_TOKEN},
     util::{check_and_create_dir, check_exist, interval},
 };
+use dashmap::DashMap;
 use defer::Defer;
 use instant::Instant;
-use parking_lot::RwLock;
 use std::{
-    collections::{btree_map::Entry, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -37,7 +36,7 @@ pub struct StorageDisk {
     dir: PathBuf,
 
     /// topic_name: TopicMessage
-    topics: RwLock<HashMap<String, TopicMessage>>,
+    topics: DashMap<String, TopicMessage>,
 
     max_msg_num_per_file: u64,
     max_size_per_file: u64,
@@ -50,7 +49,7 @@ impl StorageDisk {
     pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
         StorageDisk {
             dir,
-            topics: RwLock::new(HashMap::new()),
+            topics: DashMap::new(),
             cancel: CancellationToken::new(),
             max_msg_num_per_file,
             max_size_per_file,
@@ -66,8 +65,7 @@ impl StorageDisk {
         let instant = Instant::new(dir_name.clone())?;
         instant.load().await?;
 
-        let mut wg = self.topics.write();
-        wg.insert(
+        self.topics.insert(
             topic_name.to_string(),
             TopicMessage::new(TopicMessageBase::new(topic_name, instant, defer)),
         );
@@ -75,7 +73,7 @@ impl StorageDisk {
     }
 
     async fn get_topic(&self, topic_name: &str) -> Result<Option<TopicMessage>> {
-        if !self.topics.read().contains_key(topic_name) {
+        if !self.topics.contains_key(topic_name) {
             let parent = self.dir.join(topic_name);
             if !check_exist(&parent) {
                 return Ok(None);
@@ -84,13 +82,12 @@ impl StorageDisk {
             info!("LAZY: load topic[{topic_name}]...");
             self.get_topic_from_dir(parent).await?;
         }
-        let rg = self.topics.read();
-        let topic = rg.get(topic_name).unwrap();
-        Ok(Some(topic.clone()))
+        let topic = self.topics.get(topic_name).unwrap();
+        Ok(Some(topic.value().clone()))
     }
 
     async fn get_or_create_topic_inner(&self, topic_name: &str) -> Result<TopicMessage> {
-        if !self.topics.read().contains_key(topic_name) {
+        if !self.topics.contains_key(topic_name) {
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
             debug!("StorageDisk: load topic: {}", topic_name);
 
@@ -102,14 +99,11 @@ impl StorageDisk {
             topic_mb.load().await?;
 
             let topic = TopicMessage::new(topic_mb);
-            self.topics
-                .write()
-                .insert(topic_name.to_string(), topic.clone());
+            self.topics.insert(topic_name.to_string(), topic.clone());
             return Ok(topic);
         }
-        let rg = self.topics.read();
-        let topic = rg.get(topic_name).unwrap();
-        Ok(topic.clone())
+        let topic = self.topics.get(topic_name).unwrap();
+        Ok(topic.value().clone())
     }
 }
 
@@ -137,10 +131,8 @@ impl PersistStorageOperation for StorageDisk {
     }
 
     async fn flush(&self) -> Result<()> {
-        let rg = self.topics.read();
-        let iter = rg.iter();
-        // let mut handles = Vec::with_capacity(rg.len() * 2);
-        for (_, topic) in iter {
+        let iter = self.topics.iter();
+        for topic in iter {
             topic
                 .guard
                 .get()

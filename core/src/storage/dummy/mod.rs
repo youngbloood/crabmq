@@ -5,41 +5,39 @@ use crate::{
 };
 use anyhow::Result;
 use common::global::Guard;
-use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc};
+use dashmap::DashMap;
+use std::sync::Arc;
 
 pub struct Dummy {
     buf: usize,
-    topics: RwLock<HashMap<String, TopicDummy>>,
+    topics: DashMap<String, TopicDummy>,
 }
 
 impl Dummy {
     pub fn new(buf: usize) -> Self {
         Dummy {
             buf,
-            topics: RwLock::new(HashMap::with_capacity(buf)),
+            topics: DashMap::with_capacity(buf),
         }
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        let rd = self.topics.read();
-        rd.contains_key(key)
+        self.topics.contains_key(key)
     }
 
     pub fn insert(&self, key: &str) {
-        let mut wd = self.topics.write();
-        wd.insert(key.to_string(), Guard::new(TopicDummyBase::new(key, 1000)));
+        self.topics
+            .insert(key.to_string(), Guard::new(TopicDummyBase::new(key, 1000)));
     }
 
     fn get_or_create_topic_dummy(&self, topic_name: &str) -> Result<TopicDummy> {
-        let rd = self.topics.read();
-        if rd.contains_key(topic_name) {
-            return Ok(rd.get(topic_name).unwrap().clone());
+        if let Some(topic_dummy) = self.topics.get(topic_name) {
+            return Ok(topic_dummy.value().clone());
         }
-        drop(rd);
-        let mut wd = self.topics.write();
+
         let topic_dummy = Guard::new(TopicDummyBase::new(topic_name, 100));
-        wd.insert(topic_name.to_owned(), topic_dummy.clone());
+        self.topics
+            .insert(topic_name.to_owned(), topic_dummy.clone());
 
         Ok(topic_dummy)
     }
@@ -67,9 +65,8 @@ impl PersistStorageOperation for Dummy {
 
     /// get a topic.
     async fn get(&self, topic_name: &str) -> Result<Option<Arc<Box<dyn PersistTopicOperation>>>> {
-        let rd = self.topics.read();
-        if let Some(t) = rd.get(topic_name) {
-            return Ok(Some(Arc::new(Box::new(t.clone()))));
+        if let Some(t) = self.topics.get(topic_name) {
+            return Ok(Some(Arc::new(Box::new(t.value().clone()))));
         }
 
         Ok(None)
