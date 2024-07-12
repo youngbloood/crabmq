@@ -2,13 +2,9 @@ use crate::channel::Channel;
 use crate::crab::CrabMQOption;
 use crate::message::Message;
 use anyhow::{anyhow, Result};
-use common::global::{Guard, CANCEL_TOKEN};
+use common::global::Guard;
 use common::Name;
-use std::collections::HashMap;
-use std::time::Duration;
-use tokio::select;
-use tokio::sync::oneshot;
-use tokio::time::interval;
+use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 
 pub struct Topic {
@@ -23,7 +19,7 @@ pub struct Topic {
 
     ephemeral: bool,
 
-    channels: HashMap<String, Guard<Channel>>,
+    channels: DashMap<String, Guard<Channel>>,
 
     cancel: CancellationToken,
 }
@@ -35,7 +31,7 @@ impl Topic {
             opt,
             name: n,
             ephemeral,
-            channels: HashMap::new(),
+            channels: DashMap::new(),
             message_count: 0,
             message_bytes: 0,
             pub_num: 0,
@@ -59,8 +55,8 @@ impl Topic {
     /// 将消息发下至consumers
     pub async fn deliver_message(&self, msg: Message) -> Result<()> {
         let iter = self.channels.iter();
-        for (_, chan) in iter {
-            chan.get().send_msg(msg.clone()).await?;
+        for chan in iter {
+            chan.value().get().send_msg(msg.clone()).await?;
         }
         Ok(())
     }
@@ -122,14 +118,14 @@ impl Topic {
     pub async fn delete_client_from_channel(&mut self, chan_name: &str) {
         let iter = self.channels.iter_mut();
 
-        for (_addr, chan) in iter {
-            chan.get_mut().delete_client(chan_name)
+        for chan in iter {
+            chan.value().get_mut().delete_client(chan_name)
         }
     }
 
     pub async fn is_client_empty(&self) -> bool {
-        for chan in self.channels.values() {
-            if !chan.get().is_client_empty().await {
+        for chan in self.channels.iter() {
+            if !chan.value().get().is_client_empty().await {
                 return false;
             }
         }
@@ -142,33 +138,31 @@ pub fn new_topic(opt: Guard<CrabMQOption>, name: &str, ephemeral: bool) -> Resul
     Ok(guard)
 }
 
-/// [`topic_has_consumers`] means there is consumers connected and in channel, then will return.
-///
-/// Otherwise this function will be block until any consumer connected.
-pub async fn topic_has_consumers(topic: Guard<Topic>) {
-    let (notify_tx, notify_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_secs(1));
-        loop {
-            select! {
-                _ = CANCEL_TOKEN.cancelled() => {
-                    return;
-                }
+//
+// pub async fn topic_has_consumers(topic: Guard<Topic>) {
+//     let (notify_tx, notify_rx) = oneshot::channel();
+//     tokio::spawn(async move {
+//         let mut ticker = interval(Duration::from_secs(1));
+//         loop {
+//             select! {
+//                 _ = CANCEL_TOKEN.cancelled() => {
+//                     return;
+//                 }
 
-                _ = ticker.tick() => {
-                    for chan in topic.get().channels.values() {
-                        let rg = chan.get().clients.read();
-                        if rg.len() != 0 {
-                            let _ = notify_tx.send(());
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    });
-    let _ = notify_rx.await;
-}
+//                 _ = ticker.tick() => {
+//                     for chan in topic.get().channels.values() {
+//                         let rg = chan.get().clients.read();
+//                         if rg.len() != 0 {
+//                             let _ = notify_tx.send(());
+//                             return;
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     });
+//     let _ = notify_rx.await;
+// }
 
 // async fn topic_loop(guard: Guard<Topic>) {
 //     loop {

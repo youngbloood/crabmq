@@ -9,10 +9,8 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use common::global::Guard;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use dashmap::DashMap;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;
 use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer};
@@ -22,7 +20,7 @@ pub struct MessageBus {
     opt: Guard<CrabMQOption>,
 
     /// topics map，当某个客户端订阅topic时，从storage中获取到topic接口，并初始化一个TopicBus，循环从TopicBus中读取消息
-    topics: HashMap<String, Guard<TopicBus>>,
+    topics: DashMap<String, Guard<TopicBus>>,
     /// 真实存储message的地方，可能是memory
     ///
     /// 写入message的入口
@@ -34,7 +32,7 @@ impl MessageBus {
         if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
             return Ok(MessageBus {
                 opt,
-                topics: HashMap::new(),
+                topics: DashMap::new(),
                 storage: new_storage_wrapper(STORAGE_TYPE_DUMMY, PathBuf::new(), 10, 100, 10, 300)
                     .await?,
             });
@@ -52,7 +50,7 @@ impl MessageBus {
 
         Ok(MessageBus {
             opt,
-            topics: HashMap::new(),
+            topics: DashMap::new(),
             storage,
         })
     }
@@ -69,8 +67,9 @@ impl MessageBus {
 
     pub async fn delete_client_from_channel(&mut self, client_addr: &str) {
         let iter = self.topics.iter();
-        for (_, topic) in iter {
+        for topic in iter {
             let _ = topic
+                .value()
                 .get_mut()
                 .topic
                 .get_mut()
