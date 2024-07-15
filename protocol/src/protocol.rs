@@ -907,7 +907,7 @@ impl ProtocolBody {
 
     pub fn body_len(&self) -> u64 {
         u64::from_be_bytes(
-            self.head[2..PROTOCOL_BODY_HEAD_LEN]
+            self.head[2..PROTOCOL_BODY_HEAD_LEN - 2]
                 .to_vec()
                 .try_into()
                 .expect("get body length failed"),
@@ -918,7 +918,9 @@ impl ProtocolBody {
         // set the body length in head
         let body_len = body.len().to_be_bytes();
         let mut new_head = self.head[..2].to_vec();
+        let old_head_tail = self.head[10..].to_vec();
         new_head.extend(body_len);
+        new_head.extend(old_head_tail);
         self.head = new_head
             .try_into()
             .expect("convert to protocol body head failed");

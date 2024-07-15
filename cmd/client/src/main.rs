@@ -117,8 +117,8 @@ impl Args {
             body.with_ack(msg.ack)
                 .with_delete(msg.delete)
                 .with_persist(msg.persist)
-                .with_not_ready(msg.not_ready)
-                .with_defer_time(msg.defer);
+                .with_notready(msg.not_ready)
+                .with_defer_time_offset(msg.defer);
 
             if let Some(body_str) = msg.body.as_ref() {
                 body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))

@@ -206,8 +206,8 @@ mod tests {
             let mut body = ProtocolBody::new();
             // 设置id
             assert!(body.with_id((i + 1000).to_string().as_str()).is_ok());
-            body.with_ack(true).with_not_ready(false).with_persist(true);
-            body.with_not_ready(i % 2 == 0);
+            body.with_ack(true).with_persist(true);
+            body.with_notready(i % 2 == 0);
 
             let mut rng = rand::thread_rng();
             let length = rng.gen_range(5..50);

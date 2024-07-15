@@ -196,14 +196,14 @@ impl Message {
 
     pub fn is_consumed(&self) -> bool {
         match self {
-            Self::V1(v1) => v1.bodys.list.first().unwrap().is_consumed(),
+            Self::V1(v1) => v1.bodys.list.first().unwrap().is_consume(),
             _ => unreachable!(),
         }
     }
 
     pub fn is_not_ready(&self) -> bool {
         match self {
-            Self::V1(v1) => v1.bodys.list.first().unwrap().is_not_ready(),
+            Self::V1(v1) => v1.bodys.list.first().unwrap().is_notready(),
             _ => unreachable!(),
         }
     }

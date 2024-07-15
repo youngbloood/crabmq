@@ -217,10 +217,10 @@ mod tests {
             // 设置id
             assert!(body.with_id((i + 1000).to_string().as_str()).is_ok());
             body.with_ack(true)
-                .with_not_ready(false)
+                .with_notready(false)
                 .with_persist(true)
-                .with_defer_time(100 + i)
-                .with_not_ready(i % 2 == 0);
+                .with_defer_time_offset(100 + i)
+                .with_notready(i % 2 == 0);
 
             let mut rng = rand::thread_rng();
             let length = rng.gen_range(5..50);
