@@ -2,14 +2,16 @@ pub mod topic_bus;
 use crate::{
     client::Client,
     crab::CrabMQOption,
-    message::{convert_to_resp, Message},
-    protocol::*,
     storage::{new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY},
     topic::new_topic,
 };
 use anyhow::{anyhow, Result};
 use common::global::Guard;
 use dashmap::DashMap;
+use protocol::{
+    message::{convert_to_resp, Message},
+    protocol::*,
+};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;

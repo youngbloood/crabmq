@@ -1,7 +1,8 @@
-use crate::{client::Client, message::Message};
+use crate::client::Client;
 use anyhow::Result;
 use common::{global::Guard, Name};
 use dashmap::DashMap;
+use protocol::message::Message;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 pub struct Channel {

@@ -1,8 +1,8 @@
 use crate::conn::Conn;
 use crate::crab::{Crab, CrabMQOption};
-use crate::message::Message;
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
+use protocol::message::Message;
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};

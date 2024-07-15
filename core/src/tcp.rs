@@ -1,7 +1,7 @@
 use crate::client::{io_loop, Client};
 use crate::crab::{Crab, CrabMQOption};
-use crate::message::Message;
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
+use protocol::message::Message;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{net::TcpListener, select};

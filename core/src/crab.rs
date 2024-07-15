@@ -1,5 +1,4 @@
 use crate::client::Client;
-use crate::message::Message;
 use crate::message_bus::new_message_manager;
 use crate::message_bus::MessageBus;
 use anyhow::Result;
@@ -7,6 +6,7 @@ use clap::Parser;
 use common::global::Guard;
 use config::{Config, File};
 use futures::executor::block_on;
+use protocol::message::Message;
 use tokio::sync::mpsc::Sender;
 use tracing::Level;
 use tracing_appender::rolling::{daily, hourly, minutely, never};

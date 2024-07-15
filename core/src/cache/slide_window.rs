@@ -1,9 +1,9 @@
-use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::global::CANCEL_TOKEN;
 use common::{global::Guard, util::interval};
 use dynamic_queue::{FlowControl, Queue};
 use parking_lot::RwLock;
+use protocol::message::Message;
 use std::sync::atomic::Ordering::Relaxed;
 use std::{sync::atomic::AtomicUsize, time::Duration};
 use tokio::select;
@@ -238,11 +238,12 @@ impl CacheOperation for MessageCacheSlidingWindows {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        cache::CacheOperation,
+    use protocol::{
         message::Message,
         protocol::{ProtocolBody, ProtocolHead},
     };
+
+    use crate::cache::CacheOperation;
 
     use super::MessageCacheSlidingWindows;
 

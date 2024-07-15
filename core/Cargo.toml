@@ -33,3 +33,4 @@ crossbeam = "0.8.4"
 tantivy = "0.22.0"
 tempfile = "3.10.1"
 dashmap = "6.0.1"
+protocol = { version = "0.1.0", path = "../protocol" }

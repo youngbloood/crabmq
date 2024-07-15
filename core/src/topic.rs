@@ -1,10 +1,10 @@
 use crate::channel::Channel;
 use crate::crab::CrabMQOption;
-use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::Name;
 use dashmap::DashMap;
+use protocol::message::Message;
 use tokio_util::sync::CancellationToken;
 
 pub struct Topic {

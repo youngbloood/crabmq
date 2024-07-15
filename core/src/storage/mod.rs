@@ -5,12 +5,12 @@
 mod disk;
 mod dummy;
 
-use crate::message::{convert_to_resp, Message};
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use disk::StorageDisk;
 use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
+use protocol::message::{convert_to_resp, Message};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};

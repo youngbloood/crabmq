@@ -1,11 +1,11 @@
 use super::gen_filename;
 use super::record::{FdCache, MessageRecord};
-use crate::message::Message;
-use crate::protocol::{ProtocolBody, ProtocolHead};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use common::util::{check_exist, is_debug};
 use parking_lot::RwLock;
+use protocol::message::Message;
+use protocol::protocol::{ProtocolBody, ProtocolHead};
 use std::fs::{self};
 use std::io::{Seek as _, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;

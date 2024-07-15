@@ -1,7 +1,6 @@
 use anyhow::Result;
+use protocol::message::Message;
 use std::ops::Deref;
-
-use crate::message::Message;
 
 /// [`Compress`] is compress the message and uncompress message.
 ///

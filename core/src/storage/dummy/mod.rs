@@ -1,11 +1,9 @@
 use super::{PersistStorageOperation, PersistTopicOperation};
-use crate::{
-    cache::{CacheWrapper, CACHE_TYPE_MEM},
-    message::Message,
-};
+use crate::cache::{CacheWrapper, CACHE_TYPE_MEM};
 use anyhow::Result;
 use common::global::Guard;
 use dashmap::DashMap;
+use protocol::message::Message;
 use std::sync::Arc;
 
 pub struct Dummy {

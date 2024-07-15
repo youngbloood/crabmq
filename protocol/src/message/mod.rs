@@ -1,14 +1,12 @@
 pub mod v1;
 
 use self::v1::MessageV1;
-use crate::{
-    error::ProtocolError,
-    protocol::{ProtocolBody, ProtocolBodys, ProtocolHead},
-};
+use crate::error::ProtocolError;
+use crate::protocol::{ProtocolBody, ProtocolBodys, ProtocolHead};
 use anyhow::Result;
 use bytes::Bytes;
 use std::{pin::Pin, result::Result as StdResult};
-use tokio::io::{duplex, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 
 #[derive(Debug)]
 pub enum Message {

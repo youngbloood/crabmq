@@ -4,8 +4,8 @@ use super::{
         FdCache, NormalPtr, RecordManager, RecordManagerStrategy as _, RecordManagerStrategyNormal,
     },
 };
-use crate::message::Message;
 use anyhow::{anyhow, Result};
+use protocol::message::Message;
 use std::path::PathBuf;
 
 pub struct Instant {
@@ -169,9 +169,9 @@ impl Instant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ProtocolBody, ProtocolHead};
     use bytes::Bytes;
     use common::util::{interval, random_str};
+    use protocol::protocol::{ProtocolBody, ProtocolHead};
     use rand::Rng as _;
     use std::{path::Path, time::Duration};
     use tokio::select;

@@ -5,7 +5,6 @@ mod message_manager;
 mod record;
 
 use super::{PersistStorageOperation, PersistTopicOperation};
-use crate::message::Message;
 use anyhow::{anyhow, Result};
 use common::{
     global::{Guard, CANCEL_TOKEN},
@@ -14,6 +13,7 @@ use common::{
 use dashmap::DashMap;
 use defer::Defer;
 use instant::Instant;
+use protocol::message::Message;
 use std::{
     fs,
     path::{Path, PathBuf},

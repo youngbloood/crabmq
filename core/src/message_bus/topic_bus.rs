@@ -1,7 +1,6 @@
 use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
     crab::CrabMQOption,
-    message::Message,
     storage::{PersistTopicOperation, STORAGE_TYPE_DUMMY},
     topic::Topic,
 };
@@ -11,6 +10,7 @@ use common::{
     global::{Guard, CANCEL_TOKEN},
     util::interval,
 };
+use protocol::message::Message;
 use std::{sync::Arc, time::Duration};
 use tokio::select;
 use tokio_util::sync::CancellationToken;

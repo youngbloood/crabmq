@@ -2,8 +2,8 @@ use super::{
     message_manager::MessageManager,
     record::{RecordManager, RecordManagerStrategy as _, RecordManagerStrategyTime, TimePtr},
 };
-use crate::message::Message;
 use anyhow::{anyhow, Result};
+use protocol::message::Message;
 use std::path::PathBuf;
 
 pub struct Defer {
@@ -176,13 +176,11 @@ impl Defer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bytes::Bytes;
     use common::util::{interval, random_str};
+    use protocol::protocol::{ProtocolBody, ProtocolHead};
     use rand::Rng as _;
-
-    use crate::protocol::{ProtocolBody, ProtocolHead};
-
-    use super::*;
     use std::{path::Path, time::Duration};
 
     #[tokio::test]

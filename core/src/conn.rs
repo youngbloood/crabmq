@@ -1,5 +1,9 @@
 use anyhow::Result;
 use common::util::execute_timeout;
+use protocol::{
+    message::Message,
+    protocol::{ProtocolBodys, ProtocolHead},
+};
 use std::{net::SocketAddr, pin::Pin};
 use tokio::{
     io::AsyncWriteExt,
@@ -7,11 +11,6 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream,
     },
-};
-
-use crate::{
-    message::Message,
-    protocol::{ProtocolBodys, ProtocolHead},
 };
 
 // 定义一个链接，包含读写端

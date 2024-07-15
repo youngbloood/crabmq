@@ -4,9 +4,9 @@ pub mod slide_window;
 pub const CACHE_TYPE_MEM: &str = "momery";
 pub const CACHE_TYPE_MEM_SLIDE_WINDOW: &str = "momery_slide_window";
 
-use crate::message::Message;
 use anyhow::Result;
 use enum_dispatch::enum_dispatch;
+use protocol::message::Message;
 use slide_window::MessageCacheSlidingWindows;
 use std::ops::Deref;
 
