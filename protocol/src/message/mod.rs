@@ -1,12 +1,15 @@
 pub mod v1;
 
 use self::v1::MessageV1;
-use crate::error::ProtocolError;
+use crate::error::ProtError;
 use crate::protocol::{ProtocolBody, ProtocolBodys, ProtocolHead};
+use crate::v1::ProtocolBodysV1;
+use crate::{parse_body_from_reader, parse_head_from_reader};
 use anyhow::Result;
 use bytes::Bytes;
 use std::{pin::Pin, result::Result as StdResult};
 use tokio::io::BufReader;
+use tracing::error;
 
 #[derive(Debug)]
 pub enum Message {
@@ -22,13 +25,8 @@ impl Message {
         let mut reader = BufReader::new(bts);
         let mut preader = Pin::new(&mut reader);
 
-        let head = ProtocolHead::parse_from(&mut preader).await?;
-
-        let mut bodys = ProtocolBodys::new();
-        while let Ok(body) = ProtocolBody::parse_from(&mut preader).await {
-            bodys.push(body);
-        }
-
+        let head = parse_head_from_reader(&mut preader).await?;
+        let bodys = parse_body_from_reader(&mut preader, &head).await?;
         Ok(Self::with(head, bodys))
     }
 
@@ -53,8 +51,14 @@ impl Message {
     }
 
     pub fn with(head: ProtocolHead, bodys: ProtocolBodys) -> Self {
-        match head.version() {
-            1 => Message::V1(MessageV1::with(head, bodys)),
+        match head {
+            ProtocolHead::V1(head_v1) => match bodys {
+                ProtocolBodys::V1(bodys_v1) => Message::V1(MessageV1::with(head_v1, bodys_v1)),
+                _ => {
+                    error!("not match head and bodys");
+                    Message::Null
+                }
+            },
             _ => Message::Null,
         }
     }
@@ -102,7 +106,7 @@ impl Message {
         }
     }
 
-    pub fn validate(&self, max_msg_num: u8, max_msg_len: u64) -> StdResult<(), ProtocolError> {
+    pub fn validate(&self, max_msg_num: u64, max_msg_len: u64) -> StdResult<(), ProtError> {
         match self {
             Self::V1(v1) => Ok(v1.validate(max_msg_num, max_msg_len)?),
             _ => unreachable!(),
@@ -153,9 +157,14 @@ impl Message {
 
     //====================== just for head-body message ========================
     pub fn with_one(head: ProtocolHead, body: ProtocolBody) -> Self {
-        match head.version() {
-            1 => Message::V1(MessageV1::with_one(head, body)),
-            _ => Message::Null,
+        match head {
+            ProtocolHead::V1(head_v1) => match body {
+                ProtocolBody::V1(body_v1) => {
+                    let mut bodys_v1 = ProtocolBodysV1::new();
+                    bodys_v1.push(body_v1);
+                    Message::V1(MessageV1::with(head_v1, bodys_v1))
+                }
+            },
         }
     }
 
@@ -211,8 +220,8 @@ impl Message {
 pub fn convert_to_resp(msg: Message) -> Message {
     let mut resp_msg = msg.clone();
     match &mut resp_msg {
-        Message::Null => unreachable!(),
         Message::V1(ref mut v1) => v1.head.set_flag_resq(true),
+        Message::Null => unreachable!(),
     };
     resp_msg
 }

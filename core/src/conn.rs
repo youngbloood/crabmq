@@ -2,6 +2,7 @@ use anyhow::Result;
 use common::util::execute_timeout;
 use protocol::{
     message::Message,
+    parse_body_from_reader, parse_head_from_reader,
     protocol::{ProtocolBodys, ProtocolHead},
 };
 use std::{net::SocketAddr, pin::Pin};
@@ -36,11 +37,12 @@ impl Conn {
 
     // 循环
     pub async fn read_parse(&mut self, timeout: u64) -> Result<Message> {
-        let mut head = ProtocolHead::new();
         let mut reader = Pin::new(&mut self.reader);
-        execute_timeout::<()>(head.read_parse(&mut reader), timeout).await?;
-        let mut bodys = ProtocolBodys::new();
-        execute_timeout::<()>(bodys.read_parse(&mut self.reader, head.msg_num()), timeout).await?;
+        let head =
+            execute_timeout::<ProtocolHead>(parse_head_from_reader(&mut reader), timeout).await?;
+        let bodys =
+            execute_timeout::<ProtocolBodys>(parse_body_from_reader(&mut reader, &head), timeout)
+                .await?;
 
         Ok(Message::with(head, bodys))
     }

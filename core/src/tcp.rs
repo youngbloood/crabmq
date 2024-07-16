@@ -118,7 +118,7 @@ impl TcpServer {
     }
 
     fn validate(&self, addr: &str, msg: &Message) -> (Option<Message>, bool) {
-        match msg.validate(u8::MAX, u64::MAX) {
+        match msg.validate(u8::MAX as u64, u64::MAX) {
             Ok(_) => {}
             Err(e) => match msg.clone() {
                 Message::Null => unreachable!(),

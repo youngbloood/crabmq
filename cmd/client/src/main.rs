@@ -8,7 +8,9 @@ use core::conn::Conn;
 use futures::executor::block_on;
 use inquire::Text;
 use protocol::message::Message;
-use protocol::ProtocolBody;
+use protocol::v1::ProtocolBodyV1;
+use protocol::v1::ProtocolBodysV1;
+use protocol::v1::ProtocolHeadV1;
 use protocol::ProtocolBodys;
 use protocol::ProtocolHead;
 use std::env::args;
@@ -102,7 +104,7 @@ impl Args {
         if self.head.is_none() {
             return Err(anyhow!("not found head in message"));
         }
-        let mut head = ProtocolHead::new();
+        let mut head = ProtocolHeadV1::new();
         head.set_topic(self.head.as_ref().unwrap().topic_name.as_str())?;
         head.set_channel(self.head.as_ref().unwrap().channel_name.as_str())?;
         head.set_action(action_to_u8(self.head.as_ref().unwrap().action.as_str()))
@@ -111,9 +113,9 @@ impl Args {
             .set_version(self.head.as_ref().unwrap().protocol_version)
             .expect("init head failed");
 
-        let mut bodys = ProtocolBodys::new();
+        let mut bodys = ProtocolBodysV1::new();
         self.bodys.iter().for_each(|msg: &MsgArgs| {
-            let mut body = ProtocolBody::new();
+            let mut body = ProtocolBodyV1::new();
             body.with_ack(msg.ack)
                 .with_delete(msg.delete)
                 .with_persist(msg.persist)
@@ -137,8 +139,8 @@ impl Args {
             bodys.push(body);
         });
 
-        let msg = Message::with(head, bodys);
-        msg.validate(u8::MAX, u64::MAX)?;
+        let msg = Message::with(ProtocolHead::V1(head), ProtocolBodys::V1(bodys));
+        msg.validate(u8::MAX as u64, u64::MAX)?;
         // msg.post_fill();
         Ok(msg)
     }

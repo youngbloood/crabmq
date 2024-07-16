@@ -1,25 +1,28 @@
 use crate::error::*;
 use crate::protocol::*;
+use anyhow::Error;
 use anyhow::Result;
-use std::result::Result as StdResult;
+use v1::ProtocolBodyV1;
+use v1::ProtocolBodysV1;
+use v1::ProtocolHeadV1;
 // 一个标准的消息体
 #[derive(Debug, Default)]
 pub struct MessageV1 {
     remote_addr: String,
-    pub head: ProtocolHead,
-    pub bodys: ProtocolBodys,
+    pub head: ProtocolHeadV1,
+    pub bodys: ProtocolBodysV1,
 }
 
 impl MessageV1 {
     // pub fn new() -> Self {
     //     MessageV1 {
-    //         head: ProtocolHead::new(),
-    //         bodys: ProtocolBodys::new(),
+    //         head: ProtocolHeadV1::new(),
+    //         bodys: ProtocolBodysV1::new(),
     //         remote_addr: "".to_string(),
     //     }
     // }
 
-    pub fn with(mut head: ProtocolHead, bodys: ProtocolBodys) -> Self {
+    pub fn with(mut head: ProtocolHeadV1, bodys: ProtocolBodysV1) -> Self {
         let _ = head.set_msg_num(bodys.len() as u8);
         MessageV1 {
             head,
@@ -28,9 +31,9 @@ impl MessageV1 {
         }
     }
 
-    pub fn with_one(mut head: ProtocolHead, body: ProtocolBody) -> Self {
+    pub fn with_one(mut head: ProtocolHeadV1, body: ProtocolBodyV1) -> Self {
         let _ = head.set_msg_num(1);
-        let mut bodys = ProtocolBodys::new();
+        let mut bodys = ProtocolBodysV1::new();
         bodys.push(body);
         MessageV1 {
             head,
@@ -79,16 +82,19 @@ impl MessageV1 {
     }
 
     /// 该message是否合法
-    pub fn validate(&self, max_msg_num: u8, max_msg_len: u64) -> StdResult<(), ProtocolError> {
-        self.head.validate(max_msg_num)?;
-        self.bodys.validate(max_msg_len)?;
+    pub fn validate(&self, max_msg_num: u64, max_msg_len: u64) -> Result<()> {
+        self.head.validate()?;
+        if self.head.msg_num() as usize != self.bodys.len() {
+            return Err(Error::from(ProtError::new(ERR_MSG_NUM_NOT_EQUAL)));
+        }
+        self.bodys.validate(max_msg_num, max_msg_len)?;
         Ok(())
     }
 
     pub fn split(&self) -> Vec<MessageV1Unit> {
         let mut list = vec![];
-        let mut iter = self.bodys.list.iter();
-        while let Some(body) = iter.next() {
+        let iter = self.bodys.list.iter();
+        for body in iter {
             let mut head = self.head.clone();
             let _ = head.set_msg_num(1);
             list.push(MessageV1Unit::with(head, body.clone()));
@@ -103,12 +109,12 @@ impl MessageV1 {
  */
 #[derive(Debug)]
 pub struct MessageV1Unit {
-    pub head: ProtocolHead,
-    pub body: ProtocolBody,
+    pub head: ProtocolHeadV1,
+    pub body: ProtocolBodyV1,
 }
 
 impl MessageV1Unit {
-    pub fn with(head: ProtocolHead, body: ProtocolBody) -> Self {
+    pub fn with(head: ProtocolHeadV1, body: ProtocolBodyV1) -> Self {
         MessageV1Unit { head, body }
     }
 }

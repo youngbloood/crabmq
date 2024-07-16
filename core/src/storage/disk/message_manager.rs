@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use common::util::{check_exist, is_debug};
 use parking_lot::RwLock;
 use protocol::message::Message;
-use protocol::protocol::{ProtocolBody, ProtocolHead};
+use protocol::{parse_body_from_reader, parse_head_from_reader};
 use std::fs::{self};
 use std::io::{Seek as _, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;
@@ -233,7 +233,8 @@ impl MessageDisk {
         }
 
         loop {
-            let head = ProtocolHead::parse_from(&mut pfd).await;
+            let head = parse_head_from_reader(&mut pfd).await;
+            // let head = ProtocolHead::parse_from(&mut pfd).await;
             if let Err(e) = head {
                 if e.to_string().contains("eof") {
                     break;
@@ -241,11 +242,11 @@ impl MessageDisk {
                 return Err(anyhow!(e));
             }
             let head = head.unwrap();
-
-            match ProtocolBody::parse_from(&mut pfd).await {
-                Ok(body) => {
+            match parse_body_from_reader(&mut pfd, &head).await {
+                // match ProtocolBody::parse_from(&mut pfd).await {
+                Ok(bodys) => {
                     if is_debug() {
-                        let msg = Message::with_one(head, body);
+                        let msg = Message::with(head, bodys);
                         debug!("msg = {msg:?}");
                     }
                     // 不push到msgs中

@@ -171,7 +171,10 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use common::util::{interval, random_str};
-    use protocol::protocol::{ProtocolBody, ProtocolHead};
+    use protocol::{
+        protocol::{ProtocolBody, ProtocolHead},
+        v1::{ProtocolBodyV1, ProtocolHeadV1},
+    };
     use rand::Rng as _;
     use std::{path::Path, time::Duration};
     use tokio::select;
@@ -197,13 +200,13 @@ mod tests {
     async fn test_instant_push_and_flush() {
         let instant: Instant = get_instant(Path::new("../target/topic1").to_path_buf()).await;
         println!("load success");
-        let mut head = ProtocolHead::new();
+        let mut head = ProtocolHeadV1::new();
         assert!(head.set_topic("default").is_ok());
         assert!(head.set_channel("channel-name").is_ok());
         assert!(head.set_version(1).is_ok());
 
         for i in 0..40 {
-            let mut body = ProtocolBody::new();
+            let mut body = ProtocolBodyV1::new();
             // 设置id
             assert!(body.with_id((i + 1000).to_string().as_str()).is_ok());
             body.with_ack(true).with_persist(true);
@@ -217,7 +220,10 @@ mod tests {
                 .is_ok());
 
             assert!(instant
-                .handle_msg(Message::with_one(head.clone(), body))
+                .handle_msg(Message::with_one(
+                    ProtocolHead::V1(head.clone()),
+                    ProtocolBody::V1(body)
+                ))
                 .await
                 .is_ok());
             if i / 3 == 0 {

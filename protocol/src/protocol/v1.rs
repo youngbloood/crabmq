@@ -1,91 +1,12 @@
-use crate::error::*;
-use anyhow::{anyhow, Result};
-use bytes::{Bytes, BytesMut};
-use chrono::prelude::*;
-use common::global::{self, SNOWFLAKE};
-use rsbit::{BitFlagOperation, BitOperation};
-use std::{fmt::Debug, pin::Pin, result::Result as StdResult};
-use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
+use super::{ProtError, *};
+use crate::{Head, PROTOCOL_HEAD_LEN, SUPPORT_PROTOCOLS};
+use anyhow::{anyhow, Error, Result};
+use bytes::BytesMut;
 use tracing::debug;
 
-pub const SUPPORT_PROTOCOLS: [u8; 1] = [1];
-
-/// 固定的6字节协议头
-pub const PROTOCOL_HEAD_LEN: usize = 10;
-/// 固定的3字节协议体的头长度
-pub const PROTOCOL_BODY_HEAD_LEN: usize = 12;
-
-pub const SUPPORT_ACTIONS: [u8; 9] = [
-    ACTION_FIN,
-    ACTION_RDY,
-    ACTION_REQ,
-    ACTION_PUB,
-    ACTION_NOP,
-    ACTION_TOUCH,
-    ACTION_SUB,
-    ACTION_CLS,
-    ACTION_AUTH,
-];
-
-/// fin action
-pub const ACTION_FIN: u8 = 1;
-
-/// rdy action
-pub const ACTION_RDY: u8 = 2;
-
-/// req action
-pub const ACTION_REQ: u8 = 3;
-
-/// pub action
-pub const ACTION_PUB: u8 = 4;
-
-/// nop action
-pub const ACTION_NOP: u8 = 5;
-
-/// touch action
-pub const ACTION_TOUCH: u8 = 6;
-
-/// sub action
-pub const ACTION_SUB: u8 = 7;
-
-/// cls action
-pub const ACTION_CLS: u8 = 8;
-
-/// auth action
-pub const ACTION_AUTH: u8 = 9;
-/**
-### FIXED HEAD LENGTH([[`PROTOCOL_HEAD_LEN`] bytes):
-* HEAD: 10 bytes:
-* 1st byte: action[fin, rdy, req, pub , mpub, dpub, nop, touch, sub, cls, auth]
-* 2nd byte: global flags:
-*           1bit: req flag: 0 represent is a req, 1 represent is a resp
-*           1bit: topic is ephemeral: true mean the topic is ephemeral, it will be delete then there is no publishers.
-*           1bit: channel is ephemeral: true mean the channel is ephemeral, it will be delete then there is no subcribers.
-*           1bit: is heartbeat.
-*           1bit: reject connect. 1st flag must be resp, and the 8th byte mean the reject code.
-*           1bit: prohibit send instant message (default is 0).
-*           1bit: prohibit send defer message (default is 0).
-*           left 3 bits: extend flags.
-* 3rd byte: extend flags
-* 4th byte:
-*           4bit: version: protocol version.
-*           4bit: message number. (max is 128)
-* 5th byte: topic length.
-* 6th byte: channel length.
-* 7th byte: token length.
-* 8th byte: reject code.
-* 9th byte: custom defer message store format length.
-* 10th bytes: extend bytes.
-*
-* optional:
-*           topic value.
-*           channel value.
-*           token value.
-*           custom defer message store format.
-*/
 #[derive(Default)]
-pub struct ProtocolHead {
-    head: [u8; PROTOCOL_HEAD_LEN],
+pub struct ProtocolHeadV1 {
+    head: Head,
     topic: String,
     channel: String,
     token: String,
@@ -93,7 +14,7 @@ pub struct ProtocolHead {
     defer_msg_format: String,
 }
 
-impl Debug for ProtocolHead {
+impl Debug for ProtocolHeadV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProtocolHead")
             .field("head:req", &self.is_req())
@@ -107,25 +28,25 @@ impl Debug for ProtocolHead {
             .field("topic-name", &self.topic)
             .field("channel-name", &self.channel)
             .field("token", &self.token)
+            .field("defer_msg_format", &self.defer_msg_format)
             .finish()
     }
 }
 
-// impl Default for ProtocolHead {
-//     fn default() -> Self {
-//         Self {
-//             head: Default::default(),
-//             topic: Default::default(),
-//             channel: Default::default(),
-//             token: Default::default(),
-//         }
-//     }
-// }
-
-impl ProtocolHead {
+impl ProtocolHeadV1 {
     pub fn new() -> Self {
-        ProtocolHead {
-            head: [0_u8; PROTOCOL_HEAD_LEN],
+        ProtocolHeadV1 {
+            head: Head::default(),
+            topic: String::new(),
+            channel: String::new(),
+            token: String::new(),
+            defer_msg_format: String::new(),
+        }
+    }
+
+    pub fn new_with_head(head: Head) -> Self {
+        ProtocolHeadV1 {
+            head,
             topic: String::new(),
             channel: String::new(),
             token: String::new(),
@@ -154,42 +75,15 @@ impl ProtocolHead {
     }
 
     /// [`parse_from`] read the protocol head from bts.
-    // pub async fn parse_from_sync(fd: &mut Pin<&mut (impl Read + Send)>) -> Result<Self> {
-    //     let (mut client, mut server) = duplex(10);
-
-    //     tokio::spawn(async move {
-    //         let mut buf = vec![];
-    //         fd.read_to_end(&mut buf);
-    //         client.write_all(&buf);
-    //     });
-
-    //     let mut pfd = Pin::new(&mut server);
-    //     Self::parse_from(&mut pfd).await
-    // }
-
-    /// [`parse_from`] read the protocol head from bts.
     pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
-        let mut head = ProtocolHead::new();
+        let mut head = ProtocolHeadV1::new();
         head.read_parse(fd).await?;
         Ok(head)
     }
 
     /// [`read_parse`] read the protocol head from reader.
     pub async fn read_parse(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
-        // let mut ph: ProtocolHead = ProtocolHead::new();
         let mut buf = BytesMut::new();
-
-        // debug!(addr = "{self.addr:?}", "read protocol head");
-        // parse head
-        buf.resize(PROTOCOL_HEAD_LEN, 0);
-        reader.read_exact(&mut buf).await?;
-        self.set_head(
-            buf.to_vec()
-                .try_into()
-                .expect("convert BytesMut to array failed"),
-        );
-        debug!(addr = "{self.addr:?}", "parse topic name");
-
         // parse topic name
         buf.resize(self.topic_len() as usize, 0);
         reader.read_exact(&mut buf).await?;
@@ -224,7 +118,7 @@ impl ProtocolHead {
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         let mut ph = Self::new();
-        ph.set_head(self.head);
+        ph.set_head(self.head.clone());
         let _ = ph.set_topic(self.topic.as_str());
         let _ = ph.set_channel(self.channel.as_str());
         let _ = ph.set_token(self.token.as_str());
@@ -233,38 +127,40 @@ impl ProtocolHead {
         ph
     }
 
-    pub fn validate(&self, max_msg_num: u8) -> StdResult<(), ProtocolError> {
+    pub fn validate(&self) -> Result<()> {
         let v = self.version();
         if !SUPPORT_PROTOCOLS.contains(&v) {
-            return Err(ProtocolError::new(PROT_ERR_CODE_NOT_SUPPORT_VERSION));
+            return Err(Error::from(ProtError::new(ERR_NOT_SUPPORT_VERSION)));
         }
         if self.is_req() {
-            return self.validate_req(max_msg_num);
+            return self.validate_req();
         }
-
-        self.validate_resq(max_msg_num)
+        self.validate_resq()
     }
 
     /// [`validate_req`] validate the head is valid in protocol.
-    fn validate_req(&self, max_msg_num: u8) -> StdResult<(), ProtocolError> {
+    fn validate_req(&self) -> Result<()> {
         if !self.is_req() {
-            return Err(ProtocolError::new(PROT_ERR_CODE_ZERO));
+            return Err(Error::from(ProtError::new(ERR_ZERO)));
         }
         if self.reject() || self.reject_code() != 0 {
-            return Err(ProtocolError::new(PROT_ERR_CODE_SHOULD_NOT_REJECT_CODE));
+            return Err(Error::from(ProtError::new(ERR_SHOULD_NOT_REJECT_CODE)));
         }
         match self.action() {
             ACTION_PUB | ACTION_FIN | ACTION_RDY | ACTION_REQ => {
                 if self.msg_num() == 0 {
-                    return Err(ProtocolError::new(PROT_ERR_CODE_NEED_MSG));
+                    return Err(Error::from(ProtError::new(RR_NEED_MSG)));
                 }
-                if self.msg_num() > max_msg_num {
-                    return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_NUM));
+                if self.msg_num() > PROTOCOL_MAX_MSG_NUM {
+                    return Err(Error::from(ProtError::new(ERR_EXCEED_MAX_NUM)));
                 }
             }
+
+            ACTION_NOP => {}
+
             _ => {
                 if self.msg_num() != 0 {
-                    return Err(ProtocolError::new(PROT_ERR_CODE_SHOULD_NOT_MSG));
+                    return Err(Error::from(ProtError::new(ERR_SHOULD_NOT_MSG)));
                 }
             }
         }
@@ -272,19 +168,19 @@ impl ProtocolHead {
     }
 
     /// [`validate_resq`] validate the head is valid in protocol.
-    fn validate_resq(&self, max_msg_num: u8) -> StdResult<(), ProtocolError> {
+    fn validate_resq(&self) -> Result<()> {
         if self.is_req() {
-            return Err(ProtocolError::new(PROT_ERR_CODE_ZERO));
+            return Err(Error::from(ProtError::new(ERR_ZERO)));
         }
-        if self.msg_num() > max_msg_num {
-            return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_NUM));
+        if self.msg_num() > PROTOCOL_MAX_MSG_NUM {
+            return Err(Error::from(ProtError::new(ERR_EXCEED_MAX_NUM)));
         }
         Ok(())
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut result = vec![];
-        result.extend(self.head);
+        result.extend(self.head.bytes());
         result.extend(self.topic.as_bytes());
         result.extend(self.channel.as_bytes());
         result.extend(self.token.as_bytes());
@@ -293,26 +189,13 @@ impl ProtocolHead {
         result
     }
 
-    pub fn set_head(&mut self, head: [u8; PROTOCOL_HEAD_LEN]) -> &mut Self {
+    pub fn set_head(&mut self, head: Head) -> &mut Self {
         self.head = head;
         self
     }
 
-    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
-        if index >= self.head.len() || pos > 7 {
-            return;
-        }
-        let mut flag = self.head[index];
-        if on {
-            (&mut flag).set_1(pos);
-        } else {
-            (&mut flag).set_0(pos);
-        }
-        self.head[index] = flag;
-    }
-
     pub fn set_flag_resq(&mut self, resp: bool) -> &mut Self {
-        self.set_head_flag(1, 7, resp);
+        self.head.set_flag_resq(resp);
         self
     }
 
@@ -321,51 +204,51 @@ impl ProtocolHead {
     }
 
     pub fn set_action(&mut self, action: u8) -> &mut Self {
-        self.head[0] = action;
+        self.head.set_action(action);
         self
     }
 
     pub fn is_req(&self) -> bool {
-        self.head[1].is_0(7)
+        self.head.is_req()
     }
 
     pub fn topic_ephemeral(&self) -> bool {
-        self.head[1].is_1(6)
+        self.head.topic_ephemeral()
     }
 
     pub fn channel_ephemeral(&self) -> bool {
-        self.head[1].is_1(5)
+        self.head.channel_ephemeral()
     }
 
     pub fn prohibit_instant(&self) -> bool {
-        self.head[1].is_1(4)
+        self.head.prohibit_instant()
     }
 
     pub fn set_prohibit_instant(&mut self, prohibit: bool) -> &mut Self {
-        self.set_head_flag(1, 4, prohibit);
+        self.head.set_prohibit_instant(prohibit);
         self
     }
 
     pub fn prohibit_defer(&self) -> bool {
-        self.head[1].is_1(3)
+        self.head.prohibit_defer()
     }
 
     pub fn set_prohibit_defer(&mut self, prohibit: bool) -> &mut Self {
-        self.set_head_flag(1, 3, prohibit);
+        self.head.set_prohibit_defer(prohibit);
         self
     }
 
     pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
-        self.set_head_flag(1, 4, hb);
+        self.head.set_heartbeat(hb);
         self
     }
 
     pub fn heartbeat(&self) -> bool {
-        self.head[1].is_1(4)
+        self.head.heartbeat()
     }
 
     pub fn reject(&self) -> bool {
-        self.head[1].is_1(3)
+        self.head.reject()
     }
 
     pub fn topic_len(&self) -> u8 {
@@ -385,15 +268,7 @@ impl ProtocolHead {
     }
 
     pub fn set_reject_code(&mut self, code: u8) -> &mut Self {
-        let mut flag = self.head[1];
-        if code == 0 {
-            (&mut flag).set_0(3);
-        } else {
-            (&mut flag).set_1(3);
-        }
-        self.head[1] = flag;
-        self.head[7] = code;
-
+        self.head.set_reject_code(code);
         self
     }
 
@@ -405,56 +280,37 @@ impl ProtocolHead {
         if fmt.len() > u8::MAX as usize {
             return Err(anyhow!("exceed the max the u8"));
         }
-        self.head[8] = fmt.len() as u8;
+        self.head.set_defer_format_len(fmt.len() as u8);
         self.defer_msg_format = fmt.to_string();
+
         Ok(())
     }
 
     pub fn version(&self) -> u8 {
-        (self.head[3] & 0b11110000) >> 4
+        self.head.version()
     }
 
     pub fn set_version(&mut self, v: u8) -> Result<()> {
-        if v > 0b00001111 || v == 0 {
-            return Err(anyhow!("illigal protocol version number"));
-        }
-        self.head[3] |= v << 4;
-
+        self.head.set_version(v)?;
         Ok(())
     }
 
     pub fn msg_num(&self) -> u8 {
-        self.head[3] & 0b00001111
+        self.head.msg_num()
     }
 
     pub fn set_msg_num(&mut self, num: u8) -> Result<()> {
-        if num > 0b00001111 {
-            return Err(anyhow!("num exceed maxnuim message number"));
-        }
-        self.head[3] |= num;
-
+        self.head.set_msg_num(num)?;
         Ok(())
     }
 
     pub fn set_topic_ephemeral(&mut self, ephemeral: bool) -> &mut Self {
-        let mut flag = self.head[1];
-        if ephemeral {
-            (&mut flag).set_1(6);
-        } else {
-            (&mut flag).set_0(6);
-        }
-        self.head[1] = flag;
+        self.head.set_topic_ephemeral(ephemeral);
         self
     }
 
     pub fn set_channel_ephemeral(&mut self, ephemeral: bool) -> &mut Self {
-        let mut flag = self.head[1];
-        if ephemeral {
-            (&mut flag).set_1(5);
-        } else {
-            (&mut flag).set_0(5);
-        }
-        self.head[1] = flag;
+        self.head.set_channel_ephemeral(ephemeral);
         self
     }
 
@@ -479,7 +335,7 @@ impl ProtocolHead {
             return Err(anyhow!("topic len exceed max length 256"));
         }
         self.topic = topic.to_string();
-        self.head[4] = topic.len() as u8;
+        self.head.set_topic_len(topic.len() as u8);
         Ok(())
     }
 
@@ -488,7 +344,7 @@ impl ProtocolHead {
             return Err(anyhow!("channel len exceed max length 256"));
         }
         self.channel = channel.to_string();
-        self.head[5] = channel.len() as u8;
+        self.head.set_channel_len(channel.len() as u8);
         Ok(())
     }
 
@@ -497,7 +353,7 @@ impl ProtocolHead {
             return Err(anyhow!("token len exceed max length 256"));
         }
         self.token = token.to_string();
-        self.head[6] = token.len() as u8;
+        self.head.set_token_len(token.len() as u8);
         Ok(())
     }
 }
@@ -506,14 +362,14 @@ impl ProtocolHead {
 * ProtocolBodys:
 */
 #[derive(Debug, Default)]
-pub struct ProtocolBodys {
+pub struct ProtocolBodysV1 {
     sid: i64, // 标识一批次的message
-    pub list: Vec<ProtocolBody>,
+    pub list: Vec<ProtocolBodyV1>,
 }
 
-impl ProtocolBodys {
+impl ProtocolBodysV1 {
     pub fn new() -> Self {
-        ProtocolBodys {
+        ProtocolBodysV1 {
             list: Vec::new(),
             sid: global::SNOWFLAKE.get_id(),
         }
@@ -534,12 +390,16 @@ impl ProtocolBodys {
     }
 
     /// [`read_parse`] read the protocol bodys from reader.
-    pub async fn read_parse(&mut self, reader: &mut OwnedReadHalf, mut msg_num: u8) -> Result<()> {
+    pub async fn read_parse(
+        &mut self,
+        reader: &mut Pin<&mut impl AsyncReadExt>,
+        mut msg_num: u8,
+    ) -> Result<()> {
         // let mut pbs = ProtocolBodys::new();
         while msg_num != 0 {
             msg_num -= 1;
 
-            let mut pb = ProtocolBody::new();
+            let mut pb = ProtocolBodyV1::new();
             let mut buf = BytesMut::new();
 
             // parse protocol body head
@@ -613,21 +473,22 @@ impl ProtocolBodys {
         result
     }
 
-    pub fn push(&mut self, pb: ProtocolBody) -> &mut Self {
+    pub fn push(&mut self, pb: ProtocolBodyV1) -> &mut Self {
         self.list.push(pb);
         self
     }
 
-    pub fn pop(&mut self) -> Option<ProtocolBody> {
+    pub fn pop(&mut self) -> Option<ProtocolBodyV1> {
         self.list.pop()
     }
 
-    pub fn validate(&self, max_msg_len: u64) -> StdResult<(), ProtocolError> {
+    pub fn validate(&self, max_msg_num: u64, max_msg_len: u64) -> Result<()> {
+        if self.list.len() > max_msg_num as usize {
+            return Err(Error::from(ProtError::new(ERR_EXCEED_MAX_NUM)));
+        }
         let iter = self.list.iter();
         for pb in iter {
-            if pb.body_len() > max_msg_len {
-                return Err(ProtocolError::new(PROT_ERR_CODE_EXCEED_MAX_LEN));
-            }
+            pb.validate(max_msg_len)?;
         }
         Ok(())
     }
@@ -654,22 +515,26 @@ impl ProtocolBodys {
 *           body value(length determine by BODY-LENGTH)
 */
 #[derive(Default)]
-pub struct ProtocolBody {
+pub struct ProtocolBodyV1 {
     head: [u8; PROTOCOL_BODY_HEAD_LEN],
     sid: i64,        // session_id: generate by ProtocolBodys
     defer_time: u64, // 8 bytes
     pub id: String,
+    // id是否来源于外部
+    id_source_external: bool,
     body: Bytes,
 }
 
-impl Debug for ProtocolBody {
+impl Debug for ProtocolBodyV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProtocolBody")
-            .field("is_defer", &self.is_defer())
+            .field("is_update", &self.is_update())
             .field("is_ack", &self.is_ack())
             .field("is_persist", &self.is_persist())
+            .field("is_defer", &self.is_defer())
+            .field("is_defer_concrete", &self.is_defer_concrete())
             .field("is_delete", &self.is_delete())
-            .field("is_not_ready", &self.is_notready())
+            .field("is_notready", &self.is_notready())
             .field("is_consume", &self.is_consume())
             .field("defer_time", &self.defer_time)
             .field("id", &self.id)
@@ -678,15 +543,27 @@ impl Debug for ProtocolBody {
     }
 }
 
-impl ProtocolBody {
+impl ProtocolBodyV1 {
     pub fn new() -> Self {
-        ProtocolBody {
+        ProtocolBodyV1 {
             head: [0_u8; PROTOCOL_BODY_HEAD_LEN],
             sid: 0,
             defer_time: 0,
             id: String::new(),
+            id_source_external: false,
             body: Bytes::new(),
         }
+    }
+
+    pub fn validate(&self, max_msg_len: u64) -> Result<()> {
+        if self.body_len() > max_msg_len {
+            return Err(Error::from(ProtError::new(ERR_EXCEED_MAX_LEN)));
+        }
+        if self.is_update() && self.id.is_empty() {
+            return Err(Error::from(ProtError::new(ERR_SHOULD_HAS_ID)));
+        }
+
+        Ok(())
     }
 
     pub fn calc_len(&self) -> usize {
@@ -738,6 +615,7 @@ impl ProtocolBody {
             fd.read_exact(&mut buf).await?;
             let id = String::from_utf8(buf.to_vec()).expect("illigal id value");
             self.with_id(id.as_str())?;
+            self.id_source_external = true;
         }
 
         // parse body
