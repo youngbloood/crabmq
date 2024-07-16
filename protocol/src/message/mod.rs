@@ -64,6 +64,24 @@ impl Message {
         }
     }
 
+    pub fn prohibit_instant(&self) -> bool {
+        match self {
+            Self::V1(v1) => v1.head.prohibit_instant(),
+        }
+    }
+
+    pub fn prohibit_defer(&self) -> bool {
+        match self {
+            Self::V1(v1) => v1.head.prohibit_defer(),
+        }
+    }
+
+    pub fn defer_message_format(&self) -> &str {
+        match self {
+            Self::V1(v1) => v1.head.defer_msg_format.as_str(),
+        }
+    }
+
     pub fn topic_ephemeral(&self) -> bool {
         match self {
             Self::V1(v1) => v1.head.topic_ephemeral(),

@@ -14,14 +14,6 @@ pub struct MessageV1 {
 }
 
 impl MessageV1 {
-    // pub fn new() -> Self {
-    //     MessageV1 {
-    //         head: ProtocolHeadV1::new(),
-    //         bodys: ProtocolBodysV1::new(),
-    //         remote_addr: "".to_string(),
-    //     }
-    // }
-
     pub fn with(mut head: ProtocolHeadV1, bodys: ProtocolBodysV1) -> Self {
         let _ = head.set_msg_num(bodys.len() as u8);
         MessageV1 {

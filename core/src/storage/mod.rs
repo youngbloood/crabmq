@@ -19,7 +19,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
-use tracing::error;
+use tracing::{debug, error};
 
 pub const STORAGE_TYPE_DUMMY: &str = "dummy";
 pub const STORAGE_TYPE_LOCAL: &str = "local";
@@ -37,6 +37,9 @@ pub trait PersistStorageOperation {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>>;
 
     /// flush the messages to Storage Media.
@@ -129,6 +132,9 @@ impl StorageWrapper {
         &self,
         topic_name: &str,
         ephemeral: bool,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
     ) -> Result<(bool, Arc<Box<dyn PersistTopicOperation>>)> {
         // 已经存在，直接返回
         if self.dummy.contains_key(topic_name) {
@@ -151,7 +157,15 @@ impl StorageWrapper {
             self.dummy.insert(topic_name);
             return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
-        let topic = self.storage.get_or_create_topic(topic_name).await?;
+        let topic = self
+            .storage
+            .get_or_create_topic(
+                topic_name,
+                prohibit_instant,
+                prohibit_defer,
+                defer_message_format,
+            )
+            .await?;
         Ok((false, topic))
     }
 
@@ -172,7 +186,13 @@ impl StorageWrapper {
     ) -> Result<()> {
         let topic_name = msg.get_topic();
         let (ephemeral, _) = self
-            .get_or_create_topic(topic_name, msg.topic_ephemeral())
+            .get_or_create_topic(
+                topic_name,
+                msg.topic_ephemeral(),
+                msg.prohibit_instant(),
+                msg.prohibit_defer(),
+                msg.defer_message_format(),
+            )
             .await?;
 
         if ephemeral {

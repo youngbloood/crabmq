@@ -73,6 +73,9 @@ impl PersistStorageOperation for Dummy {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
         Ok(Arc::new(Box::new(Guard::new(TopicDummyBase::new(
             topic_name, 100,

@@ -14,8 +14,10 @@ use dashmap::DashMap;
 use defer::Defer;
 use instant::Instant;
 use protocol::message::Message;
+use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -59,7 +61,10 @@ impl StorageDisk {
     async fn get_topic_from_dir(&self, dir_name: PathBuf) -> Result<()> {
         let topic_name = dir_name.file_name().unwrap().to_str().unwrap();
         info!("LAZY: load topic[{topic_name}]...");
-        let defer = Defer::new(dir_name.clone(), "{daily}/{hourly}/{minutely:5}")?;
+
+        let topic_meta = TopicMeta::read_from(dir_name.join("meta"))?;
+
+        let defer = Defer::new(dir_name.clone(), topic_meta.defer_message_format.as_str())?;
         defer.load().await?;
 
         let instant = Instant::new(dir_name.clone())?;
@@ -67,7 +72,11 @@ impl StorageDisk {
 
         self.topics.insert(
             topic_name.to_string(),
-            TopicMessage::new(TopicMessageBase::new(topic_name, instant, defer)),
+            TopicMessage::new(TopicMessageBase::new(
+                topic_name, // topic_meta.prohibit_instant,
+                instant,    // topic_meta.prohibit_defer,
+                defer, topic_meta,
+            )),
         );
         Ok(())
     }
@@ -86,16 +95,39 @@ impl StorageDisk {
         Ok(Some(topic.value().clone()))
     }
 
-    async fn get_or_create_topic_inner(&self, topic_name: &str) -> Result<TopicMessage> {
+    async fn get_or_create_topic_inner(
+        &self,
+        topic_name: &str,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
+    ) -> Result<TopicMessage> {
         if !self.topics.contains_key(topic_name) {
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
+            check_and_create_dir(&parent)?;
             debug!("StorageDisk: load topic: {}", topic_name);
 
             // init the topic-message
-            let defer = Defer::new(parent.join("defer"), "{daily}/{hourly}/{minutely:5}")?;
-            let instant = Instant::new(parent)?;
+            let mut defer_format = "";
+            if defer_message_format.is_empty() {
+                defer_format = "{daily}/{hourly}/{minutely:20}"
+            }
+            let defer = Defer::new(parent.join("defer"), defer_format)?;
+            let instant = Instant::new(parent.clone())?;
 
-            let mut topic_mb = TopicMessageBase::new(topic_name, instant, defer);
+            let topic_meta = TopicMeta::new(
+                parent.join("meta"),
+                prohibit_instant,
+                prohibit_defer,
+                defer_format,
+            );
+            topic_meta.persist()?;
+
+            let mut topic_mb = TopicMessageBase::new(
+                topic_name, // prohibit_instant,
+                instant,    // prohibit_defer,
+                defer, topic_meta,
+            );
             topic_mb.load().await?;
 
             let topic = TopicMessage::new(topic_mb);
@@ -125,7 +157,14 @@ impl PersistStorageOperation for StorageDisk {
     }
 
     async fn push(&self, msg: Message) -> Result<()> {
-        let topic = self.get_or_create_topic_inner(msg.get_topic()).await?;
+        let topic = self
+            .get_or_create_topic_inner(
+                msg.get_topic(),
+                msg.prohibit_instant(),
+                msg.prohibit_defer(),
+                msg.defer_message_format(),
+            )
+            .await?;
         topic.push(msg).await?;
         Ok(())
     }
@@ -173,8 +212,18 @@ impl PersistStorageOperation for StorageDisk {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
-        let topic = self.get_or_create_topic_inner(topic_name).await?;
+        let topic = self
+            .get_or_create_topic_inner(
+                topic_name,
+                prohibit_instant,
+                prohibit_defer,
+                defer_message_format,
+            )
+            .await?;
         Ok(Arc::new(Box::new(topic) as Box<dyn PersistTopicOperation>))
     }
 }
@@ -199,10 +248,61 @@ impl TopicMessage {
 
     async fn push(&self, msg: Message) -> Result<()> {
         if msg.is_defer() {
+            if self.guard.get().meta.prohibit_defer {
+                return Err(anyhow!("this topic is not allowed defer message"));
+            }
             self.guard.get().defer.handle_msg(msg).await?;
             return Ok(());
         }
+
+        if self.guard.get().meta.prohibit_instant {
+            return Err(anyhow!("this topic is not allowed instant message"));
+        }
         self.guard.get().instant.handle_msg(msg).await?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct TopicMeta {
+    #[serde(skip)]
+    filename: PathBuf,
+
+    prohibit_instant: bool,
+    prohibit_defer: bool,
+    defer_message_format: String,
+}
+
+impl TopicMeta {
+    fn new(
+        filename: PathBuf,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
+    ) -> Self {
+        TopicMeta {
+            filename,
+            prohibit_instant,
+            prohibit_defer,
+            defer_message_format: defer_message_format.to_string(),
+        }
+    }
+
+    fn read_from(filename: PathBuf) -> Result<Self> {
+        let out = fs::read_to_string(filename)?;
+        let topic_meta: TopicMeta = serde_json::from_str(&out)?;
+        Ok(topic_meta)
+    }
+
+    fn persist(&self) -> Result<()> {
+        let mut fd = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&self.filename)?;
+        let out = serde_json::to_string_pretty(&self)?;
+        fd.write_all(out.as_bytes())?;
         Ok(())
     }
 }
@@ -211,14 +311,16 @@ struct TopicMessageBase {
     name: String,
     instant: Instant,
     defer: Defer,
+    meta: TopicMeta,
 }
 
 impl TopicMessageBase {
-    fn new(name: &str, instant: Instant, defer: Defer) -> Self {
+    fn new(name: &str, instant: Instant, defer: Defer, meta: TopicMeta) -> Self {
         TopicMessageBase {
             name: name.to_string(),
             instant,
             defer,
+            meta,
         }
     }
 

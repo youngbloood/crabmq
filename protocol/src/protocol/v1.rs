@@ -11,7 +11,7 @@ pub struct ProtocolHeadV1 {
     channel: String,
     token: String,
     // reject_code: u8,
-    defer_msg_format: String,
+    pub defer_msg_format: String,
 }
 
 impl Debug for ProtocolHeadV1 {

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;
 use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer};
-use tracing::info;
+use tracing::{debug, error, info};
 
 pub struct MessageBus {
     opt: Guard<CrabMQOption>,
@@ -84,6 +84,9 @@ impl MessageBus {
         &mut self,
         topic_name: &str,
         ephemeral: bool,
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: &str,
     ) -> Result<Guard<TopicBus>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
@@ -96,7 +99,13 @@ impl MessageBus {
             let (_, topic_storage) = self
                 .storage
                 .get_mut()
-                .get_or_create_topic(topic_name, ephemeral)
+                .get_or_create_topic(
+                    topic_name,
+                    ephemeral,
+                    prohibit_instant,
+                    prohibit_defer,
+                    defer_message_format,
+                )
                 .await?;
             let topic = new_topic(self.opt.clone(), topic_name, ephemeral)?;
 
@@ -141,7 +150,10 @@ impl MessageBus {
         addr: &str,
         msg: Message,
     ) {
-        let _ = self.push(out_sender, addr, msg).await;
+        match self.push(out_sender, addr, msg).await {
+            Ok(_) => debug!("send msg successful"),
+            Err(e) => error!("send msg failed: {e:?}"),
+        }
     }
 
     pub async fn req(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
@@ -161,7 +173,13 @@ impl MessageBus {
         let chan_name = msg.get_channel();
 
         match self
-            .get_or_create_topic(topic_name, msg.topic_ephemeral())
+            .get_or_create_topic(
+                topic_name,
+                msg.topic_ephemeral(),
+                msg.prohibit_instant(),
+                msg.prohibit_defer(),
+                msg.defer_message_format(),
+            )
             .await
         {
             Ok(topic_sub) => {

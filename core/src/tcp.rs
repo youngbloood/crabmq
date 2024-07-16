@@ -5,7 +5,7 @@ use protocol::message::Message;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{net::TcpListener, select};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct TcpServer {
     // 控制消息流入(从客户端流入MQ)
@@ -83,6 +83,7 @@ impl TcpServer {
                     if msg_opt.is_none(){
                         continue;
                     }
+                    debug!("msg = {:?}",msg_opt);
                     let (addr,mut msg) = msg_opt.unwrap();
                     let (resp, passed) = self.validate(addr.as_str(), &msg);
                     if !passed {
