@@ -44,7 +44,7 @@ impl Conn {
             execute_timeout::<ProtocolBodys>(parse_body_from_reader(&mut reader, &head), timeout)
                 .await?;
 
-        Ok(Message::with(head, bodys))
+        Message::with(head, bodys)
     }
 
     pub async fn write(&mut self, body: &[u8], timeout: u64) -> Result<()> {

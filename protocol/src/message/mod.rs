@@ -5,41 +5,33 @@ use crate::error::ProtError;
 use crate::protocol::{ProtocolBody, ProtocolBodys, ProtocolHead};
 use crate::v1::ProtocolBodysV1;
 use crate::{parse_body_from_reader, parse_head_from_reader};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use std::{pin::Pin, result::Result as StdResult};
 use tokio::io::BufReader;
-use tracing::error;
 
 #[derive(Debug)]
 pub enum Message {
-    Null,
     V1(MessageV1),
 }
 impl Message {
-    pub fn new() -> Self {
-        Message::Null
-    }
-
     pub async fn parse_from(bts: &[u8]) -> Result<Self> {
         let mut reader = BufReader::new(bts);
         let mut preader = Pin::new(&mut reader);
 
         let head = parse_head_from_reader(&mut preader).await?;
         let bodys = parse_body_from_reader(&mut preader, &head).await?;
-        Ok(Self::with(head, bodys))
+        Self::with(head, bodys)
     }
 
     pub fn init(&mut self) -> Result<()> {
         match self {
-            Message::Null => unreachable!(),
             Message::V1(ref mut v1) => v1.init(),
         }
     }
 
     pub fn reset_body(&mut self) -> Result<()> {
         match self {
-            Message::Null => unreachable!(),
             Message::V1(ref mut v1) => {
                 let iter = v1.bodys.list.iter_mut();
                 for body in iter {
@@ -50,16 +42,12 @@ impl Message {
         }
     }
 
-    pub fn with(head: ProtocolHead, bodys: ProtocolBodys) -> Self {
+    pub fn with(head: ProtocolHead, bodys: ProtocolBodys) -> Result<Self> {
         match head {
             ProtocolHead::V1(head_v1) => match bodys {
-                ProtocolBodys::V1(bodys_v1) => Message::V1(MessageV1::with(head_v1, bodys_v1)),
-                _ => {
-                    error!("not match head and bodys");
-                    Message::Null
-                }
+                ProtocolBodys::V1(bodys_v1) => Ok(Message::V1(MessageV1::with(head_v1, bodys_v1))),
+                _ => Err(anyhow!("not match head and bodys")),
             },
-            _ => Message::Null,
         }
     }
 
@@ -67,49 +55,42 @@ impl Message {
     pub fn clone(&self) -> Self {
         match self {
             Self::V1(v1) => Message::V1(v1.clone()),
-            _ => unreachable!(),
         }
     }
 
     pub fn get_topic(&self) -> &str {
         match self {
             Self::V1(v1) => v1.get_topic(),
-            _ => unreachable!(),
         }
     }
 
     pub fn topic_ephemeral(&self) -> bool {
         match self {
             Self::V1(v1) => v1.head.topic_ephemeral(),
-            _ => unreachable!(),
         }
     }
 
     pub fn get_channel(&self) -> &str {
         match self {
             Self::V1(v1) => v1.get_channel(),
-            _ => unreachable!(),
         }
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
             Self::V1(v1) => v1.as_bytes(),
-            _ => unreachable!(),
         }
     }
 
     pub fn action(&self) -> u8 {
         match self {
             Self::V1(v1) => v1.action(),
-            _ => unreachable!(),
         }
     }
 
     pub fn validate(&self, max_msg_num: u64, max_msg_len: u64) -> StdResult<(), ProtError> {
         match self {
             Self::V1(v1) => Ok(v1.validate(max_msg_num, max_msg_len)?),
-            _ => unreachable!(),
         }
     }
 
@@ -123,7 +104,6 @@ impl Message {
 
                 size
             }
-            _ => unreachable!(),
         }
     }
 
@@ -134,7 +114,6 @@ impl Message {
                 v1.head.set_flag_resq(true);
                 Ok(())
             }
-            _ => unreachable!(),
         }
     }
 
@@ -151,7 +130,6 @@ impl Message {
                 });
                 list
             }
-            _ => unreachable!(),
         }
     }
 
@@ -171,14 +149,12 @@ impl Message {
     pub fn id(&self) -> &str {
         match self {
             Self::V1(v1) => v1.bodys.list.first().unwrap().id.as_str(),
-            _ => unreachable!(),
         }
     }
 
     pub fn defer_time(&self) -> u64 {
         match self {
             Self::V1(v1) => v1.bodys.list.first().unwrap().defer_time(),
-            _ => unreachable!(),
         }
     }
 
@@ -190,28 +166,24 @@ impl Message {
                 }
                 return v1.bodys.list.first().unwrap().is_defer();
             }
-            _ => unreachable!(),
         }
     }
 
     pub fn is_deleted(&self) -> bool {
         match self {
             Self::V1(v1) => v1.bodys.list.first().unwrap().is_delete(),
-            _ => unreachable!(),
         }
     }
 
     pub fn is_consumed(&self) -> bool {
         match self {
             Self::V1(v1) => v1.bodys.list.first().unwrap().is_consume(),
-            _ => unreachable!(),
         }
     }
 
     pub fn is_not_ready(&self) -> bool {
         match self {
             Self::V1(v1) => v1.bodys.list.first().unwrap().is_notready(),
-            _ => unreachable!(),
         }
     }
     //====================== just for head-body message ========================
@@ -221,7 +193,6 @@ pub fn convert_to_resp(msg: Message) -> Message {
     let mut resp_msg = msg.clone();
     match &mut resp_msg {
         Message::V1(ref mut v1) => v1.head.set_flag_resq(true),
-        Message::Null => unreachable!(),
     };
     resp_msg
 }

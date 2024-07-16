@@ -139,7 +139,7 @@ impl Args {
             bodys.push(body);
         });
 
-        let msg = Message::with(ProtocolHead::V1(head), ProtocolBodys::V1(bodys));
+        let msg = Message::with(ProtocolHead::V1(head), ProtocolBodys::V1(bodys))?;
         msg.validate(u8::MAX as u64, u64::MAX)?;
         // msg.post_fill();
         Ok(msg)

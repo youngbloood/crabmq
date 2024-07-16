@@ -121,7 +121,7 @@ impl TcpServer {
         match msg.validate(u8::MAX as u64, u64::MAX) {
             Ok(_) => {}
             Err(e) => match msg.clone() {
-                Message::Null => unreachable!(),
+                // Message::Null => unreachable!(),
                 Message::V1(mut v1) => {
                     v1.head.set_flag_resq(true);
                     v1.head.set_reject_code(e.code);

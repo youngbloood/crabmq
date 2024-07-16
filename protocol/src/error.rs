@@ -1,6 +1,5 @@
 use anyhow::Error;
 use lazy_static::*;
-use std::error::Error as StdError;
 use std::{
     collections::HashMap,
     fmt::{write, Display},
