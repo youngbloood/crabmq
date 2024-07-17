@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use super::{ProtError, *};
 use crate::{Head, PROTOCOL_HEAD_LEN, SUPPORT_PROTOCOLS};
 use anyhow::{anyhow, Error, Result};
@@ -30,6 +32,20 @@ impl Debug for ProtocolHeadV1 {
             .field("token", &self.token)
             .field("defer_msg_format", &self.defer_msg_format)
             .finish()
+    }
+}
+
+impl Deref for ProtocolHeadV1 {
+    type Target = Head;
+
+    fn deref(&self) -> &Self::Target {
+        &self.head
+    }
+}
+
+impl DerefMut for ProtocolHeadV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.head
     }
 }
 
@@ -194,88 +210,6 @@ impl ProtocolHeadV1 {
         self
     }
 
-    pub fn set_flag_resq(&mut self, resp: bool) -> &mut Self {
-        self.head.set_flag_resq(resp);
-        self
-    }
-
-    pub fn action(&self) -> u8 {
-        self.head[0]
-    }
-
-    pub fn set_action(&mut self, action: u8) -> &mut Self {
-        self.head.set_action(action);
-        self
-    }
-
-    pub fn is_req(&self) -> bool {
-        self.head.is_req()
-    }
-
-    pub fn topic_ephemeral(&self) -> bool {
-        self.head.topic_ephemeral()
-    }
-
-    pub fn channel_ephemeral(&self) -> bool {
-        self.head.channel_ephemeral()
-    }
-
-    pub fn prohibit_instant(&self) -> bool {
-        self.head.prohibit_instant()
-    }
-
-    pub fn set_prohibit_instant(&mut self, prohibit: bool) -> &mut Self {
-        self.head.set_prohibit_instant(prohibit);
-        self
-    }
-
-    pub fn prohibit_defer(&self) -> bool {
-        self.head.prohibit_defer()
-    }
-
-    pub fn set_prohibit_defer(&mut self, prohibit: bool) -> &mut Self {
-        self.head.set_prohibit_defer(prohibit);
-        self
-    }
-
-    pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
-        self.head.set_heartbeat(hb);
-        self
-    }
-
-    pub fn heartbeat(&self) -> bool {
-        self.head.heartbeat()
-    }
-
-    pub fn reject(&self) -> bool {
-        self.head.reject()
-    }
-
-    pub fn topic_len(&self) -> u8 {
-        self.head[4]
-    }
-
-    pub fn channel_len(&self) -> u8 {
-        self.head[5]
-    }
-
-    pub fn token_len(&self) -> u8 {
-        self.head[6]
-    }
-
-    pub fn reject_code(&self) -> u8 {
-        self.head[7]
-    }
-
-    pub fn set_reject_code(&mut self, code: u8) -> &mut Self {
-        self.head.set_reject_code(code);
-        self
-    }
-
-    pub fn defer_format_len(&self) -> u8 {
-        self.head[8]
-    }
-
     pub fn set_defer_format(&mut self, fmt: &str) -> Result<()> {
         if fmt.len() > u8::MAX as usize {
             return Err(anyhow!("exceed the max the u8"));
@@ -286,48 +220,12 @@ impl ProtocolHeadV1 {
         Ok(())
     }
 
-    pub fn version(&self) -> u8 {
-        self.head.version()
-    }
-
-    pub fn set_version(&mut self, v: u8) -> Result<()> {
-        self.head.set_version(v)?;
-        Ok(())
-    }
-
-    pub fn msg_num(&self) -> u8 {
-        self.head.msg_num()
-    }
-
-    pub fn set_msg_num(&mut self, num: u8) -> Result<()> {
-        self.head.set_msg_num(num)?;
-        Ok(())
-    }
-
-    pub fn set_topic_ephemeral(&mut self, ephemeral: bool) -> &mut Self {
-        self.head.set_topic_ephemeral(ephemeral);
-        self
-    }
-
-    pub fn set_channel_ephemeral(&mut self, ephemeral: bool) -> &mut Self {
-        self.head.set_channel_ephemeral(ephemeral);
-        self
-    }
-
     pub fn topic(&self) -> &str {
         let tp = self.topic.as_str();
         if tp.is_empty() {
             return "default";
         }
         tp
-    }
-
-    pub fn channel(&self) -> &str {
-        let chan = self.channel.as_str();
-        if chan.is_empty() {
-            return "default";
-        }
-        chan
     }
 
     pub fn set_topic(&mut self, topic: &str) -> Result<()> {
@@ -337,6 +235,14 @@ impl ProtocolHeadV1 {
         self.topic = topic.to_string();
         self.head.set_topic_len(topic.len() as u8);
         Ok(())
+    }
+
+    pub fn channel(&self) -> &str {
+        let chan = self.channel.as_str();
+        if chan.is_empty() {
+            return "default";
+        }
+        chan
     }
 
     pub fn set_channel(&mut self, channel: &str) -> Result<()> {
