@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use common::global::Guard;
 use dashmap::DashMap;
 use protocol::{
+    error::ProtError,
     message::{convert_to_resp, Message},
     protocol::*,
 };
@@ -150,9 +151,15 @@ impl MessageBus {
         addr: &str,
         msg: Message,
     ) {
-        match self.push(out_sender, addr, msg).await {
+        match self.push(out_sender.clone(), addr, msg.clone()).await {
             Ok(_) => debug!("send msg successful"),
-            Err(e) => error!("send msg failed: {e:?}"),
+            Err(e) => {
+                let err: ProtError = e.into();
+                error!("send msg failed: {err:?}");
+                let mut resp = convert_to_resp(msg);
+                resp.set_reject_code(err.code);
+                let _ = out_sender.send((addr.to_string(), resp)).await;
+            }
         }
     }
 

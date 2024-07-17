@@ -8,6 +8,7 @@ use std::{
 pub const ERR_ZERO: u8 = 0;
 pub const ERR_TIMEOUT: u8 = 1;
 pub const ERR_NOT_SUPPORT_VERSION: u8 = 1;
+pub const ERR_NOT_SUPPORT_ACTION: u8 = 1;
 pub const RR_NEED_MSG: u8 = 1;
 pub const ERR_SHOULD_NOT_MSG: u8 = 2;
 pub const ERR_EXCEED_MAX_NUM: u8 = 3;
@@ -15,6 +16,9 @@ pub const ERR_EXCEED_MAX_LEN: u8 = 4;
 pub const ERR_SHOULD_NOT_REJECT_CODE: u8 = 5;
 pub const ERR_SHOULD_HAS_ID: u8 = 6;
 pub const ERR_MSG_NUM_NOT_EQUAL: u8 = 7;
+pub const ERR_TOPIC_PROHIBIT_TYPE: u8 = 8;
+pub const ERR_TOPIC_PROHIBIT_DEFER: u8 = 9;
+pub const ERR_TOPIC_PROHIBIT_INSTANT: u8 = 10;
 
 lazy_static! {
     static ref REASON_MAP: HashMap<u8, String> = {
@@ -46,6 +50,18 @@ lazy_static! {
         m.insert(
             ERR_MSG_NUM_NOT_EQUAL,
             "message num in head and bodys not equal".to_string(),
+        );
+        m.insert(
+            ERR_TOPIC_PROHIBIT_TYPE,
+            "topic can't prohibit defer and instant message at same time".to_string(),
+        );
+        m.insert(
+            ERR_TOPIC_PROHIBIT_DEFER,
+            "this topic is prohibit defer message".to_string(),
+        );
+        m.insert(
+            ERR_TOPIC_PROHIBIT_INSTANT,
+            "this topic is prohibit instant message".to_string(),
         );
 
         m

@@ -1,7 +1,7 @@
 pub mod v1;
 
 use crate::error::*;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::{Bytes, BytesMut};
 use chrono::prelude::*;
 use common::global::{self, SNOWFLAKE};
@@ -112,6 +112,18 @@ impl Head {
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
         Head(self.0)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !SUPPORT_ACTIONS.contains(&self.action()) {
+            return Err(Error::from(ProtError::new(ERR_NOT_SUPPORT_ACTION)));
+        }
+
+        if self.is_req() && (self.reject() || self.reject_code() != 0) {
+            return Err(Error::from(ProtError::new(ERR_SHOULD_NOT_REJECT_CODE)));
+        }
+
+        Ok(())
     }
 
     pub fn bytes(&self) -> Vec<u8> {

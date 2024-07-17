@@ -19,7 +19,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
-use tracing::{debug, error};
+use tracing::error;
 
 pub const STORAGE_TYPE_DUMMY: &str = "dummy";
 pub const STORAGE_TYPE_LOCAL: &str = "local";
@@ -62,6 +62,9 @@ pub trait PersistTopicOperation: Send + Sync {
     /// return the topic name.
     fn name(&self) -> &str;
 
+    ///weather this topic is prohibit defer message
+    fn prohibit_defer(&self) -> bool;
+
     /// return the seek defer Message from Storage Media.
     ///
     /// If there is no seek Message return. This function weather block decide by [`block`].
@@ -73,6 +76,9 @@ pub trait PersistTopicOperation: Send + Sync {
     ///
     /// It should not return message that has been consumed, deleted, or not ready.
     async fn next_defer(&self, block: bool) -> Result<Option<Message>>;
+
+    ///weather this topic is prohibit instant message
+    fn prohibit_instant(&self) -> bool;
 
     /// return the seek instant Message from Storage Media.
     ///
@@ -154,7 +160,8 @@ impl StorageWrapper {
 
         // 不存在，则直接插入
         if ephemeral {
-            self.dummy.insert(topic_name);
+            self.dummy
+                .insert(topic_name, prohibit_instant, prohibit_defer);
             return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
         let topic = self

@@ -58,6 +58,12 @@ impl Message {
         }
     }
 
+    pub fn set_reject_code(&mut self, reject_code: u8) {
+        match self {
+            Message::V1(v1) => v1.head.set_reject_code(reject_code),
+        };
+    }
+
     pub fn get_topic(&self) -> &str {
         match self {
             Self::V1(v1) => v1.get_topic(),

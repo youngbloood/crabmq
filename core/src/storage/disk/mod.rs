@@ -5,7 +5,7 @@ mod message_manager;
 mod record;
 
 use super::{PersistStorageOperation, PersistTopicOperation};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use common::{
     global::{Guard, CANCEL_TOKEN},
     util::{check_and_create_dir, check_exist, interval},
@@ -13,7 +13,12 @@ use common::{
 use dashmap::DashMap;
 use defer::Defer;
 use instant::Instant;
-use protocol::message::Message;
+use protocol::{
+    error::{
+        ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
+    },
+    message::Message,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
@@ -103,6 +108,11 @@ impl StorageDisk {
         defer_message_format: &str,
     ) -> Result<TopicMessage> {
         if !self.topics.contains_key(topic_name) {
+            // validate
+            if prohibit_defer && prohibit_instant {
+                return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
+            }
+
             let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
             check_and_create_dir(&parent)?;
             debug!("StorageDisk: load topic: {}", topic_name);
@@ -249,14 +259,14 @@ impl TopicMessage {
     async fn push(&self, msg: Message) -> Result<()> {
         if msg.is_defer() {
             if self.guard.get().meta.prohibit_defer {
-                return Err(anyhow!("this topic is not allowed defer message"));
+                return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_DEFER)));
             }
             self.guard.get().defer.handle_msg(msg).await?;
             return Ok(());
         }
 
         if self.guard.get().meta.prohibit_instant {
-            return Err(anyhow!("this topic is not allowed instant message"));
+            return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_INSTANT)));
         }
         self.guard.get().instant.handle_msg(msg).await?;
         Ok(())
@@ -335,6 +345,10 @@ impl TopicMessageBase {
 impl PersistTopicOperation for TopicMessage {
     fn name(&self) -> &str {
         self.guard.get().name.as_str()
+    }
+
+    fn prohibit_defer(&self) -> bool {
+        self.guard.get().meta.prohibit_defer
     }
 
     async fn seek_defer(&self, block: bool) -> Result<Option<Message>> {
@@ -428,6 +442,10 @@ impl PersistTopicOperation for TopicMessage {
                 }
             }
         }
+    }
+
+    fn prohibit_instant(&self) -> bool {
+        self.guard.get().meta.prohibit_instant
     }
 
     async fn seek_instant(&self, block: bool) -> Result<Option<Message>> {
