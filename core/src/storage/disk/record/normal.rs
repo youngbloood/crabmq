@@ -2,7 +2,7 @@ use super::index::{Index, IndexTantivy};
 use super::{gen_filename, FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::Result;
 use bytes::BytesMut;
-use common::util::check_exist;
+use common::util::{check_exist, SwitcherVec};
 use crossbeam::sync::ShardedLock;
 use parking_lot::RwLock;
 use std::io::{Read as _, Seek as _, Write as _};
@@ -151,7 +151,7 @@ struct RecordDisk {
     write_offset: AtomicU64,
 
     /// 该文件对应的records
-    records: RwLock<Vec<MessageRecord>>,
+    records: SwitcherVec<MessageRecord>,
 }
 
 // impl Default for RecordDisk {
@@ -177,7 +177,7 @@ impl RecordDisk {
             record_size: AtomicU64::new(21),
             record_num: AtomicU64::new(0),
             write_offset: AtomicU64::new(21),
-            records: RwLock::new(Vec::new()),
+            records: SwitcherVec::default(),
         }
     }
 
@@ -219,12 +219,12 @@ impl RecordDisk {
             let line = String::from_utf8(cs.to_vec())?;
             let record = MessageRecord::parse_from(&line)?;
             if load {
-                self.records.write().push(record);
+                self.records.push(record);
             }
         }
-        if load {
-            self.records.write().sort_by_key(|c| c.defer_time);
-        }
+        // if load {
+        //     self.records.write().sort_by_key(|c| c.defer_time);
+        // }
         Ok(())
     }
 
@@ -234,14 +234,14 @@ impl RecordDisk {
         self.record_size.store(0, Relaxed);
         self.record_num.store(0, Relaxed);
         self.write_offset.store(21, Relaxed);
-        self.records.write().clear();
+        // self.records.write().clear();
     }
 
-    fn push(&self, record: MessageRecord, sort: bool) -> usize {
+    fn push(&self, record: MessageRecord, _sort: bool) -> usize {
         self.record_num.fetch_add(1, Relaxed);
         self.record_size
             .fetch_add(record.calc_len() as u64, Relaxed);
-        self.records.write().push(record);
+        self.records.push(record);
         self.record_num.load(Relaxed) as usize
     }
 
@@ -261,8 +261,11 @@ impl RecordDisk {
         // write records
         wfd.seek(SeekFrom::Start(self.write_offset.load(Relaxed)))?;
 
-        let records_rd = self.records.read();
-        let iter = records_rd.iter();
+        let records = self.records.pop();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let iter = records.iter();
         for record in iter {
             let record_str = record.format();
             let record_bts = record_str.as_bytes();
@@ -271,8 +274,7 @@ impl RecordDisk {
             bts.extend(record_bts);
         }
         wfd.write_all(&bts)?;
-        drop(records_rd);
-        self.records.write().clear();
+
         Ok(())
     }
 }

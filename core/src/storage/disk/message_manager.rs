@@ -2,7 +2,7 @@ use super::gen_filename;
 use super::record::{FdCache, MessageRecord};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use common::util::{check_exist, is_debug};
+use common::util::{check_exist, is_debug, SwitcherVec};
 use parking_lot::RwLock;
 use protocol::message::Message;
 use protocol::{parse_body_from_reader, parse_head_from_reader};
@@ -154,7 +154,8 @@ pub struct MessageDisk {
     fd_cache: FdCache,
 
     /// push来的消存放在内存中
-    msgs: RwLock<Vec<Message>>,
+    // msgs: RwLock<Vec<Message>>,
+    msgs: SwitcherVec<Message>,
 
     /// 当前文件的消息大小
     msg_size: AtomicU64,
@@ -173,7 +174,7 @@ impl MessageDisk {
             msg_size: AtomicU64::new(HEAD_SIZE_PER_FILE),
             msg_num: AtomicU64::new(0),
             write_offset: AtomicU64::new(HEAD_SIZE_PER_FILE),
-            msgs: RwLock::new(vec![]),
+            msgs: SwitcherVec::default(),
             // fd: None,
             fd_cache,
             validate: false,
@@ -184,7 +185,7 @@ impl MessageDisk {
         let mut wg = self.filename.write();
         *wg = filename;
         // self.fd = None;
-        self.msgs.write().clear();
+        // self.msgs.write().clear();
         self.write_offset.store(HEAD_SIZE_PER_FILE, Relaxed);
         self.msg_size.store(HEAD_SIZE_PER_FILE, Relaxed);
         self.msg_num.store(0, Relaxed);
@@ -193,8 +194,7 @@ impl MessageDisk {
     pub fn push(&self, msg: Message) {
         self.msg_size.fetch_add(msg.calc_len() as u64, Relaxed);
         self.msg_num.fetch_add(1, Relaxed);
-        let mut wg = self.msgs.write();
-        wg.push(msg);
+        self.msgs.push(msg);
     }
 
     pub async fn load(&self) -> Result<()> {
@@ -264,13 +264,13 @@ impl MessageDisk {
     }
 
     pub async fn persist(&self) -> Result<()> {
-        let msgs_rd = self.msgs.read();
-        if msgs_rd.is_empty() {
+        let msgs = self.msgs.pop();
+        if msgs.is_empty() {
             return Ok(());
         }
 
         // 准备待写入的bts
-        let iter = msgs_rd.iter();
+        let iter = msgs.iter();
         let mut bts = vec![];
         for mu in iter {
             bts.extend(mu.as_bytes());
@@ -289,9 +289,6 @@ impl MessageDisk {
         fwg.sync_all()?;
         self.write_offset
             .store(self.msg_size.load(Relaxed), Relaxed);
-
-        drop(msgs_rd);
-        self.msgs.write().clear();
 
         Ok(())
     }

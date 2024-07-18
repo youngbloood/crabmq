@@ -2,8 +2,11 @@ use anyhow::{anyhow, Result};
 use futures::Future;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::{
     env::var,
     fs::{self, File},
@@ -12,6 +15,7 @@ use std::{
 };
 use tokio::time::Interval;
 use tokio::{select, time::interval as async_interval};
+use tracing::debug;
 
 const CAPITAL: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
@@ -116,4 +120,95 @@ pub fn dir_recursive(dir: PathBuf) -> Result<Vec<PathBuf>> {
     }
 
     Ok(list)
+}
+
+#[derive(Debug)]
+pub struct SwitcherVec<T> {
+    switcher: AtomicBool,
+
+    t1: RefCell<Vec<T>>,
+    t2: RefCell<Vec<T>>,
+}
+
+unsafe impl<T> Send for SwitcherVec<T> {}
+unsafe impl<T> Sync for SwitcherVec<T> {}
+
+impl<T> Default for SwitcherVec<T> {
+    fn default() -> Self {
+        Self {
+            switcher: Default::default(),
+            t1: Default::default(),
+            t2: Default::default(),
+        }
+    }
+}
+
+impl<T> SwitcherVec<T> {
+    pub fn with_capacity(cap: usize) -> Self {
+        SwitcherVec {
+            switcher: AtomicBool::new(false),
+
+            t1: RefCell::new(Vec::with_capacity(cap)),
+            t2: RefCell::new(Vec::with_capacity(cap)),
+        }
+    }
+
+    pub fn push(&self, v: T) {
+        if !self.switcher.load(Relaxed) {
+            debug!("push into t1");
+            self.t1.borrow_mut().push(v);
+        } else {
+            debug!("push into t2");
+            self.t2.borrow_mut().push(v);
+        }
+    }
+
+    pub fn pop(&self) -> Vec<T> {
+        if self
+            .switcher
+            .compare_exchange(false, true, Relaxed, Relaxed)
+            .is_ok()
+        {
+            debug!("pop from t1");
+            return self.t1.take();
+        }
+
+        if self
+            .switcher
+            .compare_exchange(true, false, Relaxed, Relaxed)
+            .is_ok()
+        {
+            debug!("pop from t2");
+            return self.t2.take();
+        }
+
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SwitcherVec;
+
+    #[tokio::test]
+    async fn test_switcher_push_and_pop() {
+        let switcher = SwitcherVec::with_capacity(5);
+        switcher.push(1);
+        switcher.push(2);
+        switcher.push(3);
+        println!("pop1 = {:?}", switcher.pop());
+        println!("pop2 = {:?}", switcher.pop());
+        println!("pop3 = {:?}", switcher.pop());
+        // println!("pop4 = {:?}", switcher.pop());
+
+        switcher.push(4);
+        switcher.push(5);
+        switcher.push(6);
+        println!("pop5 = {:?}", switcher.pop());
+
+        switcher.push(7);
+        switcher.push(8);
+        switcher.push(9);
+        println!("pop6 = {:?}", switcher.pop());
+    }
 }
