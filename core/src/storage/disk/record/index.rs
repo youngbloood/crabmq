@@ -5,6 +5,9 @@
 use super::MessageRecord;
 use anyhow::Result;
 use common::util::{check_and_create_dir, check_exist};
+use lru::LruCache;
+use parking_lot::RwLock;
+use std::num::NonZeroUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::{
     cell::RefCell,
@@ -24,7 +27,7 @@ pub trait Index: Send + Sync {
     fn find(&self, id: &str) -> Result<Option<MessageRecord>>;
 }
 
-pub struct IndexTantivy {
+pub struct IndexCache {
     dir: PathBuf,
     budget_in_bytes: usize,
 
@@ -34,26 +37,28 @@ pub struct IndexTantivy {
     need_flush: AtomicBool,
 
     // index
-    index: RefCell<Option<IndexWrapper>>,
+    l1: RwLock<LruCache<String, MessageRecord>>,
+    l2: RefCell<Option<IndexWrapper>>,
 }
 
-unsafe impl Send for IndexTantivy {}
-unsafe impl Sync for IndexTantivy {}
+unsafe impl Send for IndexCache {}
+unsafe impl Sync for IndexCache {}
 
-impl IndexTantivy {
+impl IndexCache {
     pub fn new(dir: PathBuf, budget_in_bytes: usize) -> Result<Self> {
-        Ok(IndexTantivy {
+        Ok(IndexCache {
             dir,
             budget_in_bytes,
             flush_factor_target: AtomicU64::new(0),
             flush_factor_now: AtomicU64::new(0),
             need_flush: AtomicBool::new(false),
-            index: RefCell::new(None),
+            l1: RwLock::new(LruCache::new(NonZeroUsize::new(1000).unwrap())),
+            l2: RefCell::new(None),
         })
     }
 
     fn init_index(&self) -> Result<()> {
-        let mut index = self.index.borrow_mut();
+        let mut index = self.l2.borrow_mut();
         if index.is_some() {
             return Ok(());
         }
@@ -63,11 +68,14 @@ impl IndexTantivy {
     }
 }
 
-impl Index for IndexTantivy {
+impl Index for IndexCache {
     fn push(&self, record: MessageRecord) -> Result<()> {
-        self.init_index()?;
+        // push into l1
+        self.l1.write().push(record.id.to_string(), record.clone());
 
-        let index = self.index.borrow_mut();
+        // push into l2
+        self.init_index()?;
+        let index = self.l2.borrow_mut();
         index.as_ref().unwrap().push(record)?;
         self.flush_factor_now.fetch_add(1, Relaxed);
         if self.flush_factor_now.load(Relaxed) >= self.flush_factor_target.load(Relaxed) {
@@ -82,7 +90,13 @@ impl Index for IndexTantivy {
     }
 
     fn find(&self, id: &str) -> Result<Option<MessageRecord>> {
-        let index = self.index.borrow_mut();
+        // find from l1
+        if let Some(v) = self.l1.write().get(id) {
+            return Ok(Some(v.clone()));
+        }
+
+        // find from l2
+        let index = self.l2.borrow_mut();
         if index.is_none() {
             return Ok(None);
         }
@@ -91,7 +105,11 @@ impl Index for IndexTantivy {
             self.need_flush.store(false, Relaxed);
         }
 
-        index.as_ref().unwrap().find(id)
+        if let Some(v) = index.as_ref().unwrap().find(id)? {
+            self.l1.write().push(id.to_string(), v.clone());
+            return Ok(Some(v.clone()));
+        }
+        Ok(None)
     }
 }
 

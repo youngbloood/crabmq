@@ -1,4 +1,4 @@
-use super::index::{Index, IndexTantivy};
+use super::index::{Index, IndexCache};
 use super::{gen_filename, FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::Result;
 use bytes::BytesMut;
@@ -49,7 +49,7 @@ impl RecordManagerStrategyNormal {
             factor: AtomicU64::new(0),
             fd_cache,
             writer: record_disk,
-            index: Box::new(IndexTantivy::new(dir.join("index"), 15000000)?),
+            index: Box::new(IndexCache::new(dir.join("index"), 15000000)?),
         })
     }
 
