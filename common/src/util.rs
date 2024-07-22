@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
+use crossbeam::queue::SegQueue;
 use futures::Future;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -126,8 +126,8 @@ pub fn dir_recursive(dir: PathBuf) -> Result<Vec<PathBuf>> {
 pub struct SwitcherVec<T> {
     switcher: AtomicBool,
 
-    t1: RefCell<Vec<T>>,
-    t2: RefCell<Vec<T>>,
+    t1: SegQueue<T>,
+    t2: SegQueue<T>,
 }
 
 unsafe impl<T> Send for SwitcherVec<T> {}
@@ -148,18 +148,18 @@ impl<T> SwitcherVec<T> {
         SwitcherVec {
             switcher: AtomicBool::new(false),
 
-            t1: RefCell::new(Vec::with_capacity(cap)),
-            t2: RefCell::new(Vec::with_capacity(cap)),
+            t1: SegQueue::new(),
+            t2: SegQueue::new(),
         }
     }
 
     pub fn push(&self, v: T) {
         if !self.switcher.load(Relaxed) {
             debug!("push into t1");
-            self.t1.borrow_mut().push(v);
+            self.t1.push(v);
         } else {
             debug!("push into t2");
-            self.t2.borrow_mut().push(v);
+            self.t2.push(v);
         }
     }
 
@@ -170,7 +170,11 @@ impl<T> SwitcherVec<T> {
             .is_ok()
         {
             debug!("pop from t1");
-            return self.t1.take();
+            let mut list = vec![];
+            while let Some(v) = self.t1.pop() {
+                list.push(v);
+            }
+            return list;
         }
 
         if self
@@ -179,7 +183,11 @@ impl<T> SwitcherVec<T> {
             .is_ok()
         {
             debug!("pop from t2");
-            return self.t2.take();
+            let mut list = vec![];
+            while let Some(v) = self.t2.pop() {
+                list.push(v);
+            }
+            return list;
         }
 
         Vec::new()
@@ -188,6 +196,10 @@ impl<T> SwitcherVec<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use crate::util::interval;
+
     use super::SwitcherVec;
 
     #[tokio::test]
@@ -210,5 +222,31 @@ mod tests {
         switcher.push(8);
         switcher.push(9);
         println!("pop6 = {:?}", switcher.pop());
+    }
+
+    #[tokio::test]
+    async fn test_switcher_push_and_pop2() {
+        let switcher = Arc::new(SwitcherVec::with_capacity(5));
+        let arc_switcher = switcher.clone();
+        tokio::spawn(async move {
+            for i in 1..10000 {
+                arc_switcher.push(i);
+            }
+        });
+
+        let mut ticker = interval(Duration::from_millis(1)).await;
+        let mut null_num = 0;
+        let mut times = 1;
+        while null_num <= 2 {
+            ticker.tick().await;
+            let list = switcher.pop();
+            if list.is_empty() {
+                null_num += 1;
+            }
+            for v in list {
+                assert_eq!(times, v);
+                times += 1;
+            }
+        }
     }
 }

@@ -38,6 +38,7 @@ pub struct IndexCache {
 
     // index
     l1: RwLock<LruCache<String, MessageRecord>>,
+    // TODO: compare benchmark: sqlite VS tantivy index.
     l2: RefCell<Option<IndexWrapper>>,
 }
 
