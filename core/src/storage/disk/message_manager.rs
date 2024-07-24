@@ -1,5 +1,6 @@
 use super::gen_filename;
 use super::record::{FdCache, MessageRecord};
+use crate::compress::{CompressWrapper, COMPRESS_TYPE_NONE};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use common::util::{check_exist, is_debug, SwitcherVec};
@@ -34,6 +35,7 @@ pub struct MessageManager {
     /// 每个文件最多存放的大小
     max_size_per_file: u64,
 
+    compress: CompressWrapper,
     /// 写入消息
     writer: MessageDisk,
 }
@@ -47,30 +49,35 @@ impl MessageManager {
             fd_cache: fd_cache.clone(),
             max_msg_num_per_file,
             max_size_per_file,
+            compress: CompressWrapper::with_type(COMPRESS_TYPE_NONE),
             writer: MessageDisk::new(dir.join(gen_filename(0)), fd_cache),
         }
     }
 
     pub async fn push(&self, msg: Message) -> Result<MessageRecord> {
+        let defer_time = msg.defer_time();
+        let id = msg.id().to_string();
+        let compressed_msg = self.compress.compress(msg).await?;
+
         if self.writer.msg_num.load(Relaxed) >= self.max_msg_num_per_file
-            || self.writer.msg_size.load(Relaxed) + msg.calc_len() as u64 > self.max_size_per_file
+            || self.writer.msg_size.load(Relaxed) + compressed_msg.len() as u64
+                > self.max_size_per_file
         {
             self.writer.persist().await?;
             self.rorate()?;
         }
 
-        let id = msg.id();
         let record = MessageRecord {
             factor: self.factor.load(Relaxed),
             offset: self.writer.msg_size.load(Relaxed),
-            length: msg.calc_len() as _,
-            id: id.to_string(),
-            defer_time: msg.defer_time(),
+            length: compressed_msg.len() as _,
+            id,
+            defer_time,
             consume_time: 0,
             delete_time: 0,
         };
 
-        self.writer.push(msg);
+        self.writer.push(compressed_msg);
 
         Ok(record)
     }
@@ -135,7 +142,7 @@ impl MessageManager {
     pub async fn find_by(&self, record: MessageRecord) -> Result<Option<Message>> {
         let filename = self.dir.join(gen_filename(record.factor));
         let buf = self.fd_cache.read_by_record(&filename, record)?;
-        let msg = Message::parse_from(&buf).await?;
+        let msg = self.compress.decompress(&buf).await?;
         Ok(Some(msg))
     }
 }
@@ -155,7 +162,7 @@ pub struct MessageDisk {
 
     /// push来的消存放在内存中
     // msgs: RwLock<Vec<Message>>,
-    msgs: SwitcherVec<Message>,
+    msgs: SwitcherVec<Vec<u8>>,
 
     /// 当前文件的消息大小
     msg_size: AtomicU64,
@@ -191,8 +198,8 @@ impl MessageDisk {
         self.msg_num.store(0, Relaxed);
     }
 
-    pub fn push(&self, msg: Message) {
-        self.msg_size.fetch_add(msg.calc_len() as u64, Relaxed);
+    pub fn push(&self, msg: Vec<u8>) {
+        self.msg_size.fetch_add(msg.len() as u64, Relaxed);
         self.msg_num.fetch_add(1, Relaxed);
         self.msgs.push(msg);
     }
@@ -273,7 +280,7 @@ impl MessageDisk {
         let iter = msgs.iter();
         let mut bts = vec![];
         for mu in iter {
-            bts.extend(mu.as_bytes());
+            bts.extend(mu);
         }
 
         let fd = self.fd_cache.get_or_create(&self.filename.read())?;

@@ -5,6 +5,7 @@ use protocol::{
     parse_body_from_reader, parse_head_from_reader,
     protocol::{ProtocolBodys, ProtocolHead},
 };
+use std::net::Ipv4Addr;
 use std::{net::SocketAddr, pin::Pin};
 use tokio::{
     io::AsyncWriteExt,
