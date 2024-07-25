@@ -169,7 +169,6 @@ impl<T> SwitcherVec<T> {
             .compare_exchange(false, true, Relaxed, Relaxed)
             .is_ok()
         {
-            debug!("pop from t1");
             let mut list = vec![];
             while let Some(v) = self.t1.pop() {
                 list.push(v);
@@ -182,7 +181,6 @@ impl<T> SwitcherVec<T> {
             .compare_exchange(true, false, Relaxed, Relaxed)
             .is_ok()
         {
-            debug!("pop from t2");
             let mut list = vec![];
             while let Some(v) = self.t2.pop() {
                 list.push(v);

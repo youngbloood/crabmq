@@ -1,4 +1,4 @@
-mod config;
+pub mod config;
 mod defer;
 mod instant;
 mod message_manager;
@@ -10,6 +10,7 @@ use common::{
     global::{Guard, CANCEL_TOKEN},
     util::{check_and_create_dir, check_exist, interval},
 };
+use config::DiskConfig;
 use dashmap::DashMap;
 use defer::Defer;
 use instant::Instant;
@@ -18,12 +19,14 @@ use protocol::{
         ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
     },
     message::Message,
+    v1::ProtocolHeadV1,
+    ProtocolHead,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -40,26 +43,20 @@ pub fn gen_filename(factor: u64) -> String {
 }
 
 pub struct StorageDisk {
-    dir: PathBuf,
-
+    cfg: DiskConfig,
     /// topic_name: TopicMessage
     topics: DashMap<String, TopicMessage>,
-
-    max_msg_num_per_file: u64,
-    max_size_per_file: u64,
 
     /// 取消信号
     cancel: CancellationToken,
 }
 
 impl StorageDisk {
-    pub fn new(dir: PathBuf, max_msg_num_per_file: u64, max_size_per_file: u64) -> Self {
+    pub fn new(cfg: DiskConfig) -> Self {
         StorageDisk {
-            dir,
+            cfg,
             topics: DashMap::new(),
             cancel: CancellationToken::new(),
-            max_msg_num_per_file,
-            max_size_per_file,
         }
     }
 
@@ -67,12 +64,25 @@ impl StorageDisk {
         let topic_name = dir_name.file_name().unwrap().to_str().unwrap();
         info!("LAZY: load topic[{topic_name}]...");
 
-        let topic_meta = TopicMeta::read_from(dir_name.join("meta"))?;
+        let meta = TopicMeta::read_from(dir_name.join("meta"))?;
 
-        let defer = Defer::new(dir_name.clone(), topic_meta.defer_message_format.as_str())?;
+        let defer = Defer::new(
+            dir_name.clone(),
+            meta.defer_message_format.as_str(),
+            meta.max_msg_num_per_file,
+            meta.max_size_per_file,
+            meta.fd_cache_size as _,
+        )?;
         defer.load().await?;
 
-        let instant = Instant::new(dir_name.clone())?;
+        let instant = Instant::new(
+            dir_name.clone(),
+            meta.max_msg_num_per_file,
+            meta.max_size_per_file,
+            meta.record_num_per_file,
+            meta.record_size_per_file,
+            meta.fd_cache_size as _,
+        )?;
         instant.load().await?;
 
         self.topics.insert(
@@ -80,7 +90,7 @@ impl StorageDisk {
             TopicMessage::new(TopicMessageBase::new(
                 topic_name, // topic_meta.prohibit_instant,
                 instant,    // topic_meta.prohibit_defer,
-                defer, topic_meta,
+                defer, meta,
             )),
         );
         Ok(())
@@ -88,7 +98,7 @@ impl StorageDisk {
 
     async fn get_topic(&self, topic_name: &str) -> Result<Option<TopicMessage>> {
         if !self.topics.contains_key(topic_name) {
-            let parent = self.dir.join(topic_name);
+            let parent = self.cfg.storage_dir.join(topic_name);
             if !check_exist(&parent) {
                 return Ok(None);
             }
@@ -100,36 +110,51 @@ impl StorageDisk {
         Ok(Some(topic.value().clone()))
     }
 
-    async fn get_or_create_topic_inner(
+    async fn get_or_create_topic_inner_v1(
         &self,
         topic_name: &str,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
-        defer_message_format: &str,
+        head: &ProtocolHeadV1,
+        cfg: DiskConfig,
     ) -> Result<TopicMessage> {
         if !self.topics.contains_key(topic_name) {
             // validate
-            if prohibit_defer && prohibit_instant {
+            if head.prohibit_defer() && head.prohibit_instant() {
                 return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
             }
 
-            let parent = Path::new(self.dir.to_str().unwrap()).join(topic_name);
+            let parent = cfg.storage_dir.join(topic_name);
             check_and_create_dir(&parent)?;
             debug!("StorageDisk: load topic: {}", topic_name);
 
             // init the topic-message
-            let mut defer_format = "";
-            if defer_message_format.is_empty() {
-                defer_format = "{daily}/{hourly}/{minutely:20}"
-            }
-            let defer = Defer::new(parent.join("defer"), defer_format)?;
-            let instant = Instant::new(parent.clone())?;
+            let defer = Defer::new(
+                parent.join("defer"),
+                &cfg.default_defer_message_format,
+                cfg.default_max_msg_num_per_file,
+                cfg.default_max_size_per_file,
+                cfg.default_fd_cache_size as _,
+            )?;
+            let instant = Instant::new(
+                parent.clone(),
+                cfg.default_max_msg_num_per_file,
+                cfg.default_max_size_per_file,
+                cfg.default_record_num_per_file,
+                cfg.default_record_size_per_file,
+                cfg.default_fd_cache_size as _,
+            )?;
 
             let topic_meta = TopicMeta::new(
                 parent.join("meta"),
-                prohibit_instant,
-                prohibit_defer,
-                defer_format,
+                head.prohibit_instant(),
+                head.prohibit_defer(),
+                cfg.default_defer_message_format.to_string(),
+                cfg.default_max_msg_num_per_file,
+                cfg.default_max_size_per_file,
+                cfg.default_compress_type,
+                cfg.default_subscript_type,
+                cfg.default_record_num_per_file,
+                cfg.default_record_size_per_file,
+                cfg.default_fd_cache_size,
             );
             topic_meta.persist()?;
 
@@ -147,16 +172,27 @@ impl StorageDisk {
         let topic = self.topics.get(topic_name).unwrap();
         Ok(topic.value().clone())
     }
+
+    async fn get_or_create_topic_inner(
+        &self,
+        topic_name: &str,
+        head: &ProtocolHead,
+    ) -> Result<TopicMessage> {
+        let cfg = self.cfg.mix_with_protocolhead(head);
+        match head {
+            ProtocolHead::V1(v1) => self.get_or_create_topic_inner_v1(topic_name, v1, cfg).await,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl PersistStorageOperation for StorageDisk {
     async fn init(&self, validate: bool) -> Result<()> {
-        check_and_create_dir(self.dir.to_str().unwrap())?;
+        check_and_create_dir(&self.cfg.storage_dir)?;
         if !validate {
             return Ok(());
         }
-        for entry in fs::read_dir(&self.dir)? {
+        for entry in fs::read_dir(&self.cfg.storage_dir)? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
                 continue;
@@ -168,12 +204,7 @@ impl PersistStorageOperation for StorageDisk {
 
     async fn push(&self, msg: Message) -> Result<()> {
         let topic = self
-            .get_or_create_topic_inner(
-                msg.get_topic(),
-                msg.prohibit_instant(),
-                msg.prohibit_defer(),
-                msg.defer_message_format(),
-            )
+            .get_or_create_topic_inner(msg.get_topic(), &msg.get_head())
             .await?;
         topic.push(msg).await?;
         Ok(())
@@ -222,18 +253,9 @@ impl PersistStorageOperation for StorageDisk {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
-        defer_message_format: &str,
+        head: &ProtocolHead,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
-        let topic = self
-            .get_or_create_topic_inner(
-                topic_name,
-                prohibit_instant,
-                prohibit_defer,
-                defer_message_format,
-            )
-            .await?;
+        let topic = self.get_or_create_topic_inner(topic_name, head).await?;
         Ok(Arc::new(Box::new(topic) as Box<dyn PersistTopicOperation>))
     }
 }
@@ -277,31 +299,52 @@ impl TopicMessage {
 struct TopicMeta {
     #[serde(skip)]
     filename: PathBuf,
-
     prohibit_instant: bool,
     prohibit_defer: bool,
     defer_message_format: String,
+    max_msg_num_per_file: u64,
+    max_size_per_file: u64,
+    compress_type: u8,
+    subscript_type: u8,
+    record_num_per_file: u64,
+    record_size_per_file: u64,
+    fd_cache_size: u64,
 }
 
 impl TopicMeta {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         filename: PathBuf,
         prohibit_instant: bool,
         prohibit_defer: bool,
-        defer_message_format: &str,
+        defer_message_format: String,
+        max_msg_num_per_file: u64,
+        max_size_per_file: u64,
+        compress_type: u8,
+        subscript_type: u8,
+        record_num_per_file: u64,
+        record_size_per_file: u64,
+        fd_cache_size: u64,
     ) -> Self {
         TopicMeta {
             filename,
             prohibit_instant,
             prohibit_defer,
-            defer_message_format: defer_message_format.to_string(),
+            defer_message_format,
+            max_msg_num_per_file,
+            max_size_per_file,
+            compress_type,
+            subscript_type,
+            record_num_per_file,
+            record_size_per_file,
+            fd_cache_size,
         }
     }
 
     fn read_from(filename: PathBuf) -> Result<Self> {
         let out = fs::read_to_string(filename)?;
-        let topic_meta: TopicMeta = serde_json::from_str(&out)?;
-        Ok(topic_meta)
+        let meta: TopicMeta = serde_json::from_str(&out)?;
+        Ok(meta)
     }
 
     fn persist(&self) -> Result<()> {

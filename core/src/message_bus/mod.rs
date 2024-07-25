@@ -1,7 +1,7 @@
 pub mod topic_bus;
 use crate::{
     client::Client,
-    crab::CrabMQOption,
+    config::Config,
     storage::{new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY},
     topic::new_topic,
 };
@@ -20,7 +20,7 @@ use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer}
 use tracing::{debug, error, info};
 
 pub struct MessageBus {
-    opt: Guard<CrabMQOption>,
+    opt: Guard<Config>,
 
     /// topics map，当某个客户端订阅topic时，从storage中获取到topic接口，并初始化一个TopicBus，循环从TopicBus中读取消息
     topics: DashMap<String, Guard<TopicBus>>,
@@ -31,23 +31,22 @@ pub struct MessageBus {
 }
 
 impl MessageBus {
-    pub async fn new(opt: Guard<CrabMQOption>) -> Result<Self> {
-        if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
+    pub async fn new(opt: Guard<Config>) -> Result<Self> {
+        if opt.get().global.message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
             return Ok(MessageBus {
-                opt,
                 topics: DashMap::new(),
-                storage: new_storage_wrapper(STORAGE_TYPE_DUMMY, PathBuf::new(), 10, 100, 10, 300)
-                    .await?,
+                storage: new_storage_wrapper(
+                    opt.get().global.message_storage_type.as_str(),
+                    opt.get().message_storage_disk_config.clone(),
+                )
+                .await?,
+                opt,
             });
         }
 
         let storage = new_storage_wrapper(
-            opt.get().message_storage_type.as_str(),
-            Path::new(opt.get().message_dir.as_str()).join(""),
-            opt.get().max_num_per_file,
-            opt.get().max_size_per_file,
-            opt.get().persist_message_factor,
-            opt.get().persist_message_period,
+            opt.get().global.message_storage_type.as_str(),
+            opt.get().message_storage_disk_config.clone(),
         )
         .await?;
 
@@ -84,14 +83,11 @@ impl MessageBus {
     pub async fn get_or_create_topic(
         &mut self,
         topic_name: &str,
-        ephemeral: bool,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
-        defer_message_format: &str,
+        head: &ProtocolHead,
     ) -> Result<Guard<TopicBus>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
-            && topics_len >= (self.opt.get().max_topic_num as _)
+            && topics_len >= (self.opt.get().global.max_topic_num as _)
         {
             return Err(anyhow!("exceed upper limit of topic"));
         }
@@ -100,15 +96,9 @@ impl MessageBus {
             let (_, topic_storage) = self
                 .storage
                 .get_mut()
-                .get_or_create_topic(
-                    topic_name,
-                    ephemeral,
-                    prohibit_instant,
-                    prohibit_defer,
-                    defer_message_format,
-                )
+                .get_or_create_topic(topic_name, head)
                 .await?;
-            let topic = new_topic(self.opt.clone(), topic_name, ephemeral)?;
+            let topic = new_topic(self.opt.clone(), topic_name, head.topic_ephemeral())?;
 
             let topic_message = new_topic_message(self.opt.clone(), topic, topic_storage).await?;
             self.topics
@@ -179,16 +169,7 @@ impl MessageBus {
         let topic_name = msg.get_topic();
         let chan_name = msg.get_channel();
 
-        match self
-            .get_or_create_topic(
-                topic_name,
-                msg.topic_ephemeral(),
-                msg.prohibit_instant(),
-                msg.prohibit_defer(),
-                msg.defer_message_format(),
-            )
-            .await
-        {
+        match self.get_or_create_topic(topic_name, &msg.get_head()).await {
             Ok(topic_sub) => {
                 // 有订阅某个topic的client时，才进行相应的loop消息循环
                 tokio::spawn(topic_message_loop(topic_sub.clone()));
@@ -215,7 +196,7 @@ impl MessageBus {
     //============================ Handle Action ==============================//
 }
 
-pub async fn new_message_manager(opt: Guard<CrabMQOption>) -> Result<Guard<MessageBus>> {
+pub async fn new_message_manager(opt: Guard<Config>) -> Result<Guard<MessageBus>> {
     let mm = MessageBus::new(opt).await?;
     let guard = Guard::new(mm);
     Ok(guard)

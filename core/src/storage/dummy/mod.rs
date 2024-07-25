@@ -1,6 +1,6 @@
 use super::{PersistStorageOperation, PersistTopicOperation};
 use crate::cache::{CacheWrapper, CACHE_TYPE_MEM};
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result};
 use common::global::Guard;
 use dashmap::DashMap;
 use protocol::{
@@ -8,6 +8,7 @@ use protocol::{
         ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
     },
     message::Message,
+    ProtocolHead,
 };
 use std::sync::Arc;
 
@@ -28,37 +29,38 @@ impl Dummy {
         self.topics.contains_key(key)
     }
 
-    pub fn insert(&self, key: &str, prohibit_instant: bool, prohibit_defer: bool) {
-        self.topics.insert(
-            key.to_string(),
-            Guard::new(TopicDummyBase::new(
-                key,
-                prohibit_defer,
-                prohibit_instant,
-                1000,
-            )),
-        );
+    pub fn insert(&self, key: &str, head: &ProtocolHead) {
+        match head {
+            ProtocolHead::V1(v1) => self.topics.insert(
+                key.to_string(),
+                Guard::new(TopicDummyBase::new(
+                    key,
+                    v1.prohibit_defer(),
+                    v1.prohibit_instant(),
+                    1000,
+                )),
+            ),
+        };
     }
 
     fn get_or_create_topic_dummy(
         &self,
         topic_name: &str,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
+        head: &ProtocolHead,
     ) -> Result<TopicDummy> {
         if let Some(topic_dummy) = self.topics.get(topic_name) {
             return Ok(topic_dummy.value().clone());
         }
 
         // create
-        if prohibit_defer && prohibit_instant {
+        if head.prohibit_defer() && head.prohibit_instant() {
             return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
         }
 
         let topic_dummy = Guard::new(TopicDummyBase::new(
             topic_name,
-            prohibit_defer,
-            prohibit_instant,
+            head.prohibit_defer(),
+            head.prohibit_instant(),
             100,
         ));
         self.topics
@@ -75,11 +77,7 @@ impl PersistStorageOperation for Dummy {
     }
 
     async fn push(&self, msg: Message) -> Result<()> {
-        let topic = self.get_or_create_topic_dummy(
-            msg.get_topic(),
-            msg.prohibit_instant(),
-            msg.prohibit_defer(),
-        )?;
+        let topic = self.get_or_create_topic_dummy(msg.get_topic(), &msg.get_head())?;
         topic.get().push(msg).await?;
         Ok(())
     }
@@ -104,11 +102,9 @@ impl PersistStorageOperation for Dummy {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
-        _defer_message_format: &str,
+        head: &ProtocolHead,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
-        let topic = self.get_or_create_topic_dummy(topic_name, prohibit_instant, prohibit_defer)?;
+        let topic = self.get_or_create_topic_dummy(topic_name, head)?;
         Ok(Arc::new(Box::new(topic)))
     }
 }

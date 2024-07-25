@@ -2,18 +2,20 @@
  * Persist Messages into Storage and parse Messages from Storage
  */
 
-mod disk;
+pub mod disk;
 mod dummy;
 
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
+use disk::config::DiskConfig;
 use disk::StorageDisk;
 use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
 use protocol::message::{convert_to_resp, Message};
+use protocol::ProtocolHead;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
-use std::{path::PathBuf, sync::atomic::AtomicU64, time::Duration};
+use std::{sync::atomic::AtomicU64, time::Duration};
 use tokio::{
     select,
     sync::mpsc::{self, Receiver, Sender},
@@ -37,9 +39,7 @@ pub trait PersistStorageOperation {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
-        defer_message_format: &str,
+        head: &ProtocolHead,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>>;
 
     /// flush the messages to Storage Media.
@@ -101,7 +101,7 @@ pub trait PersistTopicOperation: Send + Sync {
 
 #[enum_dispatch(PersistStorageOperation)]
 pub enum StorageEnum {
-    Local(StorageDisk),
+    Disk(StorageDisk),
     Memory(Dummy),
 }
 
@@ -137,10 +137,7 @@ impl StorageWrapper {
     pub async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        ephemeral: bool,
-        prohibit_instant: bool,
-        prohibit_defer: bool,
-        defer_message_format: &str,
+        head: &ProtocolHead,
     ) -> Result<(bool, Arc<Box<dyn PersistTopicOperation>>)> {
         // 已经存在，直接返回
         if self.dummy.contains_key(topic_name) {
@@ -159,20 +156,11 @@ impl StorageWrapper {
         }
 
         // 不存在，则直接插入
-        if ephemeral {
-            self.dummy
-                .insert(topic_name, prohibit_instant, prohibit_defer);
+        if head.topic_ephemeral() {
+            self.dummy.insert(topic_name, head);
             return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
-        let topic = self
-            .storage
-            .get_or_create_topic(
-                topic_name,
-                prohibit_instant,
-                prohibit_defer,
-                defer_message_format,
-            )
-            .await?;
+        let topic = self.storage.get_or_create_topic(topic_name, head).await?;
         Ok((false, topic))
     }
 
@@ -193,13 +181,7 @@ impl StorageWrapper {
     ) -> Result<()> {
         let topic_name = msg.get_topic();
         let (ephemeral, _) = self
-            .get_or_create_topic(
-                topic_name,
-                msg.topic_ephemeral(),
-                msg.prohibit_instant(),
-                msg.prohibit_defer(),
-                msg.defer_message_format(),
-            )
+            .get_or_create_topic(topic_name, &msg.get_head())
             .await?;
 
         if ephemeral {
@@ -244,26 +226,17 @@ async fn storage_wrapper_loop(guard: Guard<StorageWrapper>) {
 
 pub async fn new_storage_wrapper(
     storage_type: &str,
-    dir: PathBuf,
-    max_msg_num_per_file: u64,
-    max_size_per_file: u64,
-    persist_factor: u64,
-    persist_period: u64,
+    disk_cfg: DiskConfig,
 ) -> Result<Guard<StorageWrapper>> {
+    let persist_period = disk_cfg.persist_period;
+    let persist_factor = disk_cfg.persist_factor;
+
     let storage = match storage_type {
-        STORAGE_TYPE_LOCAL => StorageEnum::Local(StorageDisk::new(
-            dir,
-            max_msg_num_per_file,
-            max_size_per_file,
-        )),
+        STORAGE_TYPE_LOCAL => StorageEnum::Disk(StorageDisk::new(disk_cfg)),
 
         STORAGE_TYPE_DUMMY => StorageEnum::Memory(Dummy::new(100)),
 
-        _ => StorageEnum::Local(StorageDisk::new(
-            dir,
-            max_msg_num_per_file,
-            max_size_per_file,
-        )),
+        _ => StorageEnum::Disk(StorageDisk::new(disk_cfg)),
     };
     storage.init(false).await?;
 

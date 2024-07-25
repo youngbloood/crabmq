@@ -68,8 +68,15 @@ pub const ACTION_AUTH: u8 = 9;
 *           1bit: reject connect. 1st flag must be resp, and the 8th byte mean the reject code.
 *           1bit: prohibit send instant message (default is 0).
 *           1bit: prohibit send defer message (default is 0).
-*           left 3 bits: extend flags.
-* 3rd byte: extend flags
+*           1bit: has crc.
+* 3rd byte: topic flags
+*           1bit: set [`max_msg_num_per_file`].
+*           1bit: set [`max_size_per_file`].
+*           1bit: set [`compress_type`].
+*           1bit: set [`subscript_type`].
+*           1bit: set [`record_num_per_file`].
+*           1bit: set [`record_size_per_file`].
+*           1bit: set [`fd_cache_size`].
 * 4th byte:
 *           4bit: version: protocol version.
 *           4bit: message number. (max is [`PROTOCOL_MAX_MSG_NUM`])
@@ -81,6 +88,14 @@ pub const ACTION_AUTH: u8 = 9;
 * 10th bytes: extend bytes.
 *
 * optional:
+*           2 bytes crc values
+*           8 bytes [`max_msg_num_per_file`]
+*           8 bytes [`max_size_per_file`]
+*           1 byte [`compress_type`]
+*           1 byte [`subscript_type`]
+*           8 bytes [`record_num_per_file`]
+*           8 bytes [`record_size_per_file`]
+*           8 bytes [`fd_cache_size`]
 *           topic value.
 *           channel value.
 *           token value.
@@ -119,7 +134,7 @@ impl Head {
             return Err(Error::from(ProtError::new(ERR_NOT_SUPPORT_ACTION)));
         }
 
-        if self.is_req() && (self.reject() || self.reject_code() != 0) {
+        if self.is_req() && (self.is_reject() || self.reject_code() != 0) {
             return Err(Error::from(ProtError::new(ERR_SHOULD_NOT_REJECT_CODE)));
         }
 
@@ -169,22 +184,8 @@ impl Head {
         self.0[1].is_1(5)
     }
 
-    pub fn prohibit_instant(&self) -> bool {
+    pub fn heartbeat(&self) -> bool {
         self.0[1].is_1(4)
-    }
-
-    pub fn set_prohibit_instant(&mut self, prohibit: bool) -> &mut Self {
-        self.set_head_flag(1, 4, prohibit);
-        self
-    }
-
-    pub fn prohibit_defer(&self) -> bool {
-        self.0[1].is_1(3)
-    }
-
-    pub fn set_prohibit_defer(&mut self, prohibit: bool) -> &mut Self {
-        self.set_head_flag(1, 3, prohibit);
-        self
     }
 
     pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
@@ -192,12 +193,93 @@ impl Head {
         self
     }
 
-    pub fn heartbeat(&self) -> bool {
-        self.0[1].is_1(4)
+    pub fn is_reject(&self) -> bool {
+        self.0[1].is_1(3)
     }
 
-    pub fn reject(&self) -> bool {
-        self.0[1].is_1(3)
+    pub fn prohibit_instant(&self) -> bool {
+        self.0[1].is_1(2)
+    }
+
+    pub fn set_prohibit_instant(&mut self, prohibit: bool) -> &mut Self {
+        self.set_head_flag(1, 2, prohibit);
+        self
+    }
+
+    pub fn prohibit_defer(&self) -> bool {
+        self.0[1].is_1(1)
+    }
+
+    pub fn set_prohibit_defer(&mut self, prohibit: bool) -> &mut Self {
+        self.set_head_flag(1, 1, prohibit);
+        self
+    }
+
+    pub fn has_crc(&self) -> bool {
+        self.0[1].is_1(0)
+    }
+
+    pub fn has_max_msg_num_per_file(&self) -> bool {
+        self.0[2].is_1(7)
+    }
+
+    pub fn set_max_msg_num_per_file(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 7, has);
+        self
+    }
+
+    pub fn has_max_size_per_file(&self) -> bool {
+        self.0[2].is_1(6)
+    }
+
+    pub fn set_max_size_per_file(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 6, has);
+        self
+    }
+
+    pub fn has_compress_type(&self) -> bool {
+        self.0[2].is_1(5)
+    }
+
+    pub fn set_compress_type(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 5, has);
+        self
+    }
+
+    pub fn has_subscript_type(&self) -> bool {
+        self.0[2].is_1(4)
+    }
+
+    pub fn set_subscript_type(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 4, has);
+        self
+    }
+
+    pub fn has_record_num_per_file(&self) -> bool {
+        self.0[2].is_1(3)
+    }
+
+    pub fn set_record_num_per_file(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 3, has);
+        self
+    }
+
+    pub fn has_record_size_per_file(&self) -> bool {
+        self.0[2].is_1(2)
+    }
+
+    pub fn set_record_size_per_file(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 2, has);
+        self
+    }
+
+    pub fn has_fd_cache_size(&self) -> bool {
+        self.0[2].is_1(1)
+    }
+
+    pub fn set_fd_cache_size(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(2, 1, has);
+        self
     }
 
     pub fn topic_len(&self) -> u8 {
@@ -309,6 +391,26 @@ pub enum ProtocolHead {
 impl Default for ProtocolHead {
     fn default() -> Self {
         Self::V1(ProtocolHeadV1::new())
+    }
+}
+
+impl ProtocolHead {
+    pub fn topic_ephemeral(&self) -> bool {
+        match self {
+            ProtocolHead::V1(v1) => v1.topic_ephemeral(),
+        }
+    }
+
+    pub fn prohibit_instant(&self) -> bool {
+        match self {
+            ProtocolHead::V1(v1) => v1.prohibit_instant(),
+        }
+    }
+
+    pub fn prohibit_defer(&self) -> bool {
+        match self {
+            ProtocolHead::V1(v1) => v1.prohibit_defer(),
+        }
     }
 }
 

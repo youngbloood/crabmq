@@ -1,4 +1,3 @@
-use super::record;
 use super::{
     message_manager::MessageManager,
     record::{RecordManager, RecordManagerStrategy as _, RecordManagerStrategyTime, TimePtr},
@@ -21,15 +20,37 @@ pub struct Defer {
 }
 
 impl Defer {
-    pub fn new(dir: PathBuf, template: &str) -> Result<Self> {
+    pub fn new(
+        dir: PathBuf,
+        template: &str,
+        max_msg_num_per_file: u64,
+        max_size_per_file: u64,
+        fd_cache_size: usize,
+    ) -> Result<Self> {
         let dir = dir.join("defer");
-        let ready_record_manager =
-            RecordManagerStrategyTime::new(dir.join("ready_record"), false, template, 2)?;
-        let not_ready_record_manager =
-            RecordManagerStrategyTime::new(dir.join("not_ready_record"), false, template, 2)?;
-        let delete_record_manager =
-            RecordManagerStrategyTime::new(dir.join("delete_record"), false, template, 2)?;
-        let message_manager = MessageManager::new(dir.join("messages"), 10, 10000);
+        let ready_record_manager = RecordManagerStrategyTime::new(
+            dir.join("ready_record"),
+            false,
+            template,
+            fd_cache_size,
+        )?;
+        let not_ready_record_manager = RecordManagerStrategyTime::new(
+            dir.join("not_ready_record"),
+            false,
+            template,
+            fd_cache_size,
+        )?;
+        let delete_record_manager = RecordManagerStrategyTime::new(
+            dir.join("delete_record"),
+            false,
+            template,
+            fd_cache_size,
+        )?;
+        let message_manager = MessageManager::new(
+            dir.join("messages"),
+            max_msg_num_per_file,
+            max_size_per_file,
+        );
         let read_ptr = TimePtr::new(dir.clone(), dir.join("meta"));
         let consume_ptr = TimePtr::new(dir.clone(), dir.join("meta"));
 
@@ -192,14 +213,23 @@ mod tests {
         let defer = Defer::new(
             Path::new("../target/topic1").to_path_buf(),
             "{daily}/{hourly}/{minutely:5}",
+            10000,
+            100000,
+            100,
         )
         .unwrap();
         assert!(defer.load().await.is_ok());
     }
 
     async fn get_defer(p: PathBuf) -> Defer {
-        let defer =
-            Defer::new(p, "{daily}/{hourly}hour/mini{minutely:5}").expect("generate defer failed");
+        let defer = Defer::new(
+            p,
+            "{daily}/{hourly}hour/mini{minutely:5}",
+            10000,
+            100000,
+            100,
+        )
+        .expect("generate defer failed");
         assert!(defer.load().await.is_ok());
         defer
     }

@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use common::global::{self, Guard};
-use core::{crab::CrabMQOption, crabd::CrabMQD};
+use core::config::Config;
+use core::crabd::CrabMQD;
 use tokio::{select, signal};
 
 #[derive(Parser, Debug)]
-pub struct Config {
+pub struct ConfigFile {
     #[arg(short = 'c', long = "config", default_value = "")]
     filename: String,
 }
@@ -13,8 +14,8 @@ pub struct Config {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 解析是否有配置文件
-    let cfg = Config::parse();
-    let opt = CrabMQOption::from_config(cfg.filename.as_str())?;
+    let cfg = ConfigFile::parse();
+    let opt = Config::from_config(cfg.filename.as_str())?;
     // 初始化日志subcriber
     opt.init_log()?;
 

@@ -1,9 +1,8 @@
-use std::ops::DerefMut;
-
 use super::{ProtError, *};
 use crate::{Head, PROTOCOL_HEAD_LEN, SUPPORT_PROTOCOLS};
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
+use std::ops::DerefMut;
 use tracing::debug;
 
 #[derive(Default)]
@@ -13,7 +12,15 @@ pub struct ProtocolHeadV1 {
     channel: String,
     token: String,
     // reject_code: u8,
-    pub defer_msg_format: String,
+    crc: u16,
+    max_msg_num_per_file: u64,
+    max_size_per_file: u64,
+    compress_type: u8,
+    subscript_type: u8,
+    record_num_per_file: u64,
+    record_size_per_file: u64,
+    fd_cache_size: u64,
+    defer_msg_format: String,
 }
 
 impl Debug for ProtocolHeadV1 {
@@ -23,13 +30,21 @@ impl Debug for ProtocolHeadV1 {
             .field("head:topic-ephemeral", &self.topic_ephemeral())
             .field("head:channel-ephemeral", &self.channel_ephemeral())
             .field("head:heartbeat", &self.heartbeat())
-            .field("head:reject", &self.reject())
+            .field("head:reject", &self.is_reject())
             .field("head:reject-code", &self.reject_code())
             .field("protocol-version", &self.version())
             .field("msg-number", &self.msg_num())
             .field("topic-name", &self.topic)
             .field("channel-name", &self.channel)
             .field("token", &self.token)
+            .field("crc", &self.crc)
+            .field("max_msg_num_per_file", &self.max_msg_num_per_file)
+            .field("max_size_per_file", &self.max_size_per_file)
+            .field("compress_type", &self.compress_type)
+            .field("subscript_type", &self.subscript_type)
+            .field("record_num_per_file", &self.record_num_per_file)
+            .field("record_size_per_file", &self.record_size_per_file)
+            .field("fd_cache_size", &self.fd_cache_size)
             .field("defer_msg_format", &self.defer_msg_format)
             .finish()
     }
@@ -57,6 +72,14 @@ impl ProtocolHeadV1 {
             channel: String::new(),
             token: String::new(),
             defer_msg_format: String::new(),
+            max_msg_num_per_file: 0,
+            max_size_per_file: 0,
+            compress_type: 0,
+            subscript_type: 0,
+            crc: 0,
+            record_num_per_file: 0,
+            record_size_per_file: 0,
+            fd_cache_size: 0,
         }
     }
 
@@ -67,6 +90,14 @@ impl ProtocolHeadV1 {
             channel: String::new(),
             token: String::new(),
             defer_msg_format: String::new(),
+            max_msg_num_per_file: 0,
+            max_size_per_file: 0,
+            compress_type: 0,
+            subscript_type: 0,
+            crc: 0,
+            record_num_per_file: 0,
+            record_size_per_file: 0,
+            fd_cache_size: 0,
         }
     }
 
@@ -100,6 +131,70 @@ impl ProtocolHeadV1 {
     /// [`read_parse`] read the protocol head from reader.
     pub async fn read_parse(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
+
+        // parse crc
+        if self.has_crc() {
+            buf.resize(2, 0);
+            reader.read_exact(&mut buf).await?;
+            self.crc =
+                u16::from_be_bytes(buf.to_vec().try_into().expect("convert to 2 bytes failed"));
+        }
+
+        // parse [`max_msg_num_per_file`]
+        if self.has_max_msg_num_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.max_msg_num_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse [`max_size_per_file`]
+        if self.has_max_size_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.max_size_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse compress_type
+        if self.has_compress_type() {
+            buf.resize(1, 0);
+            reader.read_exact(&mut buf).await?;
+            self.compress_type =
+                u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
+        }
+
+        // parse subscript_type
+        if self.has_subscript_type() {
+            buf.resize(1, 0);
+            reader.read_exact(&mut buf).await?;
+            self.subscript_type =
+                u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
+        }
+
+        // parse [`record_num_per_file`]
+        if self.has_record_num_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.record_num_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse [`record_size_per_file`]
+        if self.has_record_size_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.record_size_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+        // parse [`fd_cache_size`]
+        if self.has_fd_cache_size() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.fd_cache_size =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
         // parse topic name
         buf.resize(self.topic_len() as usize, 0);
         reader.read_exact(&mut buf).await?;
@@ -159,7 +254,7 @@ impl ProtocolHeadV1 {
         if !self.is_req() {
             return Err(Error::from(ProtError::new(ERR_ZERO)));
         }
-        if self.reject() || self.reject_code() != 0 {
+        if self.is_reject() || self.reject_code() != 0 {
             return Err(Error::from(ProtError::new(ERR_SHOULD_NOT_REJECT_CODE)));
         }
         match self.action() {
@@ -197,6 +292,30 @@ impl ProtocolHeadV1 {
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut result = vec![];
         result.extend(self.head.bytes());
+        if self.has_crc() {
+            result.extend(self.crc.to_be_bytes());
+        }
+        if self.has_max_msg_num_per_file() {
+            result.extend(self.max_msg_num_per_file.to_be_bytes());
+        }
+        if self.has_max_size_per_file() {
+            result.extend(self.max_size_per_file.to_be_bytes());
+        }
+        if self.has_compress_type() {
+            result.extend(self.compress_type.to_be_bytes());
+        }
+        if self.has_subscript_type() {
+            result.extend(self.subscript_type.to_be_bytes());
+        }
+        if self.has_record_num_per_file() {
+            result.extend(self.record_num_per_file.to_be_bytes());
+        }
+        if self.has_record_size_per_file() {
+            result.extend(self.record_size_per_file.to_be_bytes());
+        }
+        if self.has_fd_cache_size() {
+            result.extend(self.fd_cache_size.to_be_bytes());
+        }
         result.extend(self.topic.as_bytes());
         result.extend(self.channel.as_bytes());
         result.extend(self.token.as_bytes());
@@ -260,6 +379,82 @@ impl ProtocolHeadV1 {
         }
         self.token = token.to_string();
         self.head.set_token_len(token.len() as u8);
+        Ok(())
+    }
+
+    pub fn get_max_msg_num_per_file(&self) -> u64 {
+        self.max_msg_num_per_file
+    }
+
+    pub fn set_max_msg_num_per_file(&mut self, num: u64) {
+        self.max_msg_num_per_file = num;
+        self.head.set_max_msg_num_per_file(true);
+    }
+
+    pub fn get_max_size_per_file(&self) -> u64 {
+        self.max_size_per_file
+    }
+
+    pub fn set_max_size_per_file(&mut self, num: u64) {
+        self.max_size_per_file = num;
+        self.head.set_max_size_per_file(true);
+    }
+
+    pub fn get_compress_type(&self) -> u8 {
+        self.compress_type
+    }
+
+    pub fn set_compress_type(&mut self, t: u8) {
+        self.compress_type = t;
+        self.head.set_compress_type(true);
+    }
+
+    pub fn get_subscript_type(&self) -> u8 {
+        self.subscript_type
+    }
+
+    pub fn set_subscript_type(&mut self, t: u8) {
+        self.subscript_type = t;
+        self.head.set_subscript_type(true);
+    }
+
+    pub fn get_record_num_per_file(&self) -> u64 {
+        self.record_num_per_file
+    }
+
+    pub fn set_record_num_per_file(&mut self, num: u64) {
+        self.record_num_per_file = num;
+        self.head.set_record_num_per_file(true);
+    }
+
+    pub fn get_record_size_per_file(&self) -> u64 {
+        self.record_size_per_file
+    }
+
+    pub fn set_record_size_per_file(&mut self, num: u64) {
+        self.record_size_per_file = num;
+        self.head.set_record_size_per_file(true);
+    }
+
+    pub fn get_fd_cache_size(&self) -> u64 {
+        self.fd_cache_size
+    }
+
+    pub fn set_fd_cache_size(&mut self, num: u64) {
+        self.fd_cache_size = num;
+        self.head.set_fd_cache_size(true);
+    }
+
+    pub fn get_defer_msg_format(&self) -> &str {
+        self.defer_msg_format.as_str()
+    }
+
+    pub fn set_defer_msg_format(&mut self, fmt: &str) -> Result<()> {
+        if fmt.len() > u8::MAX as usize {
+            return Err(anyhow!("too long defer format"));
+        }
+        self.defer_msg_format = fmt.to_string();
+        self.head.set_defer_format_len(fmt.len() as u8);
         Ok(())
     }
 }

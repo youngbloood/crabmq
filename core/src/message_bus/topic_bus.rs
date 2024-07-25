@@ -1,6 +1,6 @@
 use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
-    crab::CrabMQOption,
+    config::Config,
     storage::{PersistTopicOperation, STORAGE_TYPE_DUMMY},
     topic::Topic,
 };
@@ -18,7 +18,7 @@ use tracing::{debug, error, info};
 
 pub struct TopicBus {
     name: String,
-    opt: Guard<CrabMQOption>,
+    opt: Guard<Config>,
     use_memory: bool,
     start_message_loop: bool,
     start_defer_message_loop: bool,
@@ -40,11 +40,11 @@ pub struct TopicBus {
 
 impl TopicBus {
     pub async fn new(
-        opt: Guard<CrabMQOption>,
+        opt: Guard<Config>,
         topic: Guard<Topic>,
         s: Arc<Box<dyn PersistTopicOperation>>,
     ) -> Result<Self> {
-        if opt.get().message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
+        if opt.get().global.message_storage_type.as_str() == STORAGE_TYPE_DUMMY {
             return Ok(TopicBus {
                 opt,
                 name: topic.get().name.as_str().to_string(),
@@ -243,7 +243,7 @@ pub async fn topic_message_loop_defer(guard: Guard<TopicBus>) {
 }
 
 pub async fn new_topic_message(
-    opt: Guard<CrabMQOption>,
+    opt: Guard<Config>,
     topic: Guard<Topic>,
     s: Arc<Box<dyn PersistTopicOperation>>,
 ) -> Result<Guard<TopicBus>> {

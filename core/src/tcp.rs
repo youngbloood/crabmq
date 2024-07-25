@@ -1,5 +1,6 @@
 use crate::client::{io_loop, Client};
-use crate::crab::{Crab, CrabMQOption};
+use crate::config::Config;
+use crate::crab::Crab;
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use protocol::message::Message;
 use std::collections::HashMap;
@@ -16,14 +17,14 @@ pub struct TcpServer {
     out_sender: Sender<(String, Message)>,
     out_recver: Receiver<(String, Message)>,
 
-    opt: Guard<CrabMQOption>,
+    opt: Guard<Config>,
     tcp_listener: TcpListener,
     clients: HashMap<String, Guard<Client>>,
     crab: Guard<Crab>,
 }
 
 impl TcpServer {
-    pub fn new(opt: Guard<CrabMQOption>, tcp_listener: TcpListener, crab: Guard<Crab>) -> Self {
+    pub fn new(opt: Guard<Config>, tcp_listener: TcpListener, crab: Guard<Crab>) -> Self {
         let (in_tx, in_rx) = mpsc::channel(10000);
         let (out_tx, out_rx) = mpsc::channel(10000);
         crab.get_mut().out_sender = Some(out_tx.clone());

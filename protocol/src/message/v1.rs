@@ -40,11 +40,9 @@ impl MessageV1 {
 
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Self {
-        let mut msg = Self::default();
-        msg.head = self.head.clone();
-        msg.bodys = self.bodys.clone();
-
-        msg
+        let head = self.head.clone();
+        let bodys = self.bodys.clone();
+        Self::with(head, bodys)
     }
 
     pub fn get_topic(&self) -> &str {

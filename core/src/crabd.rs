@@ -1,19 +1,16 @@
-use crate::{
-    crab::{Crab, CrabMQOption},
-    tcp::TcpServer,
-};
+use crate::{config::Config, crab::Crab, tcp::TcpServer};
 use anyhow::{anyhow, Result};
 use common::global::{self, Guard};
 use tokio::{net::TcpListener, select};
 use tracing::info;
 
 pub struct CrabMQD {
-    opt: Guard<CrabMQOption>,
+    opt: Guard<Config>,
     crab: Guard<Crab>,
 }
 
 impl CrabMQD {
-    pub fn new(opt: Guard<CrabMQOption>) -> Result<Self> {
+    pub fn new(opt: Guard<Config>) -> Result<Self> {
         Ok(CrabMQD {
             crab: Guard::new(Crab::new(opt.clone())?),
             opt,
@@ -31,29 +28,29 @@ impl CrabMQD {
                 self.opt.clone(),
                 self.crab.clone(),
             )) => {
-                match r1{
-                    Ok(v)=>{
-                        if let Err(e)=v{
+                match r1 {
+                    Ok(v) => {
+                        if let Err(e) = v {
                             return Err(anyhow!(e));
                         }
                     }
-                    Err(e)=>{
+                    Err(e) => {
                         return Err(anyhow!(e));
                     }
                 }
             }
 
             // TODO: http server
-            _=global::CANCEL_TOKEN.cancelled()=>{
+            _ = global::CANCEL_TOKEN.cancelled() => {
                 return Err(anyhow!("process stopped"))
             }
         }
         Ok(())
     }
 
-    async fn serve_tcp(opt: Guard<CrabMQOption>, crab: Guard<Crab>) -> Result<()> {
+    async fn serve_tcp(opt: Guard<Config>, crab: Guard<Crab>) -> Result<()> {
         // start tcp serve
-        let tcp_port = opt.get().tcp_port;
+        let tcp_port = opt.get().global.tcp_port;
         let crab_clone: Guard<Crab> = crab.clone();
         let opt_arc = opt.clone();
 
@@ -73,7 +70,7 @@ impl CrabMQD {
     }
 }
 
-async fn binding(port: u32, opt: Guard<CrabMQOption>, crab: Guard<Crab>) -> Result<()> {
+async fn binding(port: u32, opt: Guard<Config>, crab: Guard<Crab>) -> Result<()> {
     info!("start listen port: {}", port);
     match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
         Err(err) => Err(anyhow!("listen port failed: {err}")),

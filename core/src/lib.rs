@@ -2,6 +2,7 @@ mod cache;
 mod channel;
 mod client;
 mod compress;
+pub mod config;
 pub mod conn;
 pub mod crab;
 pub mod crabd;

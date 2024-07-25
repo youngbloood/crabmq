@@ -22,18 +22,44 @@ pub struct Instant {
 }
 
 impl Instant {
-    pub fn new(dir: PathBuf) -> Result<Self> {
+    pub fn new(
+        dir: PathBuf,
+        max_msg_num_per_file: u64,
+        max_size_per_file: u64,
+        record_num_per_file: u64,
+        record_size_per_file: u64,
+        fd_cache_size: usize,
+    ) -> Result<Self> {
         let dir = dir.join("instant");
 
         let fd_cache = FdCache::new(10);
-        let mut ready_record_manager =
-            RecordManagerStrategyNormal::new(dir.join("ready_record"), false, 10, 10000, 20)?;
+        let mut ready_record_manager = RecordManagerStrategyNormal::new(
+            dir.join("ready_record"),
+            false,
+            record_num_per_file,
+            record_size_per_file,
+            fd_cache_size,
+        )?;
         ready_record_manager.with_fd_cache(fd_cache.clone());
-        let not_ready_record_manager =
-            RecordManagerStrategyNormal::new(dir.join("not_ready_record"), false, 1000, 10000, 20)?;
-        let delete_record_manager =
-            RecordManagerStrategyNormal::new(dir.join("delete_record"), false, 1000, 10000, 20)?;
-        let message_manager = MessageManager::new(dir.join("messages"), 100010, 10000);
+        let not_ready_record_manager = RecordManagerStrategyNormal::new(
+            dir.join("not_ready_record"),
+            false,
+            record_num_per_file,
+            record_size_per_file,
+            fd_cache_size,
+        )?;
+        let delete_record_manager = RecordManagerStrategyNormal::new(
+            dir.join("delete_record"),
+            false,
+            record_num_per_file,
+            record_size_per_file,
+            fd_cache_size,
+        )?;
+        let message_manager = MessageManager::new(
+            dir.join("messages"),
+            max_msg_num_per_file,
+            max_size_per_file,
+        );
         let read_ptr = NormalPtr::new(dir.join("meta"), fd_cache.clone());
         let consume_ptr = NormalPtr::new(dir.join("meta"), fd_cache.clone());
 
@@ -181,17 +207,32 @@ mod tests {
 
     #[test]
     fn test_instant_new() {
-        let instant = Instant::new(Path::new("../target/topic1").to_path_buf());
+        let instant = Instant::new(
+            Path::new("../target/topic1").to_path_buf(),
+            10000,
+            100000,
+            10000,
+            100000,
+            20,
+        );
     }
 
     #[tokio::test]
     async fn test_instant_load() {
-        let instant = Instant::new(Path::new("../target/topic1").to_path_buf()).unwrap();
+        let instant = Instant::new(
+            Path::new("../target/topic1").to_path_buf(),
+            10000,
+            100000,
+            10000,
+            100000,
+            20,
+        )
+        .unwrap();
         assert!(instant.load().await.is_ok());
     }
 
     async fn get_instant(p: PathBuf) -> Instant {
-        let instant = Instant::new(p).unwrap();
+        let instant = Instant::new(p, 10000, 100000, 10000, 100000, 20).unwrap();
         assert!(instant.load().await.is_ok());
         instant
     }

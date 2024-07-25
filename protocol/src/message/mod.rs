@@ -14,6 +14,7 @@ use tokio::io::BufReader;
 pub enum Message {
     V1(MessageV1),
 }
+
 impl Message {
     pub async fn parse_from(bts: &[u8]) -> Result<Self> {
         let mut reader = BufReader::new(bts);
@@ -46,7 +47,6 @@ impl Message {
         match head {
             ProtocolHead::V1(head_v1) => match bodys {
                 ProtocolBodys::V1(bodys_v1) => Ok(Message::V1(MessageV1::with(head_v1, bodys_v1))),
-                _ => Err(anyhow!("not match head and bodys")),
             },
         }
     }
@@ -84,7 +84,7 @@ impl Message {
 
     pub fn defer_message_format(&self) -> &str {
         match self {
-            Self::V1(v1) => v1.head.defer_msg_format.as_str(),
+            Self::V1(v1) => v1.head.get_defer_msg_format(),
         }
     }
 
@@ -208,6 +208,12 @@ impl Message {
     pub fn is_not_ready(&self) -> bool {
         match self {
             Self::V1(v1) => v1.bodys.list.first().unwrap().is_notready(),
+        }
+    }
+
+    pub fn get_head(&self) -> ProtocolHead {
+        match self {
+            Self::V1(v1) => ProtocolHead::V1(v1.head.clone()),
         }
     }
     //====================== just for head-body message ========================
