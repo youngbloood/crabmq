@@ -5,6 +5,7 @@ use bytes::BytesMut;
 use std::ops::DerefMut;
 use tracing::debug;
 
+const X25: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_IBM_SDLC);
 #[derive(Default)]
 pub struct ProtocolHeadV1 {
     head: Head,
@@ -274,8 +275,9 @@ impl ProtocolHeadV1 {
                     return Err(Error::from(ProtError::new(ERR_SHOULD_NOT_MSG)));
                 }
             }
-        }
-        Ok(())
+        };
+
+        self.validate_crc()
     }
 
     /// [`validate_resq`] validate the head is valid in protocol.
@@ -289,12 +291,38 @@ impl ProtocolHeadV1 {
         Ok(())
     }
 
+    fn validate_crc(&self) -> Result<()> {
+        if !self.has_crc() {
+            return Ok(());
+        }
+        let crc = self.crc;
+        let result = self.to_bytes();
+        let calc_crc = X25.checksum(&result);
+        if crc != calc_crc {
+            return Err(anyhow!("invalid crc value"));
+        }
+        Ok(())
+    }
+
+    /// as_bytes will set the crc value if it need.
     pub fn as_bytes(&self) -> Vec<u8> {
+        let mut result = self.to_bytes();
+        if self.has_crc() {
+            let crc = X25.checksum(&result);
+            let mut start = PROTOCOL_HEAD_LEN - 1;
+            for v in crc.to_be_bytes() {
+                result.insert(start, v);
+                start += 1;
+            }
+        }
+
+        result
+    }
+
+    /// to_bytes will not contain the crc value in Vec<u8>s
+    fn to_bytes(&self) -> Vec<u8> {
         let mut result = vec![];
         result.extend(self.head.bytes());
-        if self.has_crc() {
-            result.extend(self.crc.to_be_bytes());
-        }
         if self.has_max_msg_num_per_file() {
             result.extend(self.max_msg_num_per_file.to_be_bytes());
         }
