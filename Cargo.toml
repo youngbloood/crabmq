@@ -1,2 +1,3 @@
 [workspace]
 members = ["crabmqd", "common", "core", "cmd/client", "protocol"]
+# resolver = "2"

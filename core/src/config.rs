@@ -90,6 +90,9 @@ pub struct Global {
     #[arg(long = "message-cache-type", default_value = "memory")]
     /// 设置消息 [`cache`] 类型，从 [`message-storage-type`] 中读取的消息会放入该 [`cache`] 中
     pub message_cache_type: String,
+
+    #[arg(long = "allow-hosts", default_value = "*")]
+    pub allow_hosts:Vec<String>,
 }
 
 pub struct Config {

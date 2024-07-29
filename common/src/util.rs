@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use crossbeam::queue::SegQueue;
+use crossbeam::queue::{ArrayQueue, SegQueue};
 use futures::Future;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -123,11 +123,52 @@ pub fn dir_recursive(dir: PathBuf) -> Result<Vec<PathBuf>> {
 }
 
 #[derive(Debug)]
+struct UnboundSyncVec<T> {
+    array: ArrayQueue<T>,
+    seg:SegQueue<T>,
+}
+
+impl<T> UnboundSyncVec<T> {
+    fn with_capacity(cap: usize) -> Self {
+        UnboundSyncVec {
+            array:ArrayQueue::new(cap),
+            seg:SegQueue::new(),
+        }
+    }
+
+    fn push(&self,t:T) {
+        if self.array.is_full() {
+            self.seg.push(t);
+        }else{
+            let _ = self.array.push(t);
+        }
+    }
+
+    fn pop(&self) -> Option<T> {
+        if !self.array.is_empty(){
+            return self.array.pop();
+        }
+        self.seg.pop()
+    }
+
+    fn pop_all(&self) -> Vec<T> {
+        let mut res = vec![];
+        while let Some(v)=self.array.pop(){
+            res.push(v);
+        }
+        while let Some(v)=self.seg.pop(){
+            res.push(v);
+        }
+        res
+    }
+} 
+
+#[derive(Debug)]
 pub struct SwitcherVec<T> {
     switcher: AtomicBool,
 
-    t1: SegQueue<T>,
-    t2: SegQueue<T>,
+    t1:UnboundSyncVec<T>,
+    t2:UnboundSyncVec<T>,
 }
 
 unsafe impl<T> Send for SwitcherVec<T> {}
@@ -137,8 +178,8 @@ impl<T> Default for SwitcherVec<T> {
     fn default() -> Self {
         Self {
             switcher: Default::default(),
-            t1: Default::default(),
-            t2: Default::default(),
+            t1:UnboundSyncVec::with_capacity(10000),
+            t2:UnboundSyncVec::with_capacity(10000),
         }
     }
 }
@@ -147,9 +188,8 @@ impl<T> SwitcherVec<T> {
     pub fn with_capacity(cap: usize) -> Self {
         SwitcherVec {
             switcher: AtomicBool::new(false),
-
-            t1: SegQueue::new(),
-            t2: SegQueue::new(),
+            t1:UnboundSyncVec::with_capacity(cap),
+            t2:UnboundSyncVec::with_capacity(cap),
         }
     }
 
@@ -169,11 +209,7 @@ impl<T> SwitcherVec<T> {
             .compare_exchange(false, true, Relaxed, Relaxed)
             .is_ok()
         {
-            let mut list = vec![];
-            while let Some(v) = self.t1.pop() {
-                list.push(v);
-            }
-            return list;
+            return self.t1.pop_all();
         }
 
         if self
@@ -181,11 +217,7 @@ impl<T> SwitcherVec<T> {
             .compare_exchange(true, false, Relaxed, Relaxed)
             .is_ok()
         {
-            let mut list = vec![];
-            while let Some(v) = self.t2.pop() {
-                list.push(v);
-            }
-            return list;
+            return self.t2.pop_all();
         }
 
         Vec::new()
@@ -195,9 +227,7 @@ impl<T> SwitcherVec<T> {
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
-
     use crate::util::interval;
-
     use super::SwitcherVec;
 
     #[tokio::test]
