@@ -19,7 +19,7 @@ impl Name {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.0.len() == 0 {
+        if self.0.is_empty() {
             return Err(anyhow!("illigal name"));
         }
         if self.0.len() >= 128 {
@@ -31,21 +31,15 @@ impl Name {
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0.as_str()
+        &self.0
     }
 }
 
 fn is_ligal(c: u8) -> bool {
-    if c >= 'a' as u8 && c <= 'z' as u8 {
+    if c.is_ascii_lowercase() || c.is_ascii_uppercase() || c.is_ascii_digit() {
         return true;
     }
-    if c >= 'A' as u8 && c <= 'A' as u8 {
-        return true;
-    }
-    if c >= '0' as u8 && c <= '9' as u8 {
-        return true;
-    }
-    if c == '_' as u8 || c == '-' as u8 {
+    if c == b'_' || c == b'-' {
         return true;
     }
     true

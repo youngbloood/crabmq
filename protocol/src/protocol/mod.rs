@@ -101,6 +101,7 @@ pub const ACTION_AUTH: u8 = 9;
 *           token value.
 *           custom defer message store format.
 */
+#[derive(Clone)]
 pub struct Head([u8; PROTOCOL_HEAD_LEN]);
 
 impl Deref for Head {

@@ -4,11 +4,8 @@ use chrono::Local;
 use lazy_static::*;
 use parking_lot::Mutex;
 use snowflake::SnowflakeIdBucket;
-use std::{borrow::Borrow, cell::UnsafeCell, sync::Arc};
-use tokio::sync::{
-    broadcast::{self, Receiver, Sender},
-    mpsc::error::SendError,
-};
+use std::{cell::UnsafeCell, sync::Arc};
+use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use ulid_rs::Ulid;

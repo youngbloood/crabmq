@@ -6,7 +6,8 @@ use std::ops::DerefMut;
 use tracing::debug;
 
 const X25: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_IBM_SDLC);
-#[derive(Default)]
+
+#[derive(Default, Clone)]
 pub struct ProtocolHeadV1 {
     head: Head,
     topic: String,
@@ -490,7 +491,7 @@ impl ProtocolHeadV1 {
 /**
 * ProtocolBodys:
 */
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProtocolBodysV1 {
     sid: i64, // 标识一批次的message
     pub list: Vec<ProtocolBodyV1>,
@@ -643,7 +644,7 @@ impl ProtocolBodysV1 {
 *           id value(length determine by ID-LENGTH)
 *           body value(length determine by BODY-LENGTH)
 */
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ProtocolBodyV1 {
     head: [u8; PROTOCOL_BODY_HEAD_LEN],
     sid: i64,        // session_id: generate by ProtocolBodys

@@ -6,7 +6,7 @@ use v1::ProtocolBodyV1;
 use v1::ProtocolBodysV1;
 use v1::ProtocolHeadV1;
 // 一个标准的消息体
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MessageV1 {
     remote_addr: String,
     pub head: ProtocolHeadV1,

@@ -5,12 +5,12 @@ use crate::error::ProtError;
 use crate::protocol::{ProtocolBody, ProtocolBodys, ProtocolHead};
 use crate::v1::ProtocolBodysV1;
 use crate::{parse_body_from_reader, parse_head_from_reader};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use std::{pin::Pin, result::Result as StdResult};
 use tokio::io::BufReader;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Message {
     V1(MessageV1),
 }

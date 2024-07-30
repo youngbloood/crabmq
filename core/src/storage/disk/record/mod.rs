@@ -53,7 +53,7 @@ pub trait RecordManagerStrategy {
     async fn persist(&self) -> Result<()>;
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct MessageRecord {
     pub factor: u64,
     pub offset: u64,
@@ -70,18 +70,6 @@ impl MessageRecord {
             "{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{}{SPLIT_CELL}{:0>16}{SPLIT_CELL}{:0>16}\n",
             self.factor, self.offset, self.length, self.id, self.defer_time, self.consume_time,self.delete_time
         )
-    }
-
-    pub fn clone(&self) -> Self {
-        MessageRecord {
-            factor: self.factor,
-            offset: self.offset,
-            length: self.length,
-            id: self.id.as_str().to_string(),
-            defer_time: self.defer_time,
-            consume_time: self.consume_time,
-            delete_time: self.delete_time,
-        }
     }
 
     pub fn parse_from(line: &str) -> Result<Self> {
@@ -132,32 +120,29 @@ impl MessageRecord {
     }
 }
 
-// #[derive(Debug)]
-// struct FileHandler {
-//     fd: File,
+#[cfg(test)]
+mod tests {
+    use super::MessageRecord;
 
-//     /// 最后使用的时间戳
-//     last: u64,
-// }
+    #[test]
+    fn test_message_record_clone() {
+        let record = MessageRecord {
+            factor: 1,
+            offset: 2,
+            length: 3,
+            id: "1111111".to_string(),
+            defer_time: 4,
+            consume_time: 5,
+            delete_time: 6,
+        };
 
-// impl FileHandler {
-//     fn new(fd: File) -> Self {
-//         FileHandler {
-//             fd,
-//             last: Local::now().timestamp() as u64,
-//         }
-//     }
-// }
+        let mut record_clone = record.clone();
+        println!("{:p}", &record.id);
+        println!("{:p}", &record_clone.id);
 
-// impl Deref for FileHandler {
-//     type Target = File;
-//     fn deref(&self) -> &Self::Target {
-//         &self.fd
-//     }
-// }
-
-// impl DerefMut for FileHandler {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self.fd
-//     }
-// }
+        record_clone.id = "222222".to_string();
+        record_clone.factor = 11;
+        println!("{:?}", &record);
+        println!("{:?}", &record_clone);
+    }
+}

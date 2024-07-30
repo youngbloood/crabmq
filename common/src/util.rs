@@ -123,29 +123,33 @@ pub fn dir_recursive(dir: PathBuf) -> Result<Vec<PathBuf>> {
 }
 
 #[derive(Debug)]
-struct UnboundSyncVec<T> {
+struct UnboundSyncVec<T>
+where
+    T: Clone + Sync + Send,
+{
     array: ArrayQueue<T>,
-    seg:SegQueue<T>,
+    seg: SegQueue<T>,
 }
 
-impl<T> UnboundSyncVec<T> {
+impl<T> UnboundSyncVec<T>
+where
+    T: Clone + Sync + Send,
+{
     fn with_capacity(cap: usize) -> Self {
         UnboundSyncVec {
-            array:ArrayQueue::new(cap),
-            seg:SegQueue::new(),
+            array: ArrayQueue::new(cap),
+            seg: SegQueue::new(),
         }
     }
 
-    fn push(&self,t:T) {
-        if self.array.is_full() {
+    fn push(&self, t: T) {
+        if self.array.push(t.clone()).is_err() {
             self.seg.push(t);
-        }else{
-            let _ = self.array.push(t);
         }
     }
 
     fn pop(&self) -> Option<T> {
-        if !self.array.is_empty(){
+        if !self.array.is_empty() {
             return self.array.pop();
         }
         self.seg.pop()
@@ -153,43 +157,52 @@ impl<T> UnboundSyncVec<T> {
 
     fn pop_all(&self) -> Vec<T> {
         let mut res = vec![];
-        while let Some(v)=self.array.pop(){
+        while let Some(v) = self.array.pop() {
             res.push(v);
         }
-        while let Some(v)=self.seg.pop(){
+        while let Some(v) = self.seg.pop() {
             res.push(v);
         }
         res
     }
-} 
-
-#[derive(Debug)]
-pub struct SwitcherVec<T> {
-    switcher: AtomicBool,
-
-    t1:UnboundSyncVec<T>,
-    t2:UnboundSyncVec<T>,
 }
 
-unsafe impl<T> Send for SwitcherVec<T> {}
-unsafe impl<T> Sync for SwitcherVec<T> {}
+#[derive(Debug)]
+pub struct SwitcherVec<T>
+where
+    T: Clone + Sync + Send,
+{
+    switcher: AtomicBool,
 
-impl<T> Default for SwitcherVec<T> {
+    t1: UnboundSyncVec<T>,
+    t2: UnboundSyncVec<T>,
+}
+
+// unsafe impl<T> Send for SwitcherVec<T> where T:Clone+Send{}
+// unsafe impl<T> Sync for SwitcherVec<T> where T:Clone+Sync{}
+
+impl<T> Default for SwitcherVec<T>
+where
+    T: Clone + Sync + Send,
+{
     fn default() -> Self {
         Self {
             switcher: Default::default(),
-            t1:UnboundSyncVec::with_capacity(10000),
-            t2:UnboundSyncVec::with_capacity(10000),
+            t1: UnboundSyncVec::with_capacity(10000),
+            t2: UnboundSyncVec::with_capacity(10000),
         }
     }
 }
 
-impl<T> SwitcherVec<T> {
+impl<T> SwitcherVec<T>
+where
+    T: Clone + Sync + Send,
+{
     pub fn with_capacity(cap: usize) -> Self {
         SwitcherVec {
             switcher: AtomicBool::new(false),
-            t1:UnboundSyncVec::with_capacity(cap),
-            t2:UnboundSyncVec::with_capacity(cap),
+            t1: UnboundSyncVec::with_capacity(cap),
+            t2: UnboundSyncVec::with_capacity(cap),
         }
     }
 
@@ -226,9 +239,9 @@ impl<T> SwitcherVec<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
-    use crate::util::interval;
     use super::SwitcherVec;
+    use crate::util::interval;
+    use std::{sync::Arc, time::Duration};
 
     #[tokio::test]
     async fn test_switcher_push_and_pop() {
