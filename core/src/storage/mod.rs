@@ -13,6 +13,8 @@ use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
 use protocol::message::{convert_to_resp, Message};
 use protocol::ProtocolHead;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::{sync::atomic::AtomicU64, time::Duration};
@@ -92,6 +94,8 @@ pub trait PersistTopicOperation: Send + Sync {
     /// It should not return message that has been consumed, deleted, or not ready.
     async fn next_instant(&self, block: bool) -> Result<Option<Message>>;
 
+    /// get the topic meta info.
+    fn get_meta(&self) -> Result<TopicMeta>;
     // mark the message of id has been consumed.
     // async fn comsume(&self, id: &str) -> Result<()>;
     // TODO: 增加如下接口
@@ -244,4 +248,47 @@ pub async fn new_storage_wrapper(
     let guard = Guard::new(storage_wrapper);
     tokio::spawn(storage_wrapper_loop(guard.clone()));
     Ok(guard)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TopicMeta {
+    pub prohibit_instant: bool,
+    pub prohibit_defer: bool,
+    pub defer_message_format: String,
+    pub max_msg_num_per_file: u64,
+    pub max_size_per_file: u64,
+    pub compress_type: u8,
+    pub subscribe_type: u8,
+    pub record_num_per_file: u64,
+    pub record_size_per_file: u64,
+    pub fd_cache_size: u64,
+}
+
+impl TopicMeta {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        prohibit_instant: bool,
+        prohibit_defer: bool,
+        defer_message_format: String,
+        max_msg_num_per_file: u64,
+        max_size_per_file: u64,
+        compress_type: u8,
+        subscribe_type: u8,
+        record_num_per_file: u64,
+        record_size_per_file: u64,
+        fd_cache_size: u64,
+    ) -> Self {
+        TopicMeta {
+            prohibit_instant,
+            prohibit_defer,
+            defer_message_format,
+            max_msg_num_per_file,
+            max_size_per_file,
+            compress_type,
+            subscribe_type,
+            record_num_per_file,
+            record_size_per_file,
+            fd_cache_size,
+        }
+    }
 }

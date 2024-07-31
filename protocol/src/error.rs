@@ -19,6 +19,8 @@ pub const ERR_MSG_NUM_NOT_EQUAL: u8 = 7;
 pub const ERR_TOPIC_PROHIBIT_TYPE: u8 = 8;
 pub const ERR_TOPIC_PROHIBIT_DEFER: u8 = 9;
 pub const ERR_TOPIC_PROHIBIT_INSTANT: u8 = 10;
+pub const ERR_SUBSCRIBE_TYPE_IN_CHANNEL: u8 = 11;
+pub const ERR_SUBSCRIBE_TYPE_IN_CLIENT: u8 = 12;
 
 lazy_static! {
     static ref REASON_MAP: HashMap<u8, String> = {

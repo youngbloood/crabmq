@@ -1,5 +1,8 @@
 use super::{ProtError, *};
-use crate::{Head, PROTOCOL_HEAD_LEN, SUPPORT_PROTOCOLS};
+use crate::{
+    consts::{split_subscribe_type, *},
+    Head, PROTOCOL_HEAD_LEN, SUPPORT_PROTOCOLS,
+};
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use std::ops::DerefMut;
@@ -18,7 +21,7 @@ pub struct ProtocolHeadV1 {
     max_msg_num_per_file: u64,
     max_size_per_file: u64,
     compress_type: u8,
-    subscript_type: u8,
+    subscribe_type: u8,
     record_num_per_file: u64,
     record_size_per_file: u64,
     fd_cache_size: u64,
@@ -43,7 +46,7 @@ impl Debug for ProtocolHeadV1 {
             .field("max_msg_num_per_file", &self.max_msg_num_per_file)
             .field("max_size_per_file", &self.max_size_per_file)
             .field("compress_type", &self.compress_type)
-            .field("subscript_type", &self.subscript_type)
+            .field("subscribe_type", &self.subscribe_type)
             .field("record_num_per_file", &self.record_num_per_file)
             .field("record_size_per_file", &self.record_size_per_file)
             .field("fd_cache_size", &self.fd_cache_size)
@@ -77,7 +80,7 @@ impl ProtocolHeadV1 {
             max_msg_num_per_file: 0,
             max_size_per_file: 0,
             compress_type: 0,
-            subscript_type: 0,
+            subscribe_type: 0,
             crc: 0,
             record_num_per_file: 0,
             record_size_per_file: 0,
@@ -95,7 +98,7 @@ impl ProtocolHeadV1 {
             max_msg_num_per_file: 0,
             max_size_per_file: 0,
             compress_type: 0,
-            subscript_type: 0,
+            subscribe_type: 0,
             crc: 0,
             record_num_per_file: 0,
             record_size_per_file: 0,
@@ -166,11 +169,11 @@ impl ProtocolHeadV1 {
                 u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
         }
 
-        // parse subscript_type
-        if self.has_subscript_type() {
+        // parse subscribe_type
+        if self.has_subscribe_type() {
             buf.resize(1, 0);
             reader.read_exact(&mut buf).await?;
-            self.subscript_type =
+            self.subscribe_type =
                 u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
         }
 
@@ -278,6 +281,14 @@ impl ProtocolHeadV1 {
             }
         };
 
+        let (sub_channel, sub_client) = split_subscribe_type(self.subscribe_type);
+        if sub_channel > SUBSCRIBE_TYPE_RAND_PROPERTY_IN_CHANNEL {
+            return Err(Error::from(ProtError::new(ERR_SUBSCRIBE_TYPE_IN_CHANNEL)));
+        }
+        if sub_client > SUBSCRIBE_TYPE_RAND_PROPERTY_IN_CLIENT {
+            return Err(Error::from(ProtError::new(ERR_SUBSCRIBE_TYPE_IN_CLIENT)));
+        }
+
         self.validate_crc()
     }
 
@@ -333,8 +344,8 @@ impl ProtocolHeadV1 {
         if self.has_compress_type() {
             result.extend(self.compress_type.to_be_bytes());
         }
-        if self.has_subscript_type() {
-            result.extend(self.subscript_type.to_be_bytes());
+        if self.has_subscribe_type() {
+            result.extend(self.subscribe_type.to_be_bytes());
         }
         if self.has_record_num_per_file() {
             result.extend(self.record_num_per_file.to_be_bytes());
@@ -438,13 +449,13 @@ impl ProtocolHeadV1 {
         self.head.set_compress_type(true);
     }
 
-    pub fn get_subscript_type(&self) -> u8 {
-        self.subscript_type
+    pub fn get_subscribe_type(&self) -> u8 {
+        self.subscribe_type
     }
 
-    pub fn set_subscript_type(&mut self, t: u8) {
-        self.subscript_type = t;
-        self.head.set_subscript_type(true);
+    pub fn set_subscribe_type(&mut self, t: u8) {
+        self.subscribe_type = t;
+        self.head.set_subscribe_type(true);
     }
 
     pub fn get_record_num_per_file(&self) -> u64 {

@@ -118,10 +118,11 @@ where
     pub fn get_mut(&self) -> &mut T {
         unsafe { self.inner.get().as_mut() }.unwrap()
     }
+}
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn clone(&self) -> Self {
-        Guard {
+impl<T> Clone for Guard<T> {
+    fn clone(&self) -> Self {
+        Self {
             inner: self.inner.clone(),
         }
     }

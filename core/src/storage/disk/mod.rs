@@ -4,7 +4,7 @@ mod instant;
 mod message_manager;
 mod record;
 
-use super::{PersistStorageOperation, PersistTopicOperation};
+use super::{PersistStorageOperation, PersistTopicOperation, TopicMeta};
 use anyhow::{anyhow, Error, Result};
 use common::{
     global::{Guard, CANCEL_TOKEN},
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    ops::Deref,
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -64,7 +65,7 @@ impl StorageDisk {
         let topic_name = dir_name.file_name().unwrap().to_str().unwrap();
         info!("LAZY: load topic[{topic_name}]...");
 
-        let meta = TopicMeta::read_from(dir_name.join("meta"))?;
+        let meta = TopicMetaWrapper::read_from(dir_name.join("meta"))?;
 
         let defer = Defer::new(
             dir_name.clone(),
@@ -143,7 +144,7 @@ impl StorageDisk {
                 cfg.default_fd_cache_size as _,
             )?;
 
-            let topic_meta = TopicMeta::new(
+            let topic_meta = TopicMetaWrapper::new(
                 parent.join("meta"),
                 head.prohibit_instant(),
                 head.prohibit_defer(),
@@ -151,7 +152,7 @@ impl StorageDisk {
                 cfg.default_max_msg_num_per_file,
                 cfg.default_max_size_per_file,
                 cfg.default_compress_type,
-                cfg.default_subscript_type,
+                cfg.default_subscribe_type,
                 cfg.default_record_num_per_file,
                 cfg.default_record_size_per_file,
                 cfg.default_fd_cache_size,
@@ -295,23 +296,20 @@ impl TopicMessage {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct TopicMeta {
-    #[serde(skip)]
+struct TopicMetaWrapper {
     filename: PathBuf,
-    prohibit_instant: bool,
-    prohibit_defer: bool,
-    defer_message_format: String,
-    max_msg_num_per_file: u64,
-    max_size_per_file: u64,
-    compress_type: u8,
-    subscript_type: u8,
-    record_num_per_file: u64,
-    record_size_per_file: u64,
-    fd_cache_size: u64,
+    meta: TopicMeta,
 }
 
-impl TopicMeta {
+impl Deref for TopicMetaWrapper {
+    type Target = TopicMeta;
+
+    fn deref(&self) -> &Self::Target {
+        &self.meta
+    }
+}
+
+impl TopicMetaWrapper {
     #[allow(clippy::too_many_arguments)]
     fn new(
         filename: PathBuf,
@@ -321,30 +319,32 @@ impl TopicMeta {
         max_msg_num_per_file: u64,
         max_size_per_file: u64,
         compress_type: u8,
-        subscript_type: u8,
+        subscribe_type: u8,
         record_num_per_file: u64,
         record_size_per_file: u64,
         fd_cache_size: u64,
     ) -> Self {
-        TopicMeta {
+        TopicMetaWrapper {
             filename,
-            prohibit_instant,
-            prohibit_defer,
-            defer_message_format,
-            max_msg_num_per_file,
-            max_size_per_file,
-            compress_type,
-            subscript_type,
-            record_num_per_file,
-            record_size_per_file,
-            fd_cache_size,
+            meta: TopicMeta::new(
+                prohibit_instant,
+                prohibit_defer,
+                defer_message_format,
+                max_msg_num_per_file,
+                max_size_per_file,
+                compress_type,
+                subscribe_type,
+                record_num_per_file,
+                record_size_per_file,
+                fd_cache_size,
+            ),
         }
     }
 
     fn read_from(filename: PathBuf) -> Result<Self> {
-        let out = fs::read_to_string(filename)?;
+        let out = fs::read_to_string(&filename)?;
         let meta: TopicMeta = serde_json::from_str(&out)?;
-        Ok(meta)
+        Ok(TopicMetaWrapper { filename, meta })
     }
 
     fn persist(&self) -> Result<()> {
@@ -354,7 +354,7 @@ impl TopicMeta {
             .write(true)
             .read(true)
             .open(&self.filename)?;
-        let out = serde_json::to_string_pretty(&self)?;
+        let out = serde_json::to_string_pretty(&self.meta)?;
         fd.write_all(out.as_bytes())?;
         Ok(())
     }
@@ -364,11 +364,11 @@ struct TopicMessageBase {
     name: String,
     instant: Instant,
     defer: Defer,
-    meta: TopicMeta,
+    meta: TopicMetaWrapper,
 }
 
 impl TopicMessageBase {
-    fn new(name: &str, instant: Instant, defer: Defer, meta: TopicMeta) -> Self {
+    fn new(name: &str, instant: Instant, defer: Defer, meta: TopicMetaWrapper) -> Self {
         TopicMessageBase {
             name: name.to_string(),
             instant,
@@ -583,6 +583,9 @@ impl PersistTopicOperation for TopicMessage {
         }
     }
 
+    fn get_meta(&self) -> Result<TopicMeta> {
+        Ok(self.guard.get().meta.meta.clone())
+    }
     // async fn push(&self, msg: Message) -> Result<()> {
     //     if msg.is_defer() {
     //         self.get().defer.push(msg).await?;

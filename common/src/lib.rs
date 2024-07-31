@@ -1,6 +1,8 @@
 pub mod global;
 pub mod util;
 
+pub use util::*;
+
 use anyhow::{anyhow, Result};
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;

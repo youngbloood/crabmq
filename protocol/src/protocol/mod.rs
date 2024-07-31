@@ -73,7 +73,7 @@ pub const ACTION_AUTH: u8 = 9;
 *           1bit: set [`max_msg_num_per_file`].
 *           1bit: set [`max_size_per_file`].
 *           1bit: set [`compress_type`].
-*           1bit: set [`subscript_type`].
+*           1bit: set [`subscribe_type`].
 *           1bit: set [`record_num_per_file`].
 *           1bit: set [`record_size_per_file`].
 *           1bit: set [`fd_cache_size`].
@@ -92,7 +92,7 @@ pub const ACTION_AUTH: u8 = 9;
 *           8 bytes [`max_msg_num_per_file`]
 *           8 bytes [`max_size_per_file`]
 *           1 byte [`compress_type`]
-*           1 byte [`subscript_type`]
+*           1 byte [`subscribe_type`], front 4 bits is subscribe-type-in-channel, back 4 bits is subscribe-type-in-client
 *           8 bytes [`record_num_per_file`]
 *           8 bytes [`record_size_per_file`]
 *           8 bytes [`fd_cache_size`]
@@ -247,11 +247,11 @@ impl Head {
         self
     }
 
-    pub fn has_subscript_type(&self) -> bool {
+    pub fn has_subscribe_type(&self) -> bool {
         self.0[2].is_1(4)
     }
 
-    pub fn set_subscript_type(&mut self, has: bool) -> &mut Self {
+    pub fn set_subscribe_type(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(2, 4, has);
         self
     }

@@ -3,9 +3,11 @@ use crate::conn::Conn;
 use crate::crab::Crab;
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
+use common::Weight;
 use protocol::message::Message;
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -19,6 +21,31 @@ const CLIENT_STATE_NOT_READY: ClientState = 1;
 
 pub trait ClientResp {
     fn send(&mut self);
+}
+
+#[derive(Clone)]
+pub struct ClientWrapper {
+    inner: Guard<Client>,
+}
+
+impl Weight for ClientWrapper {
+    fn get_weight(&self) -> usize {
+        self.inner.get().get_weight()
+    }
+}
+
+impl Deref for ClientWrapper {
+    type Target = Guard<Client>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ClientWrapper {
+    pub fn new(guard: Guard<Client>) -> Self {
+        ClientWrapper { inner: guard }
+    }
 }
 
 // 表示一个链接的客户端
@@ -38,6 +65,7 @@ pub struct Client {
 
     state: ClientState,
 
+    weight: usize,
     crab: Guard<Crab>,
 }
 
@@ -76,11 +104,16 @@ impl Client {
 
             msg_rx: UnsafeCell::new(rx),
             msg_tx: UnsafeCell::new(tx),
+            weight: 0,
         }
     }
 
     pub fn builder(self) -> Guard<Self> {
         Guard::new(self)
+    }
+
+    pub fn get_weight(&self) -> usize {
+        self.weight
     }
 
     pub async fn send_msg(&self, msg: Message) -> Result<()> {

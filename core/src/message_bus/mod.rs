@@ -13,7 +13,6 @@ use protocol::{
     message::{convert_to_resp, Message},
     protocol::*,
 };
-use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;
 use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer};
@@ -98,7 +97,7 @@ impl MessageBus {
                 .get_mut()
                 .get_or_create_topic(topic_name, head)
                 .await?;
-            let topic = new_topic(self.opt.clone(), topic_name, head.topic_ephemeral())?;
+            let topic = new_topic(self.opt.clone(), topic_name, topic_storage.get_meta()?)?;
 
             let topic_message = new_topic_message(self.opt.clone(), topic, topic_storage).await?;
             self.topics
@@ -157,7 +156,13 @@ impl MessageBus {
 
     pub async fn nop(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
 
-    pub async fn touch(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn touch(&mut self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {
+        let topic_name = msg.get_topic();
+        match self.get_or_create_topic(topic_name, &msg.get_head()).await {
+            Ok(_) => todo!(),
+            Err(_) => todo!(),
+        }
+    }
 
     pub async fn sub(
         &mut self,

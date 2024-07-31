@@ -1,4 +1,4 @@
-use super::{PersistStorageOperation, PersistTopicOperation};
+use super::{PersistStorageOperation, PersistTopicOperation, TopicMeta};
 use crate::cache::{CacheWrapper, CACHE_TYPE_MEM};
 use anyhow::{Error, Result};
 use common::global::Guard;
@@ -29,18 +29,27 @@ impl Dummy {
         self.topics.contains_key(key)
     }
 
-    pub fn insert(&self, key: &str, head: &ProtocolHead) {
+    pub fn insert(&self, key: &str, head: &ProtocolHead) -> Result<TopicDummy> {
         match head {
-            ProtocolHead::V1(v1) => self.topics.insert(
-                key.to_string(),
-                Guard::new(TopicDummyBase::new(
-                    key,
-                    v1.prohibit_defer(),
+            ProtocolHead::V1(v1) => {
+                let meta = TopicMeta::new(
                     v1.prohibit_instant(),
-                    1000,
-                )),
-            ),
-        };
+                    v1.prohibit_defer(),
+                    v1.get_defer_msg_format().to_string(),
+                    v1.get_max_msg_num_per_file(),
+                    v1.get_max_size_per_file(),
+                    v1.get_compress_type(),
+                    v1.get_subscribe_type(),
+                    v1.get_record_num_per_file(),
+                    v1.get_record_size_per_file(),
+                    v1.get_fd_cache_size(),
+                );
+
+                let topic_dummy = Guard::new(TopicDummyBase::new(key, meta));
+                self.topics.insert(key.to_owned(), topic_dummy.clone());
+                Ok(topic_dummy)
+            }
+        }
     }
 
     fn get_or_create_topic_dummy(
@@ -57,16 +66,7 @@ impl Dummy {
             return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
         }
 
-        let topic_dummy = Guard::new(TopicDummyBase::new(
-            topic_name,
-            head.prohibit_defer(),
-            head.prohibit_instant(),
-            100,
-        ));
-        self.topics
-            .insert(topic_name.to_owned(), topic_dummy.clone());
-
-        Ok(topic_dummy)
+        self.insert(topic_name, head)
     }
 }
 
@@ -113,21 +113,21 @@ type TopicDummy = Guard<TopicDummyBase>;
 
 pub struct TopicDummyBase {
     name: String,
-    prohibit_defer: bool,
     defer: CacheWrapper,
-    prohibit_instant: bool,
     instant: CacheWrapper,
+    meta: TopicMeta,
 }
 
 impl TopicDummyBase {
-    pub fn new(name: &str, prohibit_defer: bool, prohibit_instant: bool, buf: usize) -> Self {
-        let defer = if prohibit_defer {
+    pub fn new(name: &str, meta: TopicMeta) -> Self {
+        let buf = 100;
+        let defer = if meta.prohibit_defer {
             CacheWrapper::new(CACHE_TYPE_MEM, 0, 0)
         } else {
             CacheWrapper::new(CACHE_TYPE_MEM, buf, buf / 2)
         };
 
-        let instant = if prohibit_defer {
+        let instant = if meta.prohibit_defer {
             CacheWrapper::new(CACHE_TYPE_MEM, 0, 0)
         } else {
             CacheWrapper::new(CACHE_TYPE_MEM, buf, buf / 2)
@@ -135,23 +135,22 @@ impl TopicDummyBase {
 
         TopicDummyBase {
             name: name.to_string(),
-            prohibit_defer,
             defer,
-            prohibit_instant,
             instant,
+            meta,
         }
     }
 
     async fn push(&self, msg: Message) -> Result<()> {
         if msg.is_defer() {
-            if self.prohibit_defer {
+            if self.meta.prohibit_defer {
                 return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_DEFER)));
             }
             self.defer.push(msg).await?;
             return Ok(());
         }
 
-        if self.prohibit_instant {
+        if self.meta.prohibit_instant {
             return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_INSTANT)));
         }
         self.instant.push(msg).await?;
@@ -166,7 +165,7 @@ impl PersistTopicOperation for TopicDummy {
     }
 
     fn prohibit_defer(&self) -> bool {
-        self.get().prohibit_defer
+        self.get().meta.prohibit_defer
     }
 
     async fn seek_defer(&self, block: bool) -> Result<Option<Message>> {
@@ -180,7 +179,7 @@ impl PersistTopicOperation for TopicDummy {
     }
 
     fn prohibit_instant(&self) -> bool {
-        self.get().prohibit_instant
+        self.get().meta.prohibit_instant
     }
 
     async fn seek_instant(&self, block: bool) -> Result<Option<Message>> {
@@ -190,5 +189,9 @@ impl PersistTopicOperation for TopicDummy {
 
     async fn next_instant(&self, block: bool) -> Result<Option<Message>> {
         Ok(self.get().instant.pop(block).await)
+    }
+
+    fn get_meta(&self) -> Result<TopicMeta> {
+        Ok(self.get().meta.clone())
     }
 }

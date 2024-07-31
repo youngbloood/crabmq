@@ -2,7 +2,7 @@ use clap::Parser;
 use protocol::ProtocolHead;
 use std::path::PathBuf;
 
-#[derive(Parser, Debug, serde::Deserialize)]
+#[derive(Parser, Debug, serde::Deserialize, Clone)]
 pub struct DiskConfig {
     #[arg(long = "storage-dir", default_value = "./message")]
     pub storage_dir: PathBuf,
@@ -20,47 +20,30 @@ pub struct DiskConfig {
     pub default_defer_message_format: String,
 
     /// [`max_num_per_file`] * 100 约等于 10G
-    #[arg(long = "max-num-per-file", default_value_t = 107374180)]
+    ///
     /// 每个文件最多存放消息数量
+    #[arg(long = "max-num-per-file", default_value_t = 107374180)]
     pub default_max_msg_num_per_file: u64,
 
-    #[arg(long = "max-size-per-file", default_value_t = 10737418240)]
     /// 每个文件最多存放消息大小(Byte)，默认5G
+    #[arg(long = "max-size-per-file", default_value_t = 10737418240)]
     pub default_max_size_per_file: u64,
 
     #[arg(long = "compress-type", default_value_t = 0)]
     pub default_compress_type: u8,
 
     #[arg(long = "subscript-type", default_value_t = 0)]
-    pub default_subscript_type: u8,
+    pub default_subscribe_type: u8,
 
     #[arg(long = "record-num-per-file", default_value_t = 107374180)]
     pub default_record_num_per_file: u64,
 
-    #[arg(long = "record-size-per-file", default_value_t = 10737418240)]
     /// 每个文件最多存放记录大小(Byte)，默认5G
+    #[arg(long = "record-size-per-file", default_value_t = 10737418240)]
     pub default_record_size_per_file: u64,
 
     #[arg(long = "fd-cache-size", default_value_t = 20)]
     pub default_fd_cache_size: u64,
-}
-
-impl Clone for DiskConfig {
-    fn clone(&self) -> Self {
-        Self {
-            storage_dir: self.storage_dir.clone(),
-            persist_period: self.persist_period,
-            persist_factor: self.persist_factor,
-            default_defer_message_format: self.default_defer_message_format.clone(),
-            default_max_msg_num_per_file: self.default_max_msg_num_per_file,
-            default_max_size_per_file: self.default_max_size_per_file,
-            default_compress_type: self.default_compress_type,
-            default_subscript_type: self.default_subscript_type,
-            default_record_num_per_file: self.default_record_num_per_file,
-            default_record_size_per_file: self.default_record_size_per_file,
-            default_fd_cache_size: self.default_fd_cache_size,
-        }
-    }
 }
 
 impl DiskConfig {
@@ -80,8 +63,8 @@ impl DiskConfig {
                 if v1.get_compress_type() != 0 {
                     res.default_compress_type = v1.get_compress_type();
                 }
-                if v1.get_subscript_type() != 0 {
-                    res.default_subscript_type = v1.get_subscript_type();
+                if v1.get_subscribe_type() != 0 {
+                    res.default_subscribe_type = v1.get_subscribe_type();
                 }
                 if v1.get_record_num_per_file() != 0 {
                     res.default_record_num_per_file = v1.get_record_num_per_file();
