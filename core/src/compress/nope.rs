@@ -1,6 +1,6 @@
 use super::Compress;
 use anyhow::Result;
-use protocol::message::Message;
+use protocol::message::{Message, MessageOperation as _};
 
 pub struct Nope;
 

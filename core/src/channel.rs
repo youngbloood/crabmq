@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use common::{global::Guard, Name, OrderedMap, Weight};
-use protocol::{consts::*, message::Message};
+use protocol::{consts::*, message::Message, protocol::Protocol};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 #[derive(Clone)]
@@ -44,6 +44,7 @@ pub struct Channel {
     pub_num: u64, // publisher的数量
     sub_num: u64, // subscriber的数量
 
+    // buffer
     msg_sender: Sender<Message>,
     msg_recver: Receiver<Message>,
 
@@ -82,7 +83,7 @@ impl Channel {
             .insert(addr.to_string(), ClientWrapper::new(client_guard));
     }
 
-    pub async fn send_msg(&self, msg: Message) -> Result<()> {
+    pub async fn send_msg(&self, msg: Protocol) -> Result<()> {
         let (_, sub_client) = split_subscribe_type(self.meta.subscribe_type);
         match sub_client {
             SUBSCRIBE_TYPE_BROADCAST_IN_CLIENT => {

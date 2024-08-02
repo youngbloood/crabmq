@@ -5,7 +5,8 @@ use crate::message_bus::MessageBus;
 use anyhow::Result;
 use common::global::Guard;
 use futures::executor::block_on;
-use protocol::message::Message;
+
+use protocol::protocol::Protocol;
 use tokio::sync::mpsc::Sender;
 
 const DEFAULT_BUFFER: u64 = 10000;
@@ -15,7 +16,6 @@ const DEFAULT_NUM: u64 = 10000;
 pub struct Crab {
     opt: Guard<Config>,
     mb: Guard<MessageBus>,
-    pub out_sender: Option<Sender<(String, Message)>>,
 }
 
 unsafe impl Sync for Crab {}
@@ -25,7 +25,6 @@ impl Crab {
     pub fn new(opt: Guard<Config>) -> Result<Self> {
         let crab = Crab {
             mb: block_on(new_message_manager(opt.clone()))?,
-            out_sender: None,
             opt,
         };
 
@@ -71,9 +70,9 @@ impl Crab {
     pub async fn handle_message(
         &self,
         client: Guard<Client>,
-        out_sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Message,
+        msg: Protocol,
     ) {
         self.mb
             .get_mut()

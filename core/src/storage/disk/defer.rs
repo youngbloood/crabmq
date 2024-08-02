@@ -3,7 +3,8 @@ use super::{
     record::{RecordManager, RecordManagerStrategy as _, RecordManagerStrategyTime, TimePtr},
 };
 use anyhow::{anyhow, Result};
-use protocol::message::Message;
+use protocol::message::{Message, MessageOperation as _};
+
 use std::path::PathBuf;
 
 pub struct Defer {
@@ -123,15 +124,15 @@ impl Defer {
         let is_consume = msg.is_consumed();
 
         if is_delete {
-            self.delete(msg.id()).await?;
+            self.delete(msg.get_id()).await?;
             return Ok(());
         }
         if is_consume {
-            self.consume(msg.id()).await?;
+            self.consume(msg.get_id()).await?;
             return Ok(());
         }
 
-        let not_ready = msg.is_not_ready();
+        let not_ready = msg.is_notready();
         let record = self.message_manager.push(msg).await?;
 
         if not_ready {
@@ -199,13 +200,8 @@ impl Defer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use common::util::{interval, random_str};
-    use protocol::{
-        protocol::{ProtocolBody, ProtocolHead},
-        v1::{ProtocolBodyV1, ProtocolHeadV1},
-    };
-    use rand::Rng as _;
+    use common::util::interval;
+    use protocol::message::v1::MessageV1;
     use std::{path::Path, time::Duration};
 
     #[tokio::test]
@@ -238,36 +234,11 @@ mod tests {
     async fn test_defer_push_and_flush() {
         let defer = get_defer(Path::new("../target/topic1").to_path_buf()).await;
         println!("load success");
-        let mut head = ProtocolHeadV1::new();
-        assert!(head.set_topic("default").is_ok());
-        assert!(head.set_channel("channel-name").is_ok());
-        assert!(head.set_version(1).is_ok());
 
         let mut ticker = interval(Duration::from_secs(1)).await;
         for i in 0..600 {
-            let mut body = ProtocolBodyV1::new();
-            // 设置id
-            assert!(body.with_id((i + 1000).to_string().as_str()).is_ok());
-            body.with_ack(true)
-                .with_notready(false)
-                .with_persist(true)
-                .with_defer_time_offset(100 + i)
-                .with_notready(i % 2 == 0);
-
-            let mut rng = rand::thread_rng();
-            let length = rng.gen_range(5..50);
-            let body_str = random_str(length as _);
-            assert!(body
-                .with_body(Bytes::copy_from_slice(body_str.as_bytes()))
-                .is_ok());
-
-            assert!(defer
-                .handle_msg(Message::with_one(
-                    ProtocolHead::V1(head.clone()),
-                    ProtocolBody::V1(body)
-                ))
-                .await
-                .is_ok());
+            let mut msg = MessageV1::default();
+            assert!(defer.handle_msg(Message::V1(msg)).await.is_ok());
             if i / 3 == 0 {
                 assert!(defer.flush().await.is_ok());
             }

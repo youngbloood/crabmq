@@ -1,6 +1,7 @@
 use clap::Parser;
-use protocol::ProtocolHead;
 use std::path::PathBuf;
+
+use crate::storage::TopicMeta;
 
 #[derive(Parser, Debug, serde::Deserialize, Clone)]
 pub struct DiskConfig {
@@ -47,36 +48,48 @@ pub struct DiskConfig {
 }
 
 impl DiskConfig {
-    pub fn mix_with_protocolhead(&self, head: &ProtocolHead) -> Self {
+    pub fn mix_with_topicmeta(&self, meta: &TopicMeta) -> Self {
         let mut res = self.clone();
-        match head {
-            ProtocolHead::V1(v1) => {
-                if !v1.get_defer_msg_format().is_empty() {
-                    res.default_defer_message_format = v1.get_defer_msg_format().to_string();
-                }
-                if v1.get_max_msg_num_per_file() != 0 {
-                    res.default_max_msg_num_per_file = v1.get_max_msg_num_per_file();
-                }
-                if v1.get_max_size_per_file() != 0 {
-                    res.default_max_size_per_file = v1.get_max_size_per_file();
-                }
-                if v1.get_compress_type() != 0 {
-                    res.default_compress_type = v1.get_compress_type();
-                }
-                if v1.get_subscribe_type() != 0 {
-                    res.default_subscribe_type = v1.get_subscribe_type();
-                }
-                if v1.get_record_num_per_file() != 0 {
-                    res.default_record_num_per_file = v1.get_record_num_per_file();
-                }
-                if v1.get_record_size_per_file() != 0 {
-                    res.default_record_size_per_file = v1.get_record_size_per_file();
-                }
-                if v1.get_fd_cache_size() != 0 {
-                    res.default_fd_cache_size = v1.get_fd_cache_size();
-                }
-            }
+
+        if !meta.defer_message_format.is_empty() {
+            res.default_defer_message_format = meta.defer_message_format.clone();
+        }
+        if meta.max_msg_num_per_file != 0 {
+            res.default_max_msg_num_per_file = meta.max_msg_num_per_file;
+        }
+        if meta.max_size_per_file != 0 {
+            res.default_max_size_per_file = meta.max_size_per_file;
+        }
+        if meta.compress_type != 0 {
+            res.default_compress_type = meta.compress_type;
+        }
+        if meta.subscribe_type != 0 {
+            res.default_subscribe_type = meta.subscribe_type;
+        }
+        if meta.record_num_per_file != 0 {
+            res.default_record_num_per_file = meta.record_num_per_file;
+        }
+        if meta.record_size_per_file != 0 {
+            res.default_record_size_per_file = meta.record_size_per_file;
+        }
+        if meta.fd_cache_size != 0 {
+            res.default_fd_cache_size = meta.fd_cache_size;
         }
         res
+    }
+
+    pub fn gen_topic_meta(&self) -> TopicMeta {
+        TopicMeta {
+            prohibit_instant: false,
+            prohibit_defer: false,
+            defer_message_format: String::new(),
+            max_msg_num_per_file: 0,
+            max_size_per_file: 0,
+            compress_type: 0,
+            subscribe_type: 0,
+            record_num_per_file: 0,
+            record_size_per_file: 0,
+            fd_cache_size: 0,
+        }
     }
 }

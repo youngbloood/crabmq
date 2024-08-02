@@ -1,8 +1,5 @@
 use super::{ProtError, *};
-use crate::{
-    consts::{split_subscribe_type, *},
-    Head, PROTOCOL_HEAD_LEN, SUPPORT_PROTOCOLS,
-};
+use crate::consts::{split_subscribe_type, *};
 use anyhow::{anyhow, Error, Result};
 use bytes::BytesMut;
 use std::ops::DerefMut;

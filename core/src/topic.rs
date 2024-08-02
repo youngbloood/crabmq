@@ -5,7 +5,8 @@ use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::{Name, OrderedMap};
 use protocol::consts::*;
-use protocol::message::Message;
+
+use protocol::message::{Message, MessageOperation};
 use tokio_util::sync::CancellationToken;
 
 pub struct Topic {
@@ -64,28 +65,28 @@ impl Topic {
             SUBSCRIBE_TYPE_BROADCAST_IN_CHANNEL => {
                 let iter = self.channels.values();
                 for chan in iter {
-                    chan.get().send_msg(msg.clone()).await?;
+                    chan.get().send_msg(msg.convert_to_protocol()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_ROUNDROBIN_IN_CHANNEL => {
                 if let Some(chan) = self.channels.roundrobin_next() {
-                    chan.get().send_msg(msg.clone()).await?;
+                    chan.get().send_msg(msg.convert_to_protocol()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_RAND_IN_CHANNEL => {
                 if let Some(chan) = self.channels.rand() {
-                    chan.get().send_msg(msg.clone()).await?;
+                    chan.get().send_msg(msg.convert_to_protocol()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_RAND_PROPERTY_IN_CHANNEL => {
                 if let Some(chan) = self.channels.rand_weight() {
-                    chan.get().send_msg(msg.clone()).await?;
+                    chan.get().send_msg(msg.convert_to_protocol()).await?;
                 }
                 Ok(())
             }

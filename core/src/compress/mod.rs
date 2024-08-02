@@ -3,6 +3,7 @@ mod nope;
 use anyhow::Result;
 use nope::Nope;
 use protocol::message::Message;
+
 use std::ops::Deref;
 
 pub const COMPRESS_TYPE_NONE: &str = "no";

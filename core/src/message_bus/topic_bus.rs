@@ -10,7 +10,8 @@ use common::{
     global::{Guard, CANCEL_TOKEN},
     util::interval,
 };
-use protocol::message::Message;
+use protocol::message::{Message, MessageOperation as _};
+
 use std::{sync::Arc, time::Duration};
 use tokio::select;
 use tokio_util::sync::CancellationToken;

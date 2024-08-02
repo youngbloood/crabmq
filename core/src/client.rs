@@ -5,6 +5,8 @@ use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use common::Weight;
 use protocol::message::Message;
+use protocol::protocol::Protocol;
+
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
 use std::ops::Deref;
@@ -60,8 +62,8 @@ pub struct Client {
     ticker: UnsafeCell<Interval>,
     defeat_count: AtomicU16,
 
-    msg_rx: UnsafeCell<Receiver<Message>>,
-    msg_tx: UnsafeCell<Sender<Message>>,
+    msg_rx: UnsafeCell<Receiver<Protocol>>,
+    msg_tx: UnsafeCell<Sender<Protocol>>,
 
     state: ClientState,
 
@@ -116,18 +118,18 @@ impl Client {
         self.weight
     }
 
-    pub async fn send_msg(&self, msg: Message) -> Result<()> {
+    pub async fn send_msg(&self, prot: Protocol) -> Result<()> {
         let sender = unsafe { self.msg_tx.get().as_ref() }.unwrap();
-        sender.send(msg).await?;
+        sender.send(prot).await?;
         Ok(())
     }
 
-    pub async fn recv_msg(&self) -> Message {
+    pub async fn recv_msg(&self) -> Protocol {
         let recver = unsafe { self.msg_rx.get().as_mut() }.unwrap();
         recver.recv().await.unwrap()
     }
 
-    pub async fn io_loop(&self, sender: Sender<(String, Message)>) {
+    pub async fn io_loop(&self, sender: Sender<(String, Protocol)>) {
         let addr = self.remote_addr.to_string();
         debug!(addr = addr, "start client io_loop");
 
@@ -160,8 +162,8 @@ impl Client {
                 // 不断从链接中解析数据
                 result = conn.read_parse(self.opt.get().global.client_read_timeout) => {
                     match result{
-                        Ok(msg)=>{
-                            match sender.send((self.remote_addr.to_string(),msg)).await{
+                        Ok(prot)=>{
+                            match sender.send((self.remote_addr.to_string(),prot)).await{
                                 Ok(())=>{
                                     info!(addr = addr, "send msg to crabmq success");
                                     continue
@@ -200,7 +202,7 @@ impl Client {
     }
 }
 
-pub async fn io_loop(guard: Guard<Client>, sender: Sender<(String, Message)>) {
+pub async fn io_loop(guard: Guard<Client>, sender: Sender<(String, Protocol)>) {
     let client = guard.get();
     client.io_loop(sender).await;
 }

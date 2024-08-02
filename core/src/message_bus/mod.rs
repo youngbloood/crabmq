@@ -10,8 +10,7 @@ use common::global::Guard;
 use dashmap::DashMap;
 use protocol::{
     error::ProtError,
-    message::{convert_to_resp, Message},
-    protocol::*,
+    protocol::{Protocol, ProtolOperation},
 };
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;
@@ -19,7 +18,7 @@ use topic_bus::{new_topic_message, topic_message_loop, topic_message_loop_defer}
 use tracing::{debug, error, info};
 
 pub struct MessageBus {
-    opt: Guard<Config>,
+    cfg: Guard<Config>,
 
     /// topics map，当某个客户端订阅topic时，从storage中获取到topic接口，并初始化一个TopicBus，循环从TopicBus中读取消息
     topics: DashMap<String, Guard<TopicBus>>,
@@ -39,7 +38,7 @@ impl MessageBus {
                     opt.get().message_storage_disk_config.clone(),
                 )
                 .await?,
-                opt,
+                cfg: opt,
             });
         }
 
@@ -50,7 +49,7 @@ impl MessageBus {
         .await?;
 
         Ok(MessageBus {
-            opt,
+            cfg: opt,
             topics: DashMap::new(),
             storage,
         })
@@ -58,12 +57,21 @@ impl MessageBus {
 
     async fn push(
         &mut self,
-        out_sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Message,
+        prot: Protocol,
     ) -> Result<()> {
-        self.storage.get().push(out_sender, addr, msg).await?;
-        Ok(())
+        // let msg = prot.convert_to_message()?;
+        match prot.clone() {
+            Protocol::V1(v1) => {
+                let ephemeral = v1.get_publish().unwrap().is_ephemeral();
+                self.storage
+                    .get()
+                    .push(out_sender, addr, prot, ephemeral)
+                    .await?;
+                Ok(())
+            }
+        }
     }
 
     pub async fn delete_client_from_channel(&mut self, client_addr: &str) {
@@ -82,11 +90,11 @@ impl MessageBus {
     pub async fn get_or_create_topic(
         &mut self,
         topic_name: &str,
-        head: &ProtocolHead,
+        epehemral: bool,
     ) -> Result<Guard<TopicBus>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
-            && topics_len >= (self.opt.get().global.max_topic_num as _)
+            && topics_len >= (self.cfg.get().global.max_topic_num as _)
         {
             return Err(anyhow!("exceed upper limit of topic"));
         }
@@ -95,11 +103,15 @@ impl MessageBus {
             let (_, topic_storage) = self
                 .storage
                 .get_mut()
-                .get_or_create_topic(topic_name, head)
+                .get_or_create_topic(
+                    topic_name,
+                    epehemral,
+                    &self.cfg.get().message_storage_disk_config.gen_topic_meta(),
+                )
                 .await?;
-            let topic = new_topic(self.opt.clone(), topic_name, topic_storage.get_meta()?)?;
+            let topic = new_topic(self.cfg.clone(), topic_name, topic_storage.get_meta()?)?;
 
-            let topic_message = new_topic_message(self.opt.clone(), topic, topic_storage).await?;
+            let topic_message = new_topic_message(self.cfg.clone(), topic, topic_storage).await?;
             self.topics
                 .insert(topic_name.to_string(), topic_message.clone());
             return Ok(topic_message);
@@ -111,18 +123,18 @@ impl MessageBus {
     pub async fn handle_message(
         &mut self,
         client: Guard<Client>,
-        out_sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Message,
+        msg: Protocol,
     ) {
-        match msg.action() {
+        match msg.get_action() {
             ACTION_FIN => self.fin(out_sender, addr, msg).await,
             ACTION_RDY => self.rdy(out_sender, addr, msg).await,
             ACTION_REQ => self.req(out_sender, addr, msg).await,
             ACTION_PUB => self.publish(out_sender, addr, msg).await,
             ACTION_NOP => self.nop(out_sender, addr, msg).await,
             ACTION_TOUCH => self.touch(out_sender, addr, msg).await,
-            ACTION_SUB => self.sub(out_sender, addr, msg, client).await,
+            ACTION_SUB => self.subscribe(out_sender, addr, msg, client).await,
             ACTION_CLS => self.cls(out_sender, addr, msg).await,
             ACTION_AUTH => self.auth(out_sender, addr, msg).await,
             _ => unreachable!(),
@@ -130,74 +142,90 @@ impl MessageBus {
     }
 
     //============================ Handle Action ==============================//
-    pub async fn fin(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn fin(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
 
-    pub async fn rdy(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn rdy(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
 
     pub async fn publish(
         &mut self,
-        out_sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Message,
+        msg: Protocol,
     ) {
         match self.push(out_sender.clone(), addr, msg.clone()).await {
             Ok(_) => debug!("send msg successful"),
             Err(e) => {
                 let err: ProtError = e.into();
                 error!("send msg failed: {err:?}");
-                let mut resp = convert_to_resp(msg);
-                resp.set_reject_code(err.code);
-                let _ = out_sender.send((addr.to_string(), resp)).await;
+                // TODO:
+                // let mut resp = convert_to_resp(msg);
+                // resp.set_reject_code(err.code);
+                let _ = out_sender.send((addr.to_string(), msg)).await;
             }
         }
     }
 
-    pub async fn req(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn req(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
 
-    pub async fn nop(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn nop(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
 
-    pub async fn touch(&mut self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {
-        let topic_name = msg.get_topic();
-        match self.get_or_create_topic(topic_name, &msg.get_head()).await {
-            Ok(_) => todo!(),
-            Err(_) => todo!(),
-        }
+    pub async fn touch(
+        &mut self,
+        out_sender: Sender<(String, Protocol)>,
+        addr: &str,
+        msg: Protocol,
+    ) {
+        // TODO:
+        // let topic_name = msg.get_topic();
+        // match self.get_or_create_topic(topic_name, &msg.get_head()).await {
+        //     Ok(_) => todo!(),
+        //     Err(_) => todo!(),
+        // }
     }
 
-    pub async fn sub(
+    pub async fn subscribe(
         &mut self,
-        out_sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Message,
+        prot: Protocol,
         guard: Guard<Client>,
     ) {
-        let topic_name = msg.get_topic();
-        let chan_name = msg.get_channel();
+        match prot {
+            Protocol::V1(v1) => {
+                let sub = v1.get_subscribe().unwrap();
+                let topic_name = sub.get_topic();
+                let chan_name = sub.get_channel();
 
-        match self.get_or_create_topic(topic_name, &msg.get_head()).await {
-            Ok(topic_sub) => {
-                // 有订阅某个topic的client时，才进行相应的loop消息循环
-                tokio::spawn(topic_message_loop(topic_sub.clone()));
-                tokio::spawn(topic_message_loop_defer(topic_sub.clone()));
+                match self
+                    .get_or_create_topic(topic_name, sub.is_ephemeral())
+                    .await
+                {
+                    Ok(topic_sub) => {
+                        // 有订阅某个topic的client时，才进行相应的loop消息循环
+                        tokio::spawn(topic_message_loop(topic_sub.clone()));
+                        tokio::spawn(topic_message_loop_defer(topic_sub.clone()));
 
-                let chan = topic_sub
-                    .get()
-                    .topic
-                    .get_mut()
-                    .get_create_mut_channel(chan_name);
-                chan.get_mut().set_client(addr, guard);
-                info!(addr = addr, "sub topic: {topic_name}, channel: {chan_name}",);
-                let _ = out_sender
-                    .send((addr.to_string(), convert_to_resp(msg)))
-                    .await;
+                        let chan = topic_sub
+                            .get()
+                            .topic
+                            .get_mut()
+                            .get_create_mut_channel(chan_name);
+                        chan.get_mut().set_client(addr, guard);
+                        info!(addr = addr, "sub topic: {topic_name}, channel: {chan_name}",);
+                        // TODO:
+                        // let _ = out_sender
+                        //     .send((addr.to_string(), convert_to_resp(msg)))
+                        //     .await;
+                    }
+                    Err(e) => todo!("resp the err to client"),
+                }
             }
-            Err(e) => todo!("resp the err to client"),
         }
     }
 
-    pub async fn cls(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn cls(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
 
-    pub async fn auth(&self, out_sender: Sender<(String, Message)>, addr: &str, msg: Message) {}
+    pub async fn auth(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
     //============================ Handle Action ==============================//
 }
 

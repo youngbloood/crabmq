@@ -7,8 +7,7 @@ use protocol::{
     error::{
         ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
     },
-    message::Message,
-    ProtocolHead,
+    message::{Message, MessageOperation},
 };
 use std::sync::Arc;
 
@@ -29,44 +28,23 @@ impl Dummy {
         self.topics.contains_key(key)
     }
 
-    pub fn insert(&self, key: &str, head: &ProtocolHead) -> Result<TopicDummy> {
-        match head {
-            ProtocolHead::V1(v1) => {
-                let meta = TopicMeta::new(
-                    v1.prohibit_instant(),
-                    v1.prohibit_defer(),
-                    v1.get_defer_msg_format().to_string(),
-                    v1.get_max_msg_num_per_file(),
-                    v1.get_max_size_per_file(),
-                    v1.get_compress_type(),
-                    v1.get_subscribe_type(),
-                    v1.get_record_num_per_file(),
-                    v1.get_record_size_per_file(),
-                    v1.get_fd_cache_size(),
-                );
-
-                let topic_dummy = Guard::new(TopicDummyBase::new(key, meta));
-                self.topics.insert(key.to_owned(), topic_dummy.clone());
-                Ok(topic_dummy)
-            }
-        }
+    pub fn insert(&self, key: &str, meta: &TopicMeta) -> Result<TopicDummy> {
+        let topic_dummy = Guard::new(TopicDummyBase::new(key, meta.clone()));
+        self.topics.insert(key.to_owned(), topic_dummy.clone());
+        Ok(topic_dummy)
     }
 
-    fn get_or_create_topic_dummy(
-        &self,
-        topic_name: &str,
-        head: &ProtocolHead,
-    ) -> Result<TopicDummy> {
+    fn get_or_create_topic_dummy(&self, topic_name: &str, meta: &TopicMeta) -> Result<TopicDummy> {
         if let Some(topic_dummy) = self.topics.get(topic_name) {
             return Ok(topic_dummy.value().clone());
         }
 
         // create
-        if head.prohibit_defer() && head.prohibit_instant() {
+        if meta.prohibit_defer && meta.prohibit_instant {
             return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
         }
 
-        self.insert(topic_name, head)
+        self.insert(topic_name, meta)
     }
 }
 
@@ -76,8 +54,8 @@ impl PersistStorageOperation for Dummy {
         Ok(())
     }
 
-    async fn push(&self, msg: Message) -> Result<()> {
-        let topic = self.get_or_create_topic_dummy(msg.get_topic(), &msg.get_head())?;
+    async fn push(&self, msg: Message, meta: &TopicMeta) -> Result<()> {
+        let topic = self.get_or_create_topic_dummy(msg.get_topic(), meta)?;
         topic.get().push(msg).await?;
         Ok(())
     }
@@ -102,9 +80,9 @@ impl PersistStorageOperation for Dummy {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        head: &ProtocolHead,
+        meta: &TopicMeta,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
-        let topic = self.get_or_create_topic_dummy(topic_name, head)?;
+        let topic = self.get_or_create_topic_dummy(topic_name, meta)?;
         Ok(Arc::new(Box::new(topic)))
     }
 }
@@ -142,7 +120,7 @@ impl TopicDummyBase {
     }
 
     async fn push(&self, msg: Message) -> Result<()> {
-        if msg.is_defer() {
+        if msg.defer_time() != 0 {
             if self.meta.prohibit_defer {
                 return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_DEFER)));
             }

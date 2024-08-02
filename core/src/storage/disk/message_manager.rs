@@ -5,8 +5,8 @@ use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use common::util::{check_exist, is_debug, SwitcherVec};
 use parking_lot::RwLock;
-use protocol::message::Message;
-use protocol::{parse_body_from_reader, parse_head_from_reader};
+use protocol::message::{Message, MessageOperation as _};
+
 use std::fs::{self};
 use std::io::{Seek as _, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;
@@ -56,7 +56,7 @@ impl MessageManager {
 
     pub async fn push(&self, msg: Message) -> Result<MessageRecord> {
         let defer_time = msg.defer_time();
-        let id = msg.id().to_string();
+        let id = msg.get_id().to_string();
         let compressed_msg = self.compress.compress(msg).await?;
 
         if self.writer.msg_num.load(Relaxed) >= self.max_msg_num_per_file
@@ -240,31 +240,17 @@ impl MessageDisk {
         }
 
         loop {
-            let head = parse_head_from_reader(&mut pfd).await;
-            // let head = ProtocolHead::parse_from(&mut pfd).await;
-            if let Err(e) = head {
+            let msg = Message::parse_from_reader(&mut pfd).await;
+            if let Err(e) = msg {
                 if e.to_string().contains("eof") {
                     break;
                 }
                 return Err(anyhow!(e));
             }
-            let head = head.unwrap();
-            match parse_body_from_reader(&mut pfd, &head).await {
-                // match ProtocolBody::parse_from(&mut pfd).await {
-                Ok(bodys) => {
-                    if is_debug() {
-                        let msg = Message::with(head, bodys);
-                        debug!("msg = {msg:?}");
-                    }
-                    // 不push到msgs中
-                }
-                Err(e) => {
-                    if e.to_string().contains("eof") {
-                        break;
-                    }
-                    return Err(anyhow!(e));
-                }
+            if is_debug() {
+                debug!("msg = {msg:?}");
             }
+            // 不push到msgs中
         }
 
         Ok(())

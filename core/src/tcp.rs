@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::crab::Crab;
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use protocol::message::Message;
+use protocol::protocol::Protocol;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{net::TcpListener, select};
@@ -10,12 +11,12 @@ use tracing::{debug, error, info, warn};
 
 pub struct TcpServer {
     // 控制消息流入(从客户端流入MQ)
-    in_sender: Sender<(String, Message)>,
-    in_recver: Receiver<(String, Message)>,
+    in_sender: Sender<(String, Protocol)>,
+    in_recver: Receiver<(String, Protocol)>,
 
     // 控制消息流出(从MQ响应至客户端)
-    out_sender: Sender<(String, Message)>,
-    out_recver: Receiver<(String, Message)>,
+    out_sender: Sender<(String, Protocol)>,
+    out_recver: Receiver<(String, Protocol)>,
 
     opt: Guard<Config>,
     tcp_listener: TcpListener,
@@ -27,7 +28,6 @@ impl TcpServer {
     pub fn new(opt: Guard<Config>, tcp_listener: TcpListener, crab: Guard<Crab>) -> Self {
         let (in_tx, in_rx) = mpsc::channel(10000);
         let (out_tx, out_rx) = mpsc::channel(10000);
-        crab.get_mut().out_sender = Some(out_tx.clone());
         TcpServer {
             in_sender: in_tx,
             in_recver: in_rx,
@@ -86,15 +86,15 @@ impl TcpServer {
                     }
                     debug!("msg = {:?}",msg_opt);
                     let (addr,mut msg) = msg_opt.unwrap();
-                    let (resp, passed) = self.validate(addr.as_str(), &msg);
-                    if !passed {
-                        let _ = self.out_sender.send((addr, resp.unwrap())).await;
-                        continue;
-                    }
-                    if let Err(e) = msg.init(){
-                        error!(addr = addr, "init msg error: {e}");
-                        continue;
-                    }
+                    // let (resp, passed) = self.validate(addr.as_str(), &msg);
+                    // if !passed {
+                    //     let _ = self.out_sender.send((addr, resp.unwrap())).await;
+                    //     continue;
+                    // }
+                    // if let Err(e) = msg.init(){
+                    //     error!(addr = addr, "init msg error: {e}");
+                    //     continue;
+                    // }
                     let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
                     self.crab.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),msg).await;
                 }
@@ -119,20 +119,20 @@ impl TcpServer {
         }
     }
 
-    fn validate(&self, addr: &str, msg: &Message) -> (Option<Message>, bool) {
-        match msg.validate(u8::MAX as u64, u64::MAX) {
-            Ok(_) => {}
-            Err(e) => match msg.clone() {
-                // Message::Null => unreachable!(),
-                Message::V1(mut v1) => {
-                    v1.head.set_flag_resq(true);
-                    v1.head.set_reject_code(e.code);
-                    warn!(addr = addr, "{e}");
-                    return (Some(Message::V1(v1)), false);
-                }
-            },
-        }
+    // fn validate(&self, addr: &str, msg: &Protocol) -> (Option<Protocol>, bool) {
+    //     match msg.validate(u8::MAX as u64, u64::MAX) {
+    //         Ok(_) => {}
+    //         Err(e) => match msg.clone() {
+    //             // Message::Null => unreachable!(),
+    //             Protocol::V1(mut v1) => {
+    //                 // v1.head.set_flag_resq(true);
+    //                 // v1.head.set_reject_code(e.code);
+    //                 warn!(addr = addr, "{e}");
+    //                 return (Some(Message::V1(v1)), false);
+    //             }
+    //         },
+    //     }
 
-        (None, true)
-    }
+    //     (None, true)
+    // }
 }

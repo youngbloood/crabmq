@@ -11,8 +11,8 @@ use disk::config::DiskConfig;
 use disk::StorageDisk;
 use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
-use protocol::message::{convert_to_resp, Message};
-use protocol::ProtocolHead;
+use protocol::message::{Message, MessageOperation as _, TopicCustom};
+use protocol::protocol::{Protocol, ProtolOperation as _};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
@@ -41,14 +41,14 @@ pub trait PersistStorageOperation {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        head: &ProtocolHead,
+        meta: &TopicMeta,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>>;
 
     /// flush the messages to Storage Media.
     async fn flush(&self) -> Result<()>;
 
     /// push a message into topic.
-    async fn push(&self, msg: Message) -> Result<()>;
+    async fn push(&self, msg: Message, meta: &TopicMeta) -> Result<()>;
 
     /// stop the Storage Media.
     async fn stop(&self) -> Result<()>;
@@ -141,7 +141,8 @@ impl StorageWrapper {
     pub async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        head: &ProtocolHead,
+        ephemeral: bool,
+        meta: &TopicMeta,
     ) -> Result<(bool, Arc<Box<dyn PersistTopicOperation>>)> {
         // 已经存在，直接返回
         if self.dummy.contains_key(topic_name) {
@@ -160,11 +161,11 @@ impl StorageWrapper {
         }
 
         // 不存在，则直接插入
-        if head.topic_ephemeral() {
-            self.dummy.insert(topic_name, head);
+        if ephemeral {
+            self.dummy.insert(topic_name, meta);
             return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
-        let topic = self.storage.get_or_create_topic(topic_name, head).await?;
+        let topic = self.storage.get_or_create_topic(topic_name, meta).await?;
         Ok((false, topic))
     }
 
@@ -179,25 +180,27 @@ impl StorageWrapper {
 
     pub async fn push(
         &self,
-        out_sender: Sender<(String, Message)>,
+        out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Message,
+        prot: Protocol,
+        epehemral: bool,
     ) -> Result<()> {
-        let topic_name = msg.get_topic();
+        let msg = prot.convert_to_message()?;
+        let get_topic = msg.get_topic();
+        let topic_name = get_topic;
+        let meta = covert_protocol_to_topicmeta(&prot);
         let (ephemeral, _) = self
-            .get_or_create_topic(topic_name, &msg.get_head())
+            .get_or_create_topic(topic_name, epehemral, &meta)
             .await?;
 
         if ephemeral {
-            self.dummy.push(msg.clone()).await?;
+            self.dummy.push(msg.clone(), &meta).await?;
         } else {
-            self.storage.push(msg.clone()).await?;
+            self.storage.push(msg.clone(), &meta).await?;
         }
 
         // 可能client已经关闭，忽略该err
-        let _ = out_sender
-            .send((addr.to_string(), convert_to_resp(msg)))
-            .await;
+        let _ = out_sender.send((addr.to_string(), prot)).await;
         self.persist_factor_now.fetch_add(1, Relaxed);
         if self.persist_factor_now.load(Relaxed) == u64::MAX {
             self.persist_factor_now.store(0, Relaxed)
@@ -250,6 +253,9 @@ pub async fn new_storage_wrapper(
     Ok(guard)
 }
 
+/**
+ * [`TopicMeta`] should compatable with all [`TopicCustom`]
+ */
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TopicMeta {
     pub prohibit_instant: bool,
@@ -292,3 +298,11 @@ impl TopicMeta {
         }
     }
 }
+
+fn covert_protocol_to_topicmeta(prot: &Protocol) -> TopicMeta {
+    todo!()
+}
+
+// fn covert_message_to_topicmeta(msg: &Message) -> TopicMeta {
+//     todo!()
+// }

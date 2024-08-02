@@ -1328,6 +1328,7 @@ dependencies = [
  "chrono",
  "common",
  "crc",
+ "enum_dispatch",
  "lazy_static",
  "rsbit",
  "tokio",

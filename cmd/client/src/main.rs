@@ -7,7 +7,7 @@ use common::global;
 use core::conn::Conn;
 use futures::executor::block_on;
 use inquire::Text;
-use protocol::message::Message;
+
 use protocol::v1::ProtocolBodyV1;
 use protocol::v1::ProtocolBodysV1;
 use protocol::v1::ProtocolHeadV1;

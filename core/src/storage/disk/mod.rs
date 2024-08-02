@@ -18,9 +18,7 @@ use protocol::{
     error::{
         ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
     },
-    message::Message,
-    v1::ProtocolHeadV1,
-    ProtocolHead,
+    message::{Message, MessageOperation as _},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -111,15 +109,17 @@ impl StorageDisk {
         Ok(Some(topic.value().clone()))
     }
 
-    async fn get_or_create_topic_inner_v1(
+    async fn get_or_create_topic_inner(
         &self,
         topic_name: &str,
-        head: &ProtocolHeadV1,
-        cfg: DiskConfig,
+        meta: &TopicMeta,
     ) -> Result<TopicMessage> {
+        let cfg = self.cfg.mix_with_topicmeta(meta);
+
         if !self.topics.contains_key(topic_name) {
             // validate
-            if head.prohibit_defer() && head.prohibit_instant() {
+            // TODO: 移到协议端校验
+            if meta.prohibit_defer && meta.prohibit_instant {
                 return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
             }
 
@@ -146,8 +146,8 @@ impl StorageDisk {
 
             let topic_meta = TopicMetaWrapper::new(
                 parent.join("meta"),
-                head.prohibit_instant(),
-                head.prohibit_defer(),
+                meta.prohibit_instant,
+                meta.prohibit_defer,
                 cfg.default_defer_message_format.to_string(),
                 cfg.default_max_msg_num_per_file,
                 cfg.default_max_size_per_file,
@@ -173,17 +173,6 @@ impl StorageDisk {
         let topic = self.topics.get(topic_name).unwrap();
         Ok(topic.value().clone())
     }
-
-    async fn get_or_create_topic_inner(
-        &self,
-        topic_name: &str,
-        head: &ProtocolHead,
-    ) -> Result<TopicMessage> {
-        let cfg = self.cfg.mix_with_protocolhead(head);
-        match head {
-            ProtocolHead::V1(v1) => self.get_or_create_topic_inner_v1(topic_name, v1, cfg).await,
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -203,9 +192,9 @@ impl PersistStorageOperation for StorageDisk {
         Ok(())
     }
 
-    async fn push(&self, msg: Message) -> Result<()> {
+    async fn push(&self, msg: Message, meta: &TopicMeta) -> Result<()> {
         let topic = self
-            .get_or_create_topic_inner(msg.get_topic(), &msg.get_head())
+            .get_or_create_topic_inner(msg.get_topic(), meta)
             .await?;
         topic.push(msg).await?;
         Ok(())
@@ -254,9 +243,9 @@ impl PersistStorageOperation for StorageDisk {
     async fn get_or_create_topic(
         &self,
         topic_name: &str,
-        head: &ProtocolHead,
+        meta: &TopicMeta,
     ) -> Result<Arc<Box<dyn PersistTopicOperation>>> {
-        let topic = self.get_or_create_topic_inner(topic_name, head).await?;
+        let topic = self.get_or_create_topic_inner(topic_name, meta).await?;
         Ok(Arc::new(Box::new(topic) as Box<dyn PersistTopicOperation>))
     }
 }
@@ -280,7 +269,7 @@ impl TopicMessage {
     }
 
     async fn push(&self, msg: Message) -> Result<()> {
-        if msg.is_defer() {
+        if msg.defer_time() != 0 {
             if self.guard.get().meta.prohibit_defer {
                 return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_DEFER)));
             }
@@ -420,7 +409,7 @@ impl PersistTopicOperation for TopicMessage {
                             }
                         },
 
-                        Err(e) => return Err(anyhow!(e)),
+                        Err(e) => return Err(anyhow!("{e}")),
                     }
                 }
             }
@@ -440,7 +429,7 @@ impl PersistTopicOperation for TopicMessage {
                         Ok(msg) => {
                             match msg {
                                 Some(msg) => {
-                                    if !(msg.is_deleted() || msg.is_consumed() || msg.is_not_ready()) {
+                                    if !(msg.is_deleted() || msg.is_consumed() || msg.is_notready()) {
                                         return Ok(Some(msg));
                                     }
                                     Ok(None)
@@ -461,7 +450,7 @@ impl PersistTopicOperation for TopicMessage {
                             }
                         }
                         Err(e) => {
-                            Err(anyhow!(e))
+                            Err(anyhow!("{e}"))
                         }
                     }
                 } => {
@@ -516,7 +505,7 @@ impl PersistTopicOperation for TopicMessage {
                             }
                         }
 
-                        Err(e) => return Err(anyhow!(e)),
+                        Err(e) => return Err(anyhow!("{e}")),
                     }
                 }
             }
@@ -536,7 +525,7 @@ impl PersistTopicOperation for TopicMessage {
                         Ok(msg) => {
                             match msg {
                                 Some(msg) => {
-                                    if !(msg.is_deleted() || msg.is_consumed() || msg.is_not_ready()) {
+                                    if !(msg.is_deleted() || msg.is_consumed() || msg.is_notready()) {
                                         return Ok(Some(msg));
                                     }
                                     Ok(None)
@@ -557,7 +546,7 @@ impl PersistTopicOperation for TopicMessage {
                             }
                         }
                         Err(e) => {
-                            Err(anyhow!(e))
+                            Err(anyhow!("{e}"))
                         }
                     }
                 } => {
@@ -575,7 +564,7 @@ impl PersistTopicOperation for TopicMessage {
                             }
                         }
                         Err(e) => {
-                            return Err(anyhow!(e));
+                            return Err(anyhow!("{e}"));
                         }
                     }
                 }
