@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::{Bytes, BytesMut};
 use chrono::Local;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
@@ -185,6 +185,18 @@ impl Deref for BinMessage {
 }
 
 impl BinMessage {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.0.to_vec());
+        if self.head.is_defer() {
+            res.extend(self.defer_time.to_be_bytes());
+        }
+        res.extend(self.id.as_bytes());
+        res.extend(self.body.to_vec());
+
+        res
+    }
+
     pub fn get_head(&self) -> &BinMessageHead {
         &self.head
     }
@@ -200,6 +212,14 @@ impl BinMessage {
 
     pub fn set_defer_time(&mut self, defer_time: u64) -> &mut Self {
         self.defer_time = defer_time;
+        self.head.set_defer(true);
+        self.head.set_defer_concrete(true);
+        self
+    }
+
+    pub fn set_defer_time_offset(&mut self, offset: u64) -> &mut Self {
+        self.defer_time = Local::now().timestamp() as u64 + offset;
+        self.head.set_defer(true);
         self
     }
 
@@ -207,9 +227,13 @@ impl BinMessage {
         &self.id
     }
 
-    pub fn set_id(&mut self, id: &str) -> &mut Self {
+    pub fn set_id(&mut self, id: &str) -> Result<()> {
+        if id.len() >= u8::MAX as usize {
+            return Err(anyhow!("id excess the max length"));
+        }
         self.id = id.to_string();
-        self
+        self.head.set_id_len(self.id.len() as u8);
+        Ok(())
     }
 
     pub fn get_body(&self) -> Bytes {
@@ -217,6 +241,7 @@ impl BinMessage {
     }
 
     pub fn set_body(&mut self, body: Bytes) -> &mut Self {
+        self.head.set_body_len(body.len() as u64);
         self.body = body;
         self
     }
@@ -264,7 +289,7 @@ impl BinMessage {
             if id_len != 0 {
                 buf.resize(id_len as usize, 0);
                 reader.read_exact(&mut buf).await?;
-                bin_msg.set_id(&String::from_utf8(buf.to_vec()).expect("illigal id value"));
+                let _ = bin_msg.set_id(&String::from_utf8(buf.to_vec()).expect("illigal id value"));
             }
 
             // parse body

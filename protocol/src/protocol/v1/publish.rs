@@ -1,11 +1,19 @@
 use std::{ops::Deref, pin::Pin};
 
+use super::common_reply::Reply;
+use super::common_reply::ReplyBuilder;
+use super::BuilderV1;
+use super::V1;
+use super::{bin_message::BinMessage, Head};
+use crate::message::v1::MessageV1;
+use crate::message::Message;
+use crate::protocol::v1::ACTION_PUBLISH;
+use crate::protocol::Builder;
+use crate::protocol::Protocol;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation, BitOperation as _};
 use tokio::io::AsyncReadExt;
-
-use super::{bin_message::BinMessage, Head};
 
 const PUBLISH_HEAD_LENGTH: usize = 6;
 
@@ -126,7 +134,46 @@ impl Deref for Publish {
     }
 }
 
+impl Builder for Publish {
+    fn build(self) -> Protocol {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_publish(self);
+        Protocol::V1(v1)
+    }
+}
+
+impl BuilderV1 for Publish {
+    fn buildv1(self) -> V1 {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_publish(self);
+        v1
+    }
+}
+
+impl ReplyBuilder for Publish {
+    fn build_reply_ok(&self) -> Reply {
+        Reply::with_ok(ACTION_PUBLISH)
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_PUBLISH, err_code)
+    }
+}
+
 impl Publish {
+    pub fn split_message(&self) -> Vec<Message> {
+        let mut res = Vec::with_capacity(self.msgs.len());
+        for v in &self.msgs {
+            let mut msgv1 = MessageV1::default();
+            msgv1
+                .set_head(self.head.clone())
+                .set_topic(&self.topic)
+                .set_message(v.clone());
+            res.push(Message::V1(msgv1));
+        }
+        res
+    }
+
     pub fn get_head(&self) -> Head {
         self.head.clone()
     }

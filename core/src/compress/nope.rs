@@ -11,7 +11,7 @@ impl Compress for Nope {
     }
 
     async fn decompress(&self, bts: &[u8]) -> Result<Message> {
-        let msg = Message::parse_from(bts).await?;
+        let msg = Message::parse_from_vec(bts).await?;
         Ok(msg)
     }
 }

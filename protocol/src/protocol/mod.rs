@@ -5,11 +5,13 @@ use bytes::BytesMut;
 use enum_dispatch::enum_dispatch;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
-use v1::{parse_protocolv1_from_reader, PROPTOCOL_V1, V1};
+use v1::V1;
 
 use crate::message::Message;
 
 pub const HEAD_LENGTH: usize = 2;
+
+pub const PROPTOCOL_V1: u8 = 1;
 
 pub trait Builder {
     fn build(self) -> Protocol;
@@ -29,6 +31,10 @@ impl Head {
         Head(head)
     }
 
+    pub fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
     pub fn get_version(&self) -> u8 {
         self.0[0]
     }
@@ -43,6 +49,13 @@ impl Head {
 
     pub fn set_action(&mut self, action: u8) {
         self.0[1] = action;
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self.get_version() {
+            PROPTOCOL_V1 => Ok(()),
+            _ => Err(anyhow!("not support protocol version")),
+        }
     }
 }
 
@@ -74,9 +87,7 @@ pub async fn parse_protocol_from_reader(
     let head = Head::with(buf.to_vec().try_into().expect("convert to head failed"));
 
     match head.get_version() {
-        PROPTOCOL_V1 => Ok(Protocol::V1(
-            parse_protocolv1_from_reader(reader, head.clone()).await?,
-        )),
+        PROPTOCOL_V1 => Ok(Protocol::V1(V1::parse_from(reader, head.clone()).await?)),
         _ => Err(anyhow!("unsupport protocol version")),
     }
 }

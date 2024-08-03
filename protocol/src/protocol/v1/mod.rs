@@ -1,24 +1,74 @@
+pub mod auth;
 pub mod bin_message;
+pub mod common_reply;
 pub mod identity;
 pub mod publish;
 pub mod subscribe;
 pub mod touch;
 
+use super::{Builder, Head, Protocol, ProtolOperation};
 use crate::message::Message;
-
-use super::{Head, ProtolOperation};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use identity::Identity;
 use publish::Publish;
 use std::pin::Pin;
 use subscribe::Subscribe;
 use tokio::io::AsyncReadExt;
 use touch::Touch;
 
-pub const PROPTOCOL_V1: u8 = 1;
+// ========= PROTOCOL ACTION =========
+// even number denote the Client -> Server
+// odd number denote the Server -> Client
+const ACTION_IDENTITY: u8 = 0;
+const ACTION_IDENTITY_REPLY: u8 = 1;
+
+const ACTION_AUTH: u8 = 2;
+const ACTION_AUTH_REPLY: u8 = 3;
+
+/// reply is [`ACTION_COMMON_REPLY`]
+const ACTION_TOUCH: u8 = 4;
+
+/// reply is [`ACTION_COMMON_REPLY`]
+const ACTION_PUBLISH: u8 = 6;
+
+/// reply is [`ACTION_COMMON_REPLY`]
+const ACTION_SUBSCRIBE: u8 = 8;
+
+/// subs重置超时时间
+///
+/// no reply
+const ACTION_RESET: u8 = 11;
+
+/// pubs更新msg的元信息
+///
+/// reply is [`ACTION_COMMON_REPLY`]
+const ACTION_UPDATE: u8 = 12;
+
+/// 客户端主动关闭链接
+///
+/// no reply
+const ACTION_CLOSE: u8 = 14;
+
+/// subs端标记一个消息被完整处理
+///
+/// no reply
+const ACTION_FIN: u8 = 16;
+
+// server给subs发送消息
+const ACTION_MSG: u8 = 17;
+
+// Server 通用响应
+const ACTION_COMMON_REPLY: u8 = 19;
+// ========= PROTOCOL ACTION =========
+
+pub trait BuilderV1 {
+    fn buildv1(self) -> V1;
+}
 
 #[derive(Default, Clone, Debug)]
 pub struct V1 {
     pub head: Head,
+    identity: Option<Identity>,
     publish: Option<Publish>,
     subscribe: Option<Subscribe>,
     touch: Option<Touch>,
@@ -38,9 +88,24 @@ impl ProtolOperation for V1 {
     }
 }
 
+impl Builder for V1 {
+    fn build(self) -> Protocol {
+        Protocol::V1(self)
+    }
+}
+
 impl V1 {
     pub fn set_head(&mut self, head: Head) -> &mut Self {
         self.head = head;
+        self
+    }
+
+    pub fn get_identity(&self) -> Option<Identity> {
+        self.identity.clone()
+    }
+
+    pub fn set_identity(&mut self, i: Identity) -> &mut Self {
+        self.identity = Some(i);
         self
     }
 
@@ -70,27 +135,29 @@ impl V1 {
         self.touch = Some(t);
         self
     }
-}
 
-pub async fn parse_protocolv1_from_reader(
-    reader: &mut Pin<&mut impl AsyncReadExt>,
-    head: Head,
-) -> Result<V1> {
-    match head.get_action() {
-        1 => {
-            let mut v1 = V1::default();
-            v1.set_head(head.clone())
-                .set_publish(Publish::parse_from(reader, head).await?);
-            Ok(v1)
+    pub fn validate_for_server(&self) -> Result<()> {
+        if self.get_action() % 2 != 0 {
+            return Err(anyhow!("illigal action"));
         }
+        Ok(())
+    }
 
-        2 => {
-            let mut v1 = V1::default();
-            v1.set_head(head.clone())
-                .set_subscribe(Subscribe::parse_from(reader, head).await?);
-            Ok(v1)
+    pub fn validate_for_client(&self) -> Result<()> {
+        if self.get_action() % 2 == 0 {
+            return Err(anyhow!("illigal action"));
         }
+        Ok(())
+    }
 
-        _ => unreachable!(),
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<V1> {
+        match head.get_action() {
+            ACTION_IDENTITY => Ok(Identity::parse_from(reader, head).await?.buildv1()),
+            ACTION_TOUCH => Ok(Touch::parse_from(reader, head).await?.buildv1()),
+            ACTION_PUBLISH => Ok(Publish::parse_from(reader, head).await?.buildv1()),
+            ACTION_SUBSCRIBE => Ok(Subscribe::parse_from(reader, head).await?.buildv1()),
+
+            _ => unreachable!(),
+        }
     }
 }

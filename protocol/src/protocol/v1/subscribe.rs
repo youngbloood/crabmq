@@ -1,6 +1,11 @@
 use std::{ops::Deref, pin::Pin};
 
-use super::Head;
+use crate::protocol::{Builder, Protocol};
+
+use super::{
+    common_reply::{Reply, ReplyBuilder},
+    BuilderV1, Head, ACTION_SUBSCRIBE, V1,
+};
 use anyhow::Result;
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
@@ -152,6 +157,32 @@ impl Deref for Subscribe {
 
     fn deref(&self) -> &Self::Target {
         &self.sub_head
+    }
+}
+
+impl Builder for Subscribe {
+    fn build(self) -> Protocol {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_subscribe(self);
+        Protocol::V1(v1)
+    }
+}
+
+impl BuilderV1 for Subscribe {
+    fn buildv1(self) -> V1 {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_subscribe(self);
+        v1
+    }
+}
+
+impl ReplyBuilder for Subscribe {
+    fn build_reply_ok(&self) -> Reply {
+        Reply::with_ok(ACTION_SUBSCRIBE)
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_SUBSCRIBE, err_code)
     }
 }
 

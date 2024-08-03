@@ -5,7 +5,12 @@ use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
 
-use crate::protocol::Head;
+use crate::protocol::{Builder, Head, Protocol};
+
+use super::{
+    common_reply::{Reply, ReplyBuilder},
+    BuilderV1, ACTION_TOUCH, V1,
+};
 
 pub const TOUCH_HEAD_LENGTH: usize = 8;
 /**
@@ -267,112 +272,33 @@ impl Deref for Touch {
     }
 }
 
+impl Builder for Touch {
+    fn build(self) -> Protocol {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_touch(self);
+        Protocol::V1(v1)
+    }
+}
+
+impl BuilderV1 for Touch {
+    fn buildv1(self) -> V1 {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_touch(self);
+        v1
+    }
+}
+
+impl ReplyBuilder for Touch {
+    fn build_reply_ok(&self) -> Reply {
+        Reply::with_ok(ACTION_TOUCH)
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_TOUCH, err_code)
+    }
+}
+
 impl Touch {
-    /// [`parse_from`] read the protocol head from bts.
-    pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
-        let mut touch = Self::default();
-        touch.read_parse(fd).await?;
-        Ok(touch)
-    }
-
-    /// [`read_parse`] read the protocol head from reader.
-    pub async fn read_parse(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
-        let mut buf = BytesMut::new();
-
-        // parse crc
-        if self.has_crc() {
-            buf.resize(2, 0);
-            reader.read_exact(&mut buf).await?;
-            self.crc =
-                u16::from_be_bytes(buf.to_vec().try_into().expect("convert to 2 bytes failed"));
-        }
-
-        // parse [`max_msg_num_per_file`]
-        if self.has_max_msg_num_per_file() {
-            buf.resize(8, 0);
-            reader.read_exact(&mut buf).await?;
-            self.max_msg_num_per_file =
-                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
-        }
-
-        // parse [`max_size_per_file`]
-        if self.has_max_size_per_file() {
-            buf.resize(8, 0);
-            reader.read_exact(&mut buf).await?;
-            self.max_size_per_file =
-                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
-        }
-
-        // parse compress_type
-        if self.has_compress_type() {
-            buf.resize(1, 0);
-            reader.read_exact(&mut buf).await?;
-            self.compress_type =
-                u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
-        }
-
-        // parse subscribe_type
-        if self.has_subscribe_type() {
-            buf.resize(1, 0);
-            reader.read_exact(&mut buf).await?;
-            self.subscribe_type =
-                u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
-        }
-
-        // parse [`record_num_per_file`]
-        if self.has_record_num_per_file() {
-            buf.resize(8, 0);
-            reader.read_exact(&mut buf).await?;
-            self.record_num_per_file =
-                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
-        }
-
-        // parse [`record_size_per_file`]
-        if self.has_record_size_per_file() {
-            buf.resize(8, 0);
-            reader.read_exact(&mut buf).await?;
-            self.record_size_per_file =
-                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
-        }
-        // parse [`fd_cache_size`]
-        if self.has_fd_cache_size() {
-            buf.resize(8, 0);
-            reader.read_exact(&mut buf).await?;
-            self.fd_cache_size =
-                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
-        }
-
-        // parse topic name
-        buf.resize(self.topic_len() as usize, 0);
-        reader.read_exact(&mut buf).await?;
-        let topic: String = String::from_utf8(buf.to_vec()).expect("illigal topic name");
-        self.set_topic(topic.as_str())?;
-
-        debug!(addr = "{self.addr:?}", "parse channel name");
-
-        // parse channel name
-        buf.resize(self.channel_len() as usize, 0);
-        reader.read_exact(&mut buf).await?;
-        let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
-        self.set_channel(channel.as_str())?;
-
-        debug!(addr = "{self.addr:?}", "parse token");
-        // parse token
-        buf.resize(self.token_len() as usize, 0);
-        reader.read_exact(&mut buf).await?;
-        let token = String::from_utf8(buf.to_vec()).expect("illigal token value");
-        self.set_token(token.as_str())?;
-
-        // parse custom defer message format
-        buf.resize(self.defer_format_len() as usize, 0);
-        reader.read_exact(&mut buf).await?;
-        let fmt =
-            String::from_utf8(buf.to_vec()).expect("illigal custom-defer-message-format value");
-        self.set_defer_format(fmt.as_str())?;
-
-        Ok(())
-    }
-
     pub fn set_head(&mut self, head: Head) -> &mut Self {
         self.head = head;
         self
@@ -504,6 +430,121 @@ impl Touch {
         }
         self.defer_msg_format = fmt.to_string();
         self.touch_head.set_defer_format_len(fmt.len() as u8);
+        Ok(())
+    }
+
+    /// [`parse_from`] read the protocol head from bts.
+    pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+        let mut touch = Self::default();
+        touch.set_head(head);
+        touch.read_parse(fd).await?;
+        Ok(touch)
+    }
+
+    /// [`read_parse`] read the protocol head from reader.
+    pub async fn read_parse(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
+        let mut buf = BytesMut::new();
+
+        // parse touch head
+        buf.resize(TOUCH_HEAD_LENGTH, 0);
+        reader.read_exact(&mut buf).await?;
+        self.touch_head = TouchHead::with(
+            buf.to_vec()
+                .try_into()
+                .expect("convert to touch head failed"),
+        );
+
+        // parse crc
+        if self.has_crc() {
+            buf.resize(2, 0);
+            reader.read_exact(&mut buf).await?;
+            self.crc =
+                u16::from_be_bytes(buf.to_vec().try_into().expect("convert to 2 bytes failed"));
+        }
+
+        // parse [`max_msg_num_per_file`]
+        if self.has_max_msg_num_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.max_msg_num_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse [`max_size_per_file`]
+        if self.has_max_size_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.max_size_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse compress_type
+        if self.has_compress_type() {
+            buf.resize(1, 0);
+            reader.read_exact(&mut buf).await?;
+            self.compress_type =
+                u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
+        }
+
+        // parse subscribe_type
+        if self.has_subscribe_type() {
+            buf.resize(1, 0);
+            reader.read_exact(&mut buf).await?;
+            self.subscribe_type =
+                u8::from_be_bytes(buf.to_vec().try_into().expect("convert to 1 bytes failed"))
+        }
+
+        // parse [`record_num_per_file`]
+        if self.has_record_num_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.record_num_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse [`record_size_per_file`]
+        if self.has_record_size_per_file() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.record_size_per_file =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+        // parse [`fd_cache_size`]
+        if self.has_fd_cache_size() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            self.fd_cache_size =
+                u64::from_be_bytes(buf.to_vec().try_into().expect("convert to 8 bytes failed"));
+        }
+
+        // parse topic name
+        buf.resize(self.topic_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let topic: String = String::from_utf8(buf.to_vec()).expect("illigal topic name");
+        self.set_topic(topic.as_str())?;
+
+        debug!(addr = "{self.addr:?}", "parse channel name");
+
+        // parse channel name
+        buf.resize(self.channel_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
+        self.set_channel(channel.as_str())?;
+
+        debug!(addr = "{self.addr:?}", "parse token");
+        // parse token
+        buf.resize(self.token_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let token = String::from_utf8(buf.to_vec()).expect("illigal token value");
+        self.set_token(token.as_str())?;
+
+        // parse custom defer message format
+        buf.resize(self.defer_format_len() as usize, 0);
+        reader.read_exact(&mut buf).await?;
+        let fmt =
+            String::from_utf8(buf.to_vec()).expect("illigal custom-defer-message-format value");
+        self.set_defer_format(fmt.as_str())?;
+
         Ok(())
     }
 }

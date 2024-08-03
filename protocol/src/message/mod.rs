@@ -36,7 +36,7 @@ impl Message {
         todo!()
     }
 
-    pub async fn parse_from(_: &[u8]) -> Result<Self> {
+    pub async fn parse_from_vec(_: &[u8]) -> Result<Self> {
         todo!()
     }
 }
