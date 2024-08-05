@@ -79,13 +79,13 @@ impl TcpServer {
                 }
 
                 // 处理从客户端收到的消息
-                msg_opt = self.in_recver.recv() => {
+                prot_opt = self.in_recver.recv() => {
                     info!("recieve a message from in_recver");
-                    if msg_opt.is_none(){
+                    if prot_opt.is_none(){
                         continue;
                     }
-                    debug!("msg = {:?}",msg_opt);
-                    let (addr,mut msg) = msg_opt.unwrap();
+                    debug!("msg = {:?}",prot_opt);
+                    let (addr,prot) = prot_opt.unwrap();
                     // let (resp, passed) = self.validate(addr.as_str(), &msg);
                     // if !passed {
                     //     let _ = self.out_sender.send((addr, resp.unwrap())).await;
@@ -96,7 +96,7 @@ impl TcpServer {
                     //     continue;
                     // }
                     let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
-                    self.crab.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),msg).await;
+                    self.crab.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),prot).await;
                 }
 
                 // 处理响应至客户端的消息

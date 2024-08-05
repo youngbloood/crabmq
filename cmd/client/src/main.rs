@@ -1,5 +1,4 @@
-use anyhow::anyhow;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use clap::arg;
 use clap::Parser;
@@ -7,12 +6,12 @@ use common::global;
 use core::conn::Conn;
 use futures::executor::block_on;
 use inquire::Text;
-
-use protocol::v1::ProtocolBodyV1;
-use protocol::v1::ProtocolBodysV1;
-use protocol::v1::ProtocolHeadV1;
-use protocol::ProtocolBodys;
-use protocol::ProtocolHead;
+use protocol::consts::PROPTOCOL_V1;
+use protocol::message::v1::MessageUserV1;
+use protocol::protocol::v1::publish::Publish as PublishV1;
+use protocol::protocol::Builder;
+use protocol::protocol::Protocol;
+use protocol::protocol::ProtocolOperation as _;
 use std::env::args;
 use tokio::fs;
 use tokio::net::TcpSocket;
@@ -100,49 +99,49 @@ impl Args {
         self.bodys = vec![];
     }
 
-    fn builder(&self) -> Result<Message> {
+    fn builder(&self) -> Result<Protocol> {
         if self.head.is_none() {
             return Err(anyhow!("not found head in message"));
         }
-        let mut head = ProtocolHeadV1::new();
-        head.set_topic(self.head.as_ref().unwrap().topic_name.as_str())?;
-        head.set_channel(self.head.as_ref().unwrap().channel_name.as_str())?;
-        head.set_action(action_to_u8(self.head.as_ref().unwrap().action.as_str()))
-            .set_topic_ephemeral(self.head.as_ref().unwrap().topic_ephemeral)
-            .set_channel_ephemeral(self.head.as_ref().unwrap().channel_ephemeral)
-            .set_version(self.head.as_ref().unwrap().protocol_version)
-            .expect("init head failed");
 
-        let mut bodys = ProtocolBodysV1::new();
-        self.bodys.iter().for_each(|msg: &MsgArgs| {
-            let mut body = ProtocolBodyV1::new();
-            body.with_ack(msg.ack)
-                .with_delete(msg.delete)
-                .with_persist(msg.persist)
-                .with_notready(msg.not_ready)
-                .with_defer_time_offset(msg.defer);
+        let prot: Result<Protocol> = match self.head.as_ref().unwrap().protocol_version {
+            PROPTOCOL_V1 => match self.head.as_ref().unwrap().action.as_str() {
+                "pub" => {
+                    let mut publishv1 = PublishV1::default();
+                    publishv1.set_topic(self.head.as_ref().unwrap().topic_name.as_str())?;
+                    publishv1.set_ephemeral(self.head.as_ref().unwrap().topic_ephemeral);
 
-            if let Some(body_str) = msg.body.as_ref() {
-                body.with_body(Bytes::copy_from_slice(body_str.as_bytes()))
-                    .expect("set body err");
-            }
-            if let Some(body_file) = msg.body_file.as_ref() {
-                let content = block_on(fs::read(body_file)).expect("read {filename} err");
-                body.with_body(Bytes::copy_from_slice(&content))
-                    .expect("set body err");
-            }
+                    for msg in &self.bodys {
+                        let mut msgv1 = MessageUserV1::default();
+                        msgv1
+                            .set_ack(msg.ack)
+                            .set_delete(msg.delete)
+                            .set_persist(msg.persist)
+                            .set_notready(msg.not_ready);
+                        if let Some(body_str) = msg.body.as_ref() {
+                            msgv1.set_body(Bytes::copy_from_slice(body_str.as_bytes()));
+                        }
+                        if let Some(body_file) = msg.body_file.as_ref() {
+                            let content =
+                                block_on(fs::read(body_file)).expect("read {filename} err");
+                            msgv1.set_body(Bytes::copy_from_slice(&content));
+                        }
 
-            if let Some(id) = msg.id.as_ref() {
-                body.with_id(id).expect("set id err");
-            }
+                        if let Some(id) = msg.id.as_ref() {
+                            msgv1.set_id(id).expect("set id err");
+                        }
+                        publishv1.push_msg(msgv1)?;
+                    }
+                    Ok(publishv1.build())
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let prot = prot?;
 
-            bodys.push(body);
-        });
-
-        let msg = Message::with(ProtocolHead::V1(head), ProtocolBodys::V1(bodys))?;
-        msg.validate(u8::MAX as u64, u64::MAX)?;
         // msg.post_fill();
-        Ok(msg)
+        Ok(prot)
     }
 
     fn push_body(&mut self, body: MsgArgs) -> Result<()> {
@@ -157,24 +156,6 @@ impl Args {
         self.head = Some(head);
         Ok(())
     }
-}
-
-fn action_to_u8(action: &str) -> u8 {
-    let mut a = 0;
-    match action.to_lowercase().as_str() {
-        "fin" => a = 1,
-        "rdy" => a = 2,
-        "req" => a = 3,
-        "pub" => a = 4,
-        "nop" => a = 5,
-        "touch" => a = 6,
-        "sub" => a = 7,
-        "cls" => a = 8,
-        "auth" => a = 9,
-        _ => a = u8::MIN,
-    }
-
-    a
 }
 
 #[tokio::main]
@@ -274,9 +255,9 @@ async fn main() -> Result<()> {
                             }
 
                             "send" => {
-                                println!("send args: {args:?}");
                                 match args.builder(){
                                     Ok(msg) => {
+                                        println!("send proc: {msg:?}");
                                         let bts = &msg.as_bytes();
                                         println!("send bts: {bts:?}");
                                         if let Err(e) = conn.write(&msg.as_bytes(), 30).await

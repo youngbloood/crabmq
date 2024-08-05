@@ -1,24 +1,34 @@
 pub mod v1;
 
+use crate::consts::PROPTOCOL_V1;
+use crate::message::Message;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use enum_dispatch::enum_dispatch;
+use std::fmt::Debug;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
+use tracing::debug;
+use v1::reply::{Reply, ReplyBuilder};
 use v1::V1;
 
-use crate::message::Message;
-
 pub const HEAD_LENGTH: usize = 2;
-
-pub const PROPTOCOL_V1: u8 = 1;
 
 pub trait Builder {
     fn build(self) -> Protocol;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Head([u8; HEAD_LENGTH]);
+
+impl Debug for Head {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Head")
+            .field("version", &self.get_version())
+            .field("action", &self.get_action())
+            .finish()
+    }
+}
 
 impl Default for Head {
     fn default() -> Self {
@@ -39,16 +49,18 @@ impl Head {
         self.0[0]
     }
 
-    pub fn set_version(&mut self, v: u8) {
+    pub fn set_version(&mut self, v: u8) -> &mut Self {
         self.0[0] = v;
+        self
     }
 
     pub fn get_action(&self) -> u8 {
         self.0[1]
     }
 
-    pub fn set_action(&mut self, action: u8) {
+    pub fn set_action(&mut self, action: u8) -> &mut Self {
         self.0[1] = action;
+        self
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -60,21 +72,30 @@ impl Head {
 }
 
 #[enum_dispatch]
-pub trait ProtolOperation {
+pub trait ProtocolOperation {
     fn get_version(&self) -> u8;
     fn get_action(&self) -> u8;
-    fn convert_to_message(&self) -> Result<Message>;
+    fn convert_to_message(&self) -> Result<Vec<Message>>;
+    fn as_bytes(&self) -> Vec<u8>;
 }
 
 #[derive(Debug, Clone)]
-#[enum_dispatch(ProtolOperation)]
+#[enum_dispatch(ProtocolOperation)]
 pub enum Protocol {
     V1(V1),
 }
 
-impl Protocol {
-    pub fn as_bytes(&self) -> Vec<u8> {
-        vec![]
+impl ReplyBuilder for Protocol {
+    fn build_reply_ok(&self) -> Reply {
+        match self {
+            Protocol::V1(v1) => v1.build_reply_ok(),
+        }
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        match self {
+            Protocol::V1(v1) => v1.build_reply_err(err_code),
+        }
     }
 }
 
@@ -86,6 +107,7 @@ pub async fn parse_protocol_from_reader(
     reader.read_exact(&mut buf).await?;
     let head = Head::with(buf.to_vec().try_into().expect("convert to head failed"));
 
+    println!("head = {head:?}");
     match head.get_version() {
         PROPTOCOL_V1 => Ok(Protocol::V1(V1::parse_from(reader, head.clone()).await?)),
         _ => Err(anyhow!("unsupport protocol version")),

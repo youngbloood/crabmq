@@ -1,65 +1,20 @@
 pub mod auth;
-pub mod bin_message;
-pub mod common_reply;
 pub mod identity;
 pub mod publish;
+pub mod reply;
 pub mod subscribe;
 pub mod touch;
 
-use super::{Builder, Head, Protocol, ProtolOperation};
-use crate::message::Message;
+use super::{Builder, Head, Protocol, ProtocolOperation};
+use crate::{consts::*, message::Message};
 use anyhow::{anyhow, Result};
 use identity::Identity;
 use publish::Publish;
+use reply::{Reply, ReplyBuilder};
 use std::pin::Pin;
 use subscribe::Subscribe;
 use tokio::io::AsyncReadExt;
 use touch::Touch;
-
-// ========= PROTOCOL ACTION =========
-// even number denote the Client -> Server
-// odd number denote the Server -> Client
-const ACTION_IDENTITY: u8 = 0;
-const ACTION_IDENTITY_REPLY: u8 = 1;
-
-const ACTION_AUTH: u8 = 2;
-const ACTION_AUTH_REPLY: u8 = 3;
-
-/// reply is [`ACTION_COMMON_REPLY`]
-const ACTION_TOUCH: u8 = 4;
-
-/// reply is [`ACTION_COMMON_REPLY`]
-const ACTION_PUBLISH: u8 = 6;
-
-/// reply is [`ACTION_COMMON_REPLY`]
-const ACTION_SUBSCRIBE: u8 = 8;
-
-/// subs重置超时时间
-///
-/// no reply
-const ACTION_RESET: u8 = 11;
-
-/// pubs更新msg的元信息
-///
-/// reply is [`ACTION_COMMON_REPLY`]
-const ACTION_UPDATE: u8 = 12;
-
-/// 客户端主动关闭链接
-///
-/// no reply
-const ACTION_CLOSE: u8 = 14;
-
-/// subs端标记一个消息被完整处理
-///
-/// no reply
-const ACTION_FIN: u8 = 16;
-
-// server给subs发送消息
-const ACTION_MSG: u8 = 17;
-
-// Server 通用响应
-const ACTION_COMMON_REPLY: u8 = 19;
-// ========= PROTOCOL ACTION =========
 
 pub trait BuilderV1 {
     fn buildv1(self) -> V1;
@@ -67,14 +22,31 @@ pub trait BuilderV1 {
 
 #[derive(Default, Clone, Debug)]
 pub struct V1 {
-    pub head: Head,
+    head: Head,
     identity: Option<Identity>,
     publish: Option<Publish>,
     subscribe: Option<Subscribe>,
     touch: Option<Touch>,
+    reply: Option<Reply>,
 }
 
-impl ProtolOperation for V1 {
+impl ReplyBuilder for V1 {
+    fn build_reply_ok(&self) -> Reply {
+        match self.head.get_action() {
+            ACTION_PUBLISH => self.publish.as_ref().unwrap().build_reply_ok(),
+            _ => Reply::default(),
+        }
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        match self.head.get_action() {
+            ACTION_PUBLISH => self.publish.as_ref().unwrap().build_reply_err(err_code),
+            _ => Reply::default(),
+        }
+    }
+}
+
+impl ProtocolOperation for V1 {
     fn get_version(&self) -> u8 {
         self.head.get_version()
     }
@@ -83,8 +55,24 @@ impl ProtolOperation for V1 {
         self.head.get_action()
     }
 
-    fn convert_to_message(&self) -> Result<Message> {
-        todo!();
+    fn convert_to_message(&self) -> Result<Vec<Message>> {
+        match self.head.get_action() {
+            ACTION_PUBLISH => {
+                if let Some(p) = self.publish.as_ref() {
+                    return Ok(p.split_message());
+                }
+                Err(anyhow!("not found publish"))
+            }
+            _ => Err(anyhow!("not found publish")),
+        }
+    }
+
+    fn as_bytes(&self) -> Vec<u8> {
+        match self.head.get_action() {
+            ACTION_PUBLISH => self.publish.as_ref().unwrap().as_bytes(),
+            ACTION_REPLY => self.reply.as_ref().unwrap().as_bytes(),
+            _ => unimplemented!(),
+        }
     }
 }
 
@@ -136,6 +124,15 @@ impl V1 {
         self
     }
 
+    pub fn get_reply(&self) -> Option<Reply> {
+        self.reply.clone()
+    }
+
+    pub fn set_reply(&mut self, r: Reply) -> &mut Self {
+        self.reply = Some(r);
+        self
+    }
+
     pub fn validate_for_server(&self) -> Result<()> {
         if self.get_action() % 2 != 0 {
             return Err(anyhow!("illigal action"));
@@ -156,8 +153,20 @@ impl V1 {
             ACTION_TOUCH => Ok(Touch::parse_from(reader, head).await?.buildv1()),
             ACTION_PUBLISH => Ok(Publish::parse_from(reader, head).await?.buildv1()),
             ACTION_SUBSCRIBE => Ok(Subscribe::parse_from(reader, head).await?.buildv1()),
-
+            ACTION_REPLY => Ok(Reply::parse_from(reader, head).await?.buildv1()),
+            // TODO:
+            ACTION_MSG => unimplemented!(),
+            ACTION_RESET => unimplemented!(),
+            ACTION_UPDATE => unimplemented!(),
+            ACTION_CLOSE => unimplemented!(),
+            ACTION_FIN => unimplemented!(),
             _ => unreachable!(),
         }
     }
+}
+
+pub fn new_v1_head(action: u8) -> Head {
+    let mut head = Head::default();
+    head.set_action(action).set_version(PROPTOCOL_V1);
+    head
 }

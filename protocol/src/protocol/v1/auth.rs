@@ -1,10 +1,12 @@
-use super::ACTION_AUTH;
+use crate::consts::ACTION_AUTH;
 use crate::protocol::Head;
 use anyhow::Result;
 use bytes::BytesMut;
 use std::ops::Deref;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
+
+use super::{new_v1_head, PROPTOCOL_V1};
 
 pub const AUTH_HEAD_LENGTH: usize = 5;
 
@@ -109,10 +111,8 @@ pub struct Auth {
 
 impl Default for Auth {
     fn default() -> Self {
-        let mut head = Head::default();
-        head.set_action(ACTION_AUTH);
         Self {
-            head,
+            head: new_v1_head(ACTION_AUTH),
             auth_head: AuthHead::default(),
             username: String::new(),
             password: String::new(),

@@ -72,11 +72,11 @@ impl Crab {
         client: Guard<Client>,
         out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Protocol,
+        prot: Protocol,
     ) {
         self.mb
             .get_mut()
-            .handle_message(client, out_sender, addr, msg)
+            .handle_message(client, out_sender, addr, prot)
             .await;
     }
 

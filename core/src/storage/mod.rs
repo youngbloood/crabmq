@@ -11,8 +11,9 @@ use disk::config::DiskConfig;
 use disk::StorageDisk;
 use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
+use protocol::consts::ACTION_TOUCH;
 use protocol::message::{Message, MessageOperation as _, TopicCustom};
-use protocol::protocol::{Protocol, ProtolOperation as _};
+use protocol::protocol::{Protocol, ProtocolOperation as _};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
@@ -48,7 +49,7 @@ pub trait PersistStorageOperation {
     async fn flush(&self) -> Result<()>;
 
     /// push a message into topic.
-    async fn push(&self, msg: Message, meta: &TopicMeta) -> Result<()>;
+    async fn push(&self, msg: Vec<Message>, meta: &TopicMeta) -> Result<()>;
 
     /// stop the Storage Media.
     async fn stop(&self) -> Result<()>;
@@ -185,22 +186,22 @@ impl StorageWrapper {
         prot: Protocol,
         epehemral: bool,
     ) -> Result<()> {
-        let msg = prot.convert_to_message()?;
-        let get_topic = msg.get_topic();
-        let topic_name = get_topic;
+        let msgs = prot.convert_to_message()?;
+        if msgs.is_empty() {
+            return Ok(());
+        }
+        let topic_name = msgs[0].get_topic();
         let meta = covert_protocol_to_topicmeta(&prot);
         let (ephemeral, _) = self
             .get_or_create_topic(topic_name, epehemral, &meta)
             .await?;
 
         if ephemeral {
-            self.dummy.push(msg.clone(), &meta).await?;
+            self.dummy.push(msgs.clone(), &meta).await?;
         } else {
-            self.storage.push(msg.clone(), &meta).await?;
+            self.storage.push(msgs.clone(), &meta).await?;
         }
 
-        // 可能client已经关闭，忽略该err
-        let _ = out_sender.send((addr.to_string(), prot)).await;
         self.persist_factor_now.fetch_add(1, Relaxed);
         if self.persist_factor_now.load(Relaxed) == u64::MAX {
             self.persist_factor_now.store(0, Relaxed)
@@ -256,7 +257,7 @@ pub async fn new_storage_wrapper(
 /**
  * [`TopicMeta`] should compatable with all [`TopicCustom`]
  */
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct TopicMeta {
     pub prohibit_instant: bool,
     pub prohibit_defer: bool,
@@ -300,7 +301,29 @@ impl TopicMeta {
 }
 
 fn covert_protocol_to_topicmeta(prot: &Protocol) -> TopicMeta {
-    todo!()
+    match prot {
+        Protocol::V1(v1) => match v1.get_action() {
+            ACTION_TOUCH => {
+                if let Some(touch) = v1.get_touch() {
+                    return TopicMeta::new(
+                        touch.prohibit_instant(),
+                        touch.prohibit_defer(),
+                        touch.get_defer_msg_format().to_string(),
+                        touch.get_max_msg_num_per_file(),
+                        touch.get_max_size_per_file(),
+                        touch.get_compress_type(),
+                        touch.get_subscribe_type(),
+                        touch.get_record_num_per_file(),
+                        touch.get_record_size_per_file(),
+                        touch.get_fd_cache_size(),
+                    );
+                }
+                TopicMeta::default()
+            }
+            _ => TopicMeta::default(),
+        },
+        _ => TopicMeta::default(),
+    }
 }
 
 // fn covert_message_to_topicmeta(msg: &Message) -> TopicMeta {

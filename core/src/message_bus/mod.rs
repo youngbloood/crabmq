@@ -9,8 +9,9 @@ use anyhow::{anyhow, Result};
 use common::global::Guard;
 use dashmap::DashMap;
 use protocol::{
+    consts::*,
     error::ProtError,
-    protocol::{Protocol, ProtolOperation},
+    protocol::{v1::reply::ReplyBuilder, Builder, Protocol, ProtocolOperation},
 };
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;
@@ -125,18 +126,15 @@ impl MessageBus {
         client: Guard<Client>,
         out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Protocol,
+        prot: Protocol,
     ) {
-        match msg.get_action() {
-            ACTION_FIN => self.fin(out_sender, addr, msg).await,
-            ACTION_RDY => self.rdy(out_sender, addr, msg).await,
-            ACTION_REQ => self.req(out_sender, addr, msg).await,
-            ACTION_PUB => self.publish(out_sender, addr, msg).await,
-            ACTION_NOP => self.nop(out_sender, addr, msg).await,
-            ACTION_TOUCH => self.touch(out_sender, addr, msg).await,
-            ACTION_SUB => self.subscribe(out_sender, addr, msg, client).await,
-            ACTION_CLS => self.cls(out_sender, addr, msg).await,
-            ACTION_AUTH => self.auth(out_sender, addr, msg).await,
+        match prot.get_action() {
+            ACTION_FIN => self.fin(out_sender, addr, prot).await,
+            ACTION_PUBLISH => self.publish(out_sender, addr, prot).await,
+            ACTION_TOUCH => self.touch(out_sender, addr, prot).await,
+            ACTION_SUBSCRIBE => self.subscribe(out_sender, addr, prot, client).await,
+            ACTION_CLOSE => self.cls(out_sender, addr, prot).await,
+            ACTION_AUTH => self.auth(out_sender, addr, prot).await,
             _ => unreachable!(),
         }
     }
@@ -150,17 +148,26 @@ impl MessageBus {
         &mut self,
         out_sender: Sender<(String, Protocol)>,
         addr: &str,
-        msg: Protocol,
+        prot: Protocol,
     ) {
-        match self.push(out_sender.clone(), addr, msg.clone()).await {
-            Ok(_) => debug!("send msg successful"),
+        match self.push(out_sender.clone(), addr, prot.clone()).await {
+            Ok(_) => {
+                debug!("send msg successful");
+                // 可能client已经关闭，忽略该err
+                let _ = out_sender
+                    .send((addr.to_string(), prot.build_reply_ok().build()))
+                    .await;
+            }
+
             Err(e) => {
                 let err: ProtError = e.into();
                 error!("send msg failed: {err:?}");
                 // TODO:
                 // let mut resp = convert_to_resp(msg);
                 // resp.set_reject_code(err.code);
-                let _ = out_sender.send((addr.to_string(), msg)).await;
+                let _ = out_sender
+                    .send((addr.to_string(), prot.build_reply_err(err.code).build()))
+                    .await;
             }
         }
     }

@@ -1,15 +1,16 @@
-use std::ops::Deref;
-use std::pin::Pin;
-
-use anyhow::Result;
-use bytes::BytesMut;
-use rsbit::{BitFlagOperation, BitOperation as _};
-use tokio::io::AsyncReadExt;
-
 use super::auth::AuthType;
+use super::new_v1_head;
 use super::BuilderV1;
 use super::Head;
 use super::V1;
+use crate::consts::ACTION_IDENTITY;
+use crate::consts::PROPTOCOL_V1;
+use anyhow::Result;
+use bytes::BytesMut;
+use rsbit::{BitFlagOperation, BitOperation as _};
+use std::ops::Deref;
+use std::pin::Pin;
+use tokio::io::AsyncReadExt;
 
 const IDENTITY_HEAD_LENGTH: usize = 4;
 
@@ -55,11 +56,21 @@ impl IdentityHead {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Identity {
     head: Head,
     identity_head: IdentityHead,
     crc: u16,
+}
+
+impl Default for Identity {
+    fn default() -> Self {
+        Self {
+            head: new_v1_head(ACTION_IDENTITY),
+            identity_head: Default::default(),
+            crc: Default::default(),
+        }
+    }
 }
 
 impl BuilderV1 for Identity {

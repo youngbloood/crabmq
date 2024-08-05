@@ -192,11 +192,11 @@ impl PersistStorageOperation for StorageDisk {
         Ok(())
     }
 
-    async fn push(&self, msg: Message, meta: &TopicMeta) -> Result<()> {
+    async fn push(&self, msgs: Vec<Message>, meta: &TopicMeta) -> Result<()> {
         let topic = self
-            .get_or_create_topic_inner(msg.get_topic(), meta)
+            .get_or_create_topic_inner(msgs[0].get_topic(), meta)
             .await?;
-        topic.push(msg).await?;
+        topic.push_msgs(msgs).await?;
         Ok(())
     }
 
@@ -281,6 +281,13 @@ impl TopicMessage {
             return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_INSTANT)));
         }
         self.guard.get().instant.handle_msg(msg).await?;
+        Ok(())
+    }
+
+    async fn push_msgs(&self, msgs: Vec<Message>) -> Result<()> {
+        for msg in msgs {
+            self.push(msg).await?;
+        }
         Ok(())
     }
 }

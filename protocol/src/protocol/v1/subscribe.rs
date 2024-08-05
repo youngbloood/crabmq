@@ -1,14 +1,16 @@
-use std::{ops::Deref, pin::Pin};
-
-use crate::protocol::{Builder, Protocol};
-
 use super::{
-    common_reply::{Reply, ReplyBuilder},
-    BuilderV1, Head, ACTION_SUBSCRIBE, V1,
+    new_v1_head,
+    reply::{Reply, ReplyBuilder},
+    BuilderV1, Head, ACTION_REPLY, PROPTOCOL_V1, V1,
+};
+use crate::{
+    consts::ACTION_SUBSCRIBE,
+    protocol::{Builder, Protocol},
 };
 use anyhow::Result;
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
+use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 
 const SUBSCRIBE_HEAD_LENGTH: usize = 6;
@@ -141,8 +143,8 @@ impl Default for Subscribe {
             .set_ready_number(true);
 
         Self {
-            head: Default::default(),
-            sub_head: Default::default(),
+            head: new_v1_head(ACTION_SUBSCRIBE),
+            sub_head,
             crc: Default::default(),
             ready_number: 1,
             topic,

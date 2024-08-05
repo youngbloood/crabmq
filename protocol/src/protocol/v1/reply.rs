@@ -1,17 +1,21 @@
-use super::ACTION_COMMON_REPLY;
-use crate::protocol::Head;
+use super::{new_v1_head, BuilderV1, PROPTOCOL_V1, V1};
+use crate::consts::ACTION_REPLY;
+use crate::protocol::Protocol;
+use crate::protocol::{Builder, Head};
 use anyhow::Result;
 use bytes::BytesMut;
+use enum_dispatch::enum_dispatch;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
 
+#[enum_dispatch]
 pub trait ReplyBuilder {
     fn build_reply_ok(&self) -> Reply;
     fn build_reply_err(&self, err_code: u8) -> Reply;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Reply {
     head: Head,
     /// action type: 表示返回的操作类型
@@ -22,10 +26,8 @@ pub struct Reply {
 
 impl Default for Reply {
     fn default() -> Self {
-        let mut head = Head::default();
-        head.set_action(ACTION_COMMON_REPLY);
         Self {
-            head,
+            head: new_v1_head(ACTION_REPLY),
             action_type: Default::default(),
             err_code: Default::default(),
         }
@@ -43,6 +45,20 @@ impl Deref for Reply {
 impl DerefMut for Reply {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.head
+    }
+}
+
+impl BuilderV1 for Reply {
+    fn buildv1(self) -> V1 {
+        let mut v1 = V1::default();
+        v1.set_head(self.head.clone()).set_reply(self);
+        v1
+    }
+}
+
+impl Builder for Reply {
+    fn build(self) -> Protocol {
+        Protocol::V1(self.buildv1())
     }
 }
 
@@ -80,6 +96,15 @@ impl Reply {
 
     pub fn is_err(&self) -> bool {
         self.err_code != 0
+    }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.push(self.action_type);
+        res.push(self.err_code);
+
+        res
     }
 
     pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {

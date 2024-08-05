@@ -1,16 +1,18 @@
+use super::{
+    new_v1_head,
+    reply::{Reply, ReplyBuilder},
+    BuilderV1, ACTION_REPLY, PROPTOCOL_V1, V1,
+};
+use crate::{
+    consts::ACTION_TOUCH,
+    protocol::{Builder, Head, Protocol},
+};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
 use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
-
-use crate::protocol::{Builder, Head, Protocol};
-
-use super::{
-    common_reply::{Reply, ReplyBuilder},
-    BuilderV1, ACTION_TOUCH, V1,
-};
 
 pub const TOUCH_HEAD_LENGTH: usize = 8;
 /**
@@ -244,7 +246,7 @@ impl TouchHead {
     // 6th byte ======================================== END
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Touch {
     head: Head,
     touch_head: TouchHead,
@@ -262,6 +264,27 @@ pub struct Touch {
     record_size_per_file: u64,
     fd_cache_size: u64,
     defer_msg_format: String,
+}
+
+impl Default for Touch {
+    fn default() -> Self {
+        Self {
+            head: new_v1_head(ACTION_TOUCH),
+            touch_head: TouchHead::default(),
+            topic: String::new(),
+            channel: String::new(),
+            token: String::new(),
+            crc: 0,
+            max_msg_num_per_file: 0,
+            max_size_per_file: 0,
+            compress_type: 0,
+            subscribe_type: 0,
+            record_num_per_file: 0,
+            record_size_per_file: 0,
+            fd_cache_size: 0,
+            defer_msg_format: String::new(),
+        }
+    }
 }
 
 impl Deref for Touch {

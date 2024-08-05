@@ -4,8 +4,8 @@ use crate::crab::Crab;
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
 use common::Weight;
-use protocol::message::Message;
 use protocol::protocol::Protocol;
+use protocol::protocol::ProtocolOperation as _;
 
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
@@ -191,8 +191,8 @@ impl Client {
                 }
 
                 // 从self.channel中获取数据并返回给client
-                msg = self.recv_msg() => {
-                    if let Err(e) =conn.write(&msg.as_bytes(), self.opt.get().global.client_write_timeout).await{
+                prot = self.recv_msg() => {
+                    if let Err(e) =conn.write(&prot.as_bytes(), self.opt.get().global.client_write_timeout).await{
                         write_timeout_count += 1;
                         error!(addr = addr, "write msg err: {e:?}");
                     }

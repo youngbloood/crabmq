@@ -242,7 +242,6 @@ mod tests {
 
         for i in 0..40 {
             let msg = MessageV1::default();
-
             assert!(instant.handle_msg(Message::V1(msg)).await.is_ok());
             if i / 3 == 0 {
                 assert!(instant.flush().await.is_ok());

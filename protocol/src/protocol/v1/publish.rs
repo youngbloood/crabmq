@@ -1,18 +1,22 @@
-use std::{ops::Deref, pin::Pin};
-
-use super::common_reply::Reply;
-use super::common_reply::ReplyBuilder;
+use super::new_v1_head;
+use super::reply::Reply;
+use super::reply::ReplyBuilder;
 use super::BuilderV1;
+use super::Head;
 use super::V1;
-use super::{bin_message::BinMessage, Head};
+use crate::consts::ACTION_PUBLISH;
+use crate::consts::PROPTOCOL_V1;
+use crate::message::v1::MessageUserV1;
 use crate::message::v1::MessageV1;
 use crate::message::Message;
-use crate::protocol::v1::ACTION_PUBLISH;
 use crate::protocol::Builder;
 use crate::protocol::Protocol;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation, BitOperation as _};
+use std::fmt::Debug;
+use std::ops::DerefMut;
+use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 
 const PUBLISH_HEAD_LENGTH: usize = 6;
@@ -34,8 +38,21 @@ const PUBLISH_HEAD_LENGTH: usize = 6;
  *          n bytes: topic name
  *          n bytes: token value
  */
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct PublishHead([u8; PUBLISH_HEAD_LENGTH]);
+
+impl Debug for PublishHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishHead")
+            .field("is-heartbeat", &self.is_heartbeat())
+            .field("has-crc", &self.has_crc())
+            .field("is-ephemeral", &self.is_ephemeral())
+            .field("msg-num", &self.msg_num())
+            .field("topic-len", &self.get_topic_len())
+            .field("token-len", &self.get_token_len())
+            .finish()
+    }
+}
 
 impl PublishHead {
     fn set_flag(&mut self, index: usize, pos: u8, on: bool) {
@@ -112,18 +129,51 @@ impl PublishHead {
         self.0[5] = l;
         self
     }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Publish {
-    pub head: Head,
+    head: Head,
     pub_head: PublishHead,
 
     crc: u16,
     topic: String,
     token: String,
 
-    msgs: Vec<BinMessage>,
+    msgs: Vec<MessageUserV1>,
+}
+
+// impl Debug for Publish {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         f.debug_struct("PublishHead")
+//             .field("head", &self.head)
+//             .field("pub_head", &self.pub_head)
+//             .field("crc", &self.crc)
+//             .field("topic", &self.topic)
+//             .field("token", &self.token)
+//             .field("msgs", &self.msgs)
+//             .finish()
+//     }
+// }
+
+impl Default for Publish {
+    fn default() -> Self {
+        let topic_name = "default";
+        let mut pub_head = PublishHead::default();
+        pub_head.set_topic_len(topic_name.len() as _);
+        Self {
+            head: new_v1_head(ACTION_PUBLISH),
+            pub_head,
+            crc: 0,
+            topic: topic_name.to_string(),
+            token: Default::default(),
+            msgs: Default::default(),
+        }
+    }
 }
 
 impl Deref for Publish {
@@ -131,6 +181,12 @@ impl Deref for Publish {
 
     fn deref(&self) -> &Self::Target {
         &self.pub_head
+    }
+}
+
+impl DerefMut for Publish {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pub_head
     }
 }
 
@@ -205,32 +261,67 @@ impl Publish {
         &self.topic
     }
 
-    pub fn set_topic(&mut self, topic: &str) -> &mut Self {
+    pub fn set_topic(&mut self, topic: &str) -> Result<()> {
+        if topic.len() > u8::MAX as usize {
+            return Err(anyhow!("topic length excess the u8::MAX"));
+        }
         self.topic = topic.to_string();
-        self
+        self.set_topic_len(topic.len() as _);
+        Ok(())
     }
 
     pub fn get_token(&self) -> &str {
         &self.token
     }
 
-    pub fn set_token(&mut self, token: &str) -> &mut Self {
+    pub fn set_token(&mut self, token: &str) -> Result<()> {
+        if token.len() > u8::MAX as usize {
+            return Err(anyhow!("topic length excess the u8::MAX"));
+        }
         self.token = token.to_string();
-        self
+        self.set_token_len(token.len() as _);
+        Ok(())
     }
 
-    pub fn get_msgs(&self) -> &str {
-        &self.token
+    pub fn get_msgs(&self) -> &Vec<MessageUserV1> {
+        &self.msgs
     }
 
-    pub fn set_msgs(&mut self, msgs: Vec<BinMessage>) -> &mut Self {
+    pub fn set_msgs(&mut self, msgs: Vec<MessageUserV1>) -> Result<()> {
+        self.pub_head.set_msg_num(msgs.len() as u8)?;
         self.msgs = msgs;
-        self
+        Ok(())
     }
 
-    pub fn push_msg(&mut self, msg: BinMessage) -> &mut Self {
+    pub fn push_msg(&mut self, msg: MessageUserV1) -> Result<()> {
+        if self.msg_num() >= 16 {
+            return Err(anyhow!(
+                "can't push any message cause the max message number is 16"
+            ));
+        }
         self.msgs.push(msg);
-        self
+        let old_num = self.msg_num();
+        let _ = self.set_msg_num(old_num + 1);
+        Ok(())
+    }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.pub_head.as_bytes());
+        if self.has_crc() {
+            res.extend(self.get_crc().to_be_bytes());
+        }
+        if self.get_topic_len() != 0 {
+            res.extend(self.topic.as_bytes());
+        }
+        if self.get_token_len() != 0 {
+            res.extend(self.token.as_bytes());
+        }
+        for msg in &self.msgs {
+            res.extend(msg.as_bytes());
+        }
+        res
     }
 
     pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
@@ -260,19 +351,22 @@ impl Publish {
         if pub_head.get_topic_len() != 0 {
             buf.resize(pub_head.get_topic_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            publish.set_topic(&String::from_utf8(buf.to_vec())?);
+            publish.set_topic(&String::from_utf8(buf.to_vec())?)?;
         }
 
         // parse token
         if pub_head.get_token_len() != 0 {
             buf.resize(pub_head.get_token_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            publish.set_token(&String::from_utf8(buf.to_vec())?);
+            publish.set_token(&String::from_utf8(buf.to_vec())?)?;
         }
 
         // parse bin message
-        publish.set_msgs(BinMessage::parse_from(reader, pub_head.msg_num()).await?);
+        publish.set_msgs(MessageUserV1::parse_from(reader, pub_head.msg_num()).await?)?;
 
         Ok(publish)
     }
 }
+
+#[cfg(test)]
+mod tests {}

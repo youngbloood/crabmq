@@ -54,9 +54,9 @@ impl PersistStorageOperation for Dummy {
         Ok(())
     }
 
-    async fn push(&self, msg: Message, meta: &TopicMeta) -> Result<()> {
-        let topic = self.get_or_create_topic_dummy(msg.get_topic(), meta)?;
-        topic.get().push(msg).await?;
+    async fn push(&self, msgs: Vec<Message>, meta: &TopicMeta) -> Result<()> {
+        let topic = self.get_or_create_topic_dummy(msgs[0].get_topic(), meta)?;
+        topic.get().push_msgs(msgs).await?;
         Ok(())
     }
 
@@ -132,6 +132,13 @@ impl TopicDummyBase {
             return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_INSTANT)));
         }
         self.instant.push(msg).await?;
+        Ok(())
+    }
+
+    async fn push_msgs(&self, msgs: Vec<Message>) -> Result<()> {
+        for msg in msgs {
+            self.push(msg).await?;
+        }
         Ok(())
     }
 }
