@@ -153,7 +153,7 @@ impl StorageWrapper {
         match self.storage.get(topic_name).await {
             Ok(topic) => {
                 if let Some(topic) = topic {
-                    return Ok((true, topic));
+                    return Ok((false, topic));
                 }
             }
             Err(e) => {
@@ -163,7 +163,7 @@ impl StorageWrapper {
 
         // 不存在，则直接插入
         if ephemeral {
-            self.dummy.insert(topic_name, meta);
+            self.dummy.insert(topic_name, meta)?;
             return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
         }
         let topic = self.storage.get_or_create_topic(topic_name, meta).await?;
@@ -197,9 +197,9 @@ impl StorageWrapper {
             .await?;
 
         if ephemeral {
-            self.dummy.push(msgs.clone(), &meta).await?;
+            self.dummy.push(msgs, &meta).await?;
         } else {
-            self.storage.push(msgs.clone(), &meta).await?;
+            self.storage.push(msgs, &meta).await?;
         }
 
         self.persist_factor_now.fetch_add(1, Relaxed);
