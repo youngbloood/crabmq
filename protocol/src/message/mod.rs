@@ -11,7 +11,7 @@ use v1::MessageV1;
 #[enum_dispatch]
 pub trait MessageOperation {
     fn as_bytes(&self) -> Vec<u8>;
-    fn convert_to_protocol(&self) -> Protocol;
+    fn convert_to_protocol(self) -> Protocol;
     fn get_topic(&self) -> &str;
     fn get_channel(&self) -> &str;
     fn get_id(&self) -> &str;

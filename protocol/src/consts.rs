@@ -1,3 +1,5 @@
+pub const X25: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_IBM_SDLC);
+
 // ========= PROTOCOL VERSION =========
 pub const PROPTOCOL_V1: u8 = 1;
 // ========= PROTOCOL VERSION =========

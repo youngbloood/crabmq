@@ -83,34 +83,34 @@ impl Channel {
             .insert(addr.to_string(), ClientWrapper::new(client_guard));
     }
 
-    pub async fn send_msg(&self, msg: Protocol) -> Result<()> {
+    pub async fn send_msg(&self, prot: Protocol) -> Result<()> {
         let (_, sub_client) = split_subscribe_type(self.meta.subscribe_type);
         match sub_client {
             SUBSCRIBE_TYPE_BROADCAST_IN_CLIENT => {
                 let iter = self.clients.values();
                 for client in iter {
-                    client.get().send_msg(msg.clone()).await?;
+                    client.get().send_msg(prot.clone()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_ROUNDROBIN_IN_CLIENT => {
                 if let Some(client) = self.clients.roundrobin_next() {
-                    client.get().send_msg(msg.clone()).await?;
+                    client.get().send_msg(prot.clone()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_RAND_IN_CLIENT => {
                 if let Some(client) = self.clients.rand() {
-                    client.get().send_msg(msg.clone()).await?;
+                    client.get().send_msg(prot.clone()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_RAND_PROPERTY_IN_CLIENT => {
                 if let Some(client) = self.clients.rand_weight() {
-                    client.get().send_msg(msg.clone()).await?;
+                    client.get().send_msg(prot.clone()).await?;
                 }
                 Ok(())
             }

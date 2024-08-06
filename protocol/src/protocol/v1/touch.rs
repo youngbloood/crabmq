@@ -1,7 +1,7 @@
 use super::{
     new_v1_head,
     reply::{Reply, ReplyBuilder},
-    BuilderV1, ACTION_REPLY, PROPTOCOL_V1, V1,
+    BuilderV1, ProtError, E_BAD_CRC, V1, X25,
 };
 use crate::{
     consts::ACTION_TOUCH,
@@ -57,14 +57,8 @@ pub const TOUCH_HEAD_LENGTH: usize = 8;
 #[derive(Default, Clone, Debug)]
 pub struct TouchHead([u8; TOUCH_HEAD_LENGTH]);
 
-// impl Default for TouchHead {
-//     fn default() -> Self {
-//         Self(Default::default())
-//     }
-// }
-
 impl TouchHead {
-    fn set_flag(&mut self, index: usize, pos: u8, on: bool) {
+    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
             return;
         }
@@ -81,13 +75,17 @@ impl TouchHead {
         TouchHead(head)
     }
 
+    pub fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
     // 1st byte ======================================== START
     pub fn topic_is_ephemeral(&self) -> bool {
         self.0[0].is_1(7)
     }
 
     pub fn set_topic_is_ephemeral(&mut self, e: bool) -> &mut Self {
-        self.set_flag(0, 7, e);
+        self.set_head_flag(0, 7, e);
         self
     }
 
@@ -96,7 +94,7 @@ impl TouchHead {
     }
 
     pub fn set_channel_is_ephemerall(&mut self, e: bool) -> &mut Self {
-        self.set_flag(0, 6, e);
+        self.set_head_flag(0, 6, e);
         self
     }
 
@@ -105,7 +103,7 @@ impl TouchHead {
     }
 
     pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
-        self.set_flag(0, 5, hb);
+        self.set_head_flag(0, 5, hb);
         self
     }
 
@@ -114,7 +112,7 @@ impl TouchHead {
     }
 
     pub fn set_prohibit_instant(&mut self, p: bool) -> &mut Self {
-        self.set_flag(0, 4, p);
+        self.set_head_flag(0, 4, p);
         self
     }
 
@@ -123,16 +121,16 @@ impl TouchHead {
     }
 
     pub fn set_prohibit_defer(&mut self, p: bool) -> &mut Self {
-        self.set_flag(0, 3, p);
+        self.set_head_flag(0, 3, p);
         self
     }
 
-    pub fn has_crc(&self) -> bool {
+    pub fn has_crc_flag(&self) -> bool {
         self.0[0].is_1(2)
     }
 
-    pub fn set_crc(&mut self, has: bool) -> &mut Self {
-        self.set_flag(0, 2, has);
+    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(0, 2, has);
         self
     }
     // 1st byte ======================================== END
@@ -143,7 +141,7 @@ impl TouchHead {
     }
 
     pub fn set_max_msg_num_per_file(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 7, has);
+        self.set_head_flag(1, 7, has);
         self
     }
 
@@ -152,7 +150,7 @@ impl TouchHead {
     }
 
     pub fn set_max_size_per_file(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 6, has);
+        self.set_head_flag(1, 6, has);
         self
     }
 
@@ -161,7 +159,7 @@ impl TouchHead {
     }
 
     pub fn set_compress_type(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 5, has);
+        self.set_head_flag(1, 5, has);
         self
     }
 
@@ -170,7 +168,7 @@ impl TouchHead {
     }
 
     pub fn set_subscribe_type(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 4, has);
+        self.set_head_flag(1, 4, has);
         self
     }
 
@@ -179,7 +177,7 @@ impl TouchHead {
     }
 
     pub fn set_record_num_per_file(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 3, has);
+        self.set_head_flag(1, 3, has);
         self
     }
 
@@ -188,7 +186,7 @@ impl TouchHead {
     }
 
     pub fn set_record_size_per_file(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 2, has);
+        self.set_head_flag(1, 2, has);
         self
     }
 
@@ -197,7 +195,7 @@ impl TouchHead {
     }
 
     pub fn set_fd_cache_size(&mut self, has: bool) -> &mut Self {
-        self.set_flag(1, 1, has);
+        self.set_head_flag(1, 1, has);
         self
     }
     // 2nd byte ======================================== END
@@ -254,8 +252,9 @@ pub struct Touch {
     topic: String,
     channel: String,
     token: String,
-    crc: u16,
 
+    // optional
+    crc: u16,
     max_msg_num_per_file: u64,
     max_size_per_file: u64,
     compress_type: u8,
@@ -322,8 +321,73 @@ impl ReplyBuilder for Touch {
 }
 
 impl Touch {
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.touch_head.as_bytes());
+        if self.token_len() != 0 {
+            res.extend(self.topic.as_bytes());
+        }
+        if self.channel_len() != 0 {
+            res.extend(self.channel.as_bytes());
+        }
+        if self.token_len() != 0 {
+            res.extend(self.token.as_bytes());
+        }
+        if self.has_crc_flag() {
+            res.extend(self.crc.to_be_bytes());
+        }
+        if self.has_max_msg_num_per_file() {
+            res.extend(self.max_msg_num_per_file.to_be_bytes());
+        }
+        if self.has_max_size_per_file() {
+            res.extend(self.max_size_per_file.to_be_bytes());
+        }
+        if self.has_compress_type() {
+            res.push(self.compress_type);
+        }
+        if self.has_subscribe_type() {
+            res.push(self.subscribe_type);
+        }
+        if self.has_record_num_per_file() {
+            res.extend(self.record_num_per_file.to_be_bytes());
+        }
+        if self.has_record_size_per_file() {
+            res.extend(self.record_size_per_file.to_be_bytes());
+        }
+        if self.has_fd_cache_size() {
+            res.extend(self.fd_cache_size.to_be_bytes());
+        }
+        if self.defer_format_len() != 0 {
+            res.extend(self.defer_msg_format.as_bytes());
+        }
+        res
+    }
+
+    pub fn validate(&self) -> Option<Protocol> {
+        if !self.has_crc_flag() {
+            return None;
+        }
+        let src_crc = self.get_crc();
+        let mut touch = self.clone();
+        let dst_crc = touch.calc_crc().get_crc();
+        if src_crc != dst_crc {
+            return Some(self.build_reply_err(E_BAD_CRC).build());
+        }
+
+        None
+    }
+
+    pub fn get_crc(&self) -> u16 {
+        self.crc
+    }
+
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.touch_head.set_crc_flag(false);
+        let bts = self.as_bytes();
+        self.crc = X25.checksum(&bts);
+        self.touch_head.set_crc_flag(true);
+
         self
     }
 
@@ -457,9 +521,9 @@ impl Touch {
     }
 
     /// [`parse_from`] read the protocol head from bts.
-    pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
         let mut touch = Self::default();
-        touch.set_head(head);
+        // touch.set_head(head);
         touch.read_parse(fd).await?;
         Ok(touch)
     }
@@ -478,7 +542,7 @@ impl Touch {
         );
 
         // parse crc
-        if self.has_crc() {
+        if self.has_crc_flag() {
             buf.resize(2, 0);
             reader.read_exact(&mut buf).await?;
             self.crc =

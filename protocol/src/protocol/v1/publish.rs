@@ -3,9 +3,10 @@ use super::reply::Reply;
 use super::reply::ReplyBuilder;
 use super::BuilderV1;
 use super::Head;
+use super::E_BAD_CRC;
 use super::V1;
+use super::X25;
 use crate::consts::ACTION_PUBLISH;
-use crate::consts::PROPTOCOL_V1;
 use crate::message::v1::MessageUserV1;
 use crate::message::v1::MessageV1;
 use crate::message::Message;
@@ -15,7 +16,6 @@ use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation, BitOperation as _};
 use std::fmt::Debug;
-use std::ops::DerefMut;
 use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 
@@ -45,7 +45,7 @@ impl Debug for PublishHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PublishHead")
             .field("is-heartbeat", &self.is_heartbeat())
-            .field("has-crc", &self.has_crc())
+            .field("has-crc", &self.has_crc_flag())
             .field("is-ephemeral", &self.is_ephemeral())
             .field("msg-num", &self.msg_num())
             .field("topic-len", &self.get_topic_len())
@@ -55,7 +55,7 @@ impl Debug for PublishHead {
 }
 
 impl PublishHead {
-    fn set_flag(&mut self, index: usize, pos: u8, on: bool) {
+    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
             return;
         }
@@ -77,16 +77,16 @@ impl PublishHead {
     }
 
     pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
-        self.set_flag(0, 7, hb);
+        self.set_head_flag(0, 7, hb);
         self
     }
 
-    pub fn has_crc(&self) -> bool {
+    pub fn has_crc_flag(&self) -> bool {
         self.0[0].is_1(6)
     }
 
-    pub fn set_crc(&mut self, has: bool) -> &mut Self {
-        self.set_flag(0, 6, has);
+    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(0, 6, has);
         self
     }
 
@@ -95,7 +95,7 @@ impl PublishHead {
     }
 
     pub fn set_ephemeral(&mut self, epehemral: bool) -> &mut Self {
-        self.set_flag(0, 5, epehemral);
+        self.set_head_flag(0, 5, epehemral);
         self
     }
 
@@ -184,12 +184,6 @@ impl Deref for Publish {
     }
 }
 
-impl DerefMut for Publish {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.pub_head
-    }
-}
-
 impl Builder for Publish {
     fn build(self) -> Protocol {
         let mut v1 = V1::default();
@@ -230,13 +224,22 @@ impl Publish {
         res
     }
 
-    pub fn get_head(&self) -> Head {
-        self.head.clone()
+    pub fn validate(&self) -> Option<Protocol> {
+        if !self.has_crc_flag() {
+            return None;
+        }
+        let src_crc = self.get_crc();
+
+        let mut publish = self.clone();
+        let dst_crc = publish.calc_crc().get_crc();
+        if dst_crc != src_crc {
+            return Some(self.build_reply_err(E_BAD_CRC).build());
+        }
+        None
     }
 
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
-        self
+    pub fn get_head(&self) -> Head {
+        self.head.clone()
     }
 
     pub fn get_pub_head(&self) -> PublishHead {
@@ -252,8 +255,12 @@ impl Publish {
         self.crc
     }
 
-    pub fn set_crc(&mut self, crc: u16) -> &mut Self {
-        self.crc = crc;
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.pub_head.set_crc_flag(false);
+        let bts = self.as_bytes();
+        self.crc = X25.checksum(&bts);
+        self.pub_head.set_crc_flag(true);
+
         self
     }
 
@@ -266,7 +273,7 @@ impl Publish {
             return Err(anyhow!("topic length excess the u8::MAX"));
         }
         self.topic = topic.to_string();
-        self.set_topic_len(topic.len() as _);
+        self.pub_head.set_topic_len(topic.len() as _);
         Ok(())
     }
 
@@ -279,7 +286,7 @@ impl Publish {
             return Err(anyhow!("topic length excess the u8::MAX"));
         }
         self.token = token.to_string();
-        self.set_token_len(token.len() as _);
+        self.pub_head.set_token_len(token.len() as _);
         Ok(())
     }
 
@@ -301,7 +308,7 @@ impl Publish {
         }
         self.msgs.push(msg);
         let old_num = self.msg_num();
-        let _ = self.set_msg_num(old_num + 1);
+        let _ = self.pub_head.set_msg_num(old_num + 1);
         Ok(())
     }
 
@@ -309,7 +316,7 @@ impl Publish {
         let mut res = vec![];
         res.extend(self.head.as_bytes());
         res.extend(self.pub_head.as_bytes());
-        if self.has_crc() {
+        if self.has_crc_flag() {
             res.extend(self.get_crc().to_be_bytes());
         }
         if self.get_topic_len() != 0 {
@@ -324,47 +331,50 @@ impl Publish {
         res
     }
 
-    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
+        let mut publish = Publish::default();
+        publish.parse_reader(reader).await?;
+        Ok(publish)
+    }
+
+    pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
+
+        // parse pub-head
         buf.resize(PUBLISH_HEAD_LENGTH, 0);
         reader.read_exact(&mut buf).await?;
-
-        let pub_head = PublishHead::with(
+        self.pub_head = PublishHead::with(
             buf.to_vec()
                 .try_into()
                 .expect("convert to publish head failed"),
         );
 
-        let mut publish = Publish::default();
-        publish.set_head(head).set_pub_head(pub_head.clone());
-
         // parse crc
-        if pub_head.has_crc() {
+        if self.has_crc_flag() {
             buf.resize(2, 0);
             reader.read_exact(&mut buf).await?;
-            publish.set_crc(u16::from_be_bytes(
-                buf.to_vec().try_into().expect("convert to crc vec failed"),
-            ));
+            self.crc =
+                u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc vec failed"));
         }
 
         // parse topic
-        if pub_head.get_topic_len() != 0 {
-            buf.resize(pub_head.get_topic_len() as _, 0);
+        if self.get_topic_len() != 0 {
+            buf.resize(self.get_topic_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            publish.set_topic(&String::from_utf8(buf.to_vec())?)?;
+            self.topic = String::from_utf8(buf.to_vec())?;
         }
 
         // parse token
-        if pub_head.get_token_len() != 0 {
-            buf.resize(pub_head.get_token_len() as _, 0);
+        if self.get_token_len() != 0 {
+            buf.resize(self.get_token_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            publish.set_token(&String::from_utf8(buf.to_vec())?)?;
+            self.token = String::from_utf8(buf.to_vec())?;
         }
 
         // parse bin message
-        publish.set_msgs(MessageUserV1::parse_from(reader, pub_head.msg_num()).await?)?;
+        self.set_msgs(MessageUserV1::parse_from(reader, self.msg_num()).await?)?;
 
-        Ok(publish)
+        Ok(())
     }
 }
 

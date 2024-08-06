@@ -1,7 +1,7 @@
 use super::{
     new_v1_head,
     reply::{Reply, ReplyBuilder},
-    BuilderV1, Head, ACTION_REPLY, PROPTOCOL_V1, V1,
+    BuilderV1, Head, E_BAD_CRC, V1, X25,
 };
 use crate::{
     consts::ACTION_SUBSCRIBE,
@@ -39,7 +39,7 @@ const SUBSCRIBE_HEAD_LENGTH: usize = 6;
 pub struct SubscribeHead([u8; SUBSCRIBE_HEAD_LENGTH]);
 
 impl SubscribeHead {
-    fn set_flag(&mut self, index: usize, pos: u8, on: bool) {
+    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
             return;
         }
@@ -61,16 +61,16 @@ impl SubscribeHead {
     }
 
     pub fn set_heartbeat(&mut self, hb: bool) -> &mut Self {
-        self.set_flag(0, 7, hb);
+        self.set_head_flag(0, 7, hb);
         self
     }
 
-    pub fn has_crc(&self) -> bool {
+    pub fn has_crc_flag(&self) -> bool {
         self.0[0].is_1(6)
     }
 
-    pub fn set_crc(&mut self, has: bool) -> &mut Self {
-        self.set_flag(0, 6, has);
+    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(0, 6, has);
         self
     }
 
@@ -79,7 +79,7 @@ impl SubscribeHead {
     }
 
     pub fn set_ephemeral(&mut self, epehemral: bool) -> &mut Self {
-        self.set_flag(0, 5, epehemral);
+        self.set_head_flag(0, 5, epehemral);
         self
     }
 
@@ -88,7 +88,7 @@ impl SubscribeHead {
     }
 
     pub fn set_ready_number(&mut self, has: bool) -> &mut Self {
-        self.set_flag(0, 4, has);
+        self.set_head_flag(0, 4, has);
         self
     }
 
@@ -117,6 +117,10 @@ impl SubscribeHead {
     pub fn set_token_len(&mut self, l: u8) -> &mut Self {
         self.0[5] = l;
         self
+    }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
     }
 }
 
@@ -189,6 +193,19 @@ impl ReplyBuilder for Subscribe {
 }
 
 impl Subscribe {
+    pub fn validate(&self) -> Option<Protocol> {
+        if !self.has_crc_flag() {
+            return None;
+        }
+        let src_crc = self.get_crc();
+        let mut subscribe = self.clone();
+        let dst_crc = subscribe.calc_crc().get_crc();
+        if src_crc != dst_crc {
+            return Some(self.build_reply_err(E_BAD_CRC).build());
+        }
+        None
+    }
+
     pub fn get_head(&self) -> Head {
         self.head.clone()
     }
@@ -211,8 +228,9 @@ impl Subscribe {
         self.crc
     }
 
-    pub fn set_crc(&mut self, crc: u16) -> &mut Self {
-        self.crc = crc;
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.sub_head.set_crc_flag(false);
+        self.crc = X25.checksum(&self.as_bytes());
         self
     }
 
@@ -252,61 +270,85 @@ impl Subscribe {
         self
     }
 
-    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.sub_head.as_bytes());
+        if self.has_crc_flag() {
+            res.extend(self.get_crc().to_be_bytes());
+        }
+        if self.has_ready_number() {
+            res.extend(self.ready_number.to_be_bytes());
+        }
+        if self.get_topic_len() != 0 {
+            res.extend(self.get_topic().as_bytes());
+        }
+        if self.get_channel_len() != 0 {
+            res.extend(self.get_channel().as_bytes())
+        }
+        if self.get_token_len() != 0 {
+            res.extend(self.get_token().as_bytes())
+        }
+        res
+    }
+
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
+        let mut subscribe = Subscribe::default();
+        subscribe.parse_reader(reader).await?;
+        Ok(subscribe)
+    }
+
+    pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
         buf.resize(SUBSCRIBE_HEAD_LENGTH, 0);
         reader.read_exact(&mut buf).await?;
 
-        let sub_head = SubscribeHead::with(
+        self.sub_head = SubscribeHead::with(
             buf.to_vec()
                 .try_into()
                 .expect("convert to publish head failed"),
         );
 
-        let mut subscribe = Subscribe::default();
-        subscribe.set_head(head).set_sub_head(sub_head.clone());
-
         // parse crc
-        if sub_head.has_crc() {
+        if self.has_crc_flag() {
             buf.resize(2, 0);
             reader.read_exact(&mut buf).await?;
-            subscribe.set_crc(u16::from_be_bytes(
-                buf.to_vec().try_into().expect("convert to crc vec failed"),
-            ));
+            self.crc =
+                u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc vec failed"));
         }
 
         // parse ready-number
-        if sub_head.has_ready_number() {
+        if self.has_ready_number() {
             buf.resize(2, 0);
             reader.read_exact(&mut buf).await?;
-            subscribe.set_ready_number(u16::from_be_bytes(
+            self.ready_number = u16::from_be_bytes(
                 buf.to_vec()
                     .try_into()
                     .expect("convert to ready-number vec failed"),
-            ));
+            );
         }
 
         // parse topic
-        if sub_head.get_topic_len() != 0 {
-            buf.resize(sub_head.get_topic_len() as _, 0);
+        if self.get_topic_len() != 0 {
+            buf.resize(self.get_topic_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            subscribe.set_topic(&String::from_utf8(buf.to_vec())?);
+            self.topic = String::from_utf8(buf.to_vec())?;
         }
 
         // parse channel
-        if sub_head.get_channel_len() != 0 {
-            buf.resize(sub_head.get_channel_len() as _, 0);
+        if self.get_channel_len() != 0 {
+            buf.resize(self.get_channel_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            subscribe.set_channel(&String::from_utf8(buf.to_vec())?);
+            self.channel = String::from_utf8(buf.to_vec())?;
         }
 
         // parse token
-        if sub_head.get_token_len() != 0 {
-            buf.resize(sub_head.get_token_len() as _, 0);
+        if self.get_token_len() != 0 {
+            buf.resize(self.get_token_len() as _, 0);
             reader.read_exact(&mut buf).await?;
-            subscribe.set_token(&String::from_utf8(buf.to_vec())?);
+            self.token = String::from_utf8(buf.to_vec())?;
         }
 
-        Ok(subscribe)
+        Ok(())
     }
 }

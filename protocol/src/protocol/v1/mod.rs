@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod dispatch_message;
 pub mod identity;
 pub mod publish;
 pub mod reply;
@@ -6,8 +7,9 @@ pub mod subscribe;
 pub mod touch;
 
 use super::{Builder, Head, Protocol, ProtocolOperation};
-use crate::{consts::*, message::Message};
+use crate::{consts::*, error::*, message::Message};
 use anyhow::{anyhow, Result};
+use dispatch_message::DispatchMessage;
 use identity::Identity;
 use publish::Publish;
 use reply::{Reply, ReplyBuilder};
@@ -28,6 +30,7 @@ pub struct V1 {
     subscribe: Option<Subscribe>,
     touch: Option<Touch>,
     reply: Option<Reply>,
+    msg: Option<DispatchMessage>,
 }
 
 impl ReplyBuilder for V1 {
@@ -71,7 +74,33 @@ impl ProtocolOperation for V1 {
         match self.head.get_action() {
             ACTION_PUBLISH => self.publish.as_ref().unwrap().as_bytes(),
             ACTION_REPLY => self.reply.as_ref().unwrap().as_bytes(),
+            // ACTION_MSG=>self.msg.as_ref().unwrap()
             _ => unimplemented!(),
+        }
+    }
+
+    fn validate_for_server(&self) -> Option<Protocol> {
+        if self.get_action() % 2 != 0 {
+            return Some(self.build_reply_err(E_ACTION_NOT_SUPPORT).build());
+        }
+
+        match self.get_action() {
+            ACTION_PUBLISH => self.publish.as_ref().unwrap().validate(),
+            ACTION_IDENTITY => self.identity.as_ref().unwrap().validate(),
+            ACTION_SUBSCRIBE => self.subscribe.as_ref().unwrap().validate(),
+            ACTION_TOUCH => self.touch.as_ref().unwrap().validate(),
+            _ => Some(self.build_reply_err(E_ACTION_NOT_SUPPORT).build()),
+        }
+    }
+
+    fn validate_for_client(&self) -> Result<()> {
+        if self.get_action() % 2 == 0 {
+            return Err(ProtError::new(E_ACTION_NOT_SUPPORT).into());
+        }
+
+        match self.get_action() {
+            ACTION_MSG => Ok(()),
+            _ => Err(ProtError::new(E_ACTION_NOT_SUPPORT).into()),
         }
     }
 }
@@ -94,6 +123,7 @@ impl V1 {
 
     pub fn set_identity(&mut self, i: Identity) -> &mut Self {
         self.identity = Some(i);
+        self.head.set_action(ACTION_IDENTITY);
         self
     }
 
@@ -103,6 +133,7 @@ impl V1 {
 
     pub fn set_publish(&mut self, p: Publish) -> &mut Self {
         self.publish = Some(p);
+        self.head.set_action(ACTION_PUBLISH);
         self
     }
 
@@ -112,6 +143,7 @@ impl V1 {
 
     pub fn set_subscribe(&mut self, s: Subscribe) -> &mut Self {
         self.subscribe = Some(s);
+        self.head.set_action(ACTION_SUBSCRIBE);
         self
     }
 
@@ -121,6 +153,7 @@ impl V1 {
 
     pub fn set_touch(&mut self, t: Touch) -> &mut Self {
         self.touch = Some(t);
+        self.head.set_action(ACTION_TOUCH);
         self
     }
 
@@ -130,30 +163,27 @@ impl V1 {
 
     pub fn set_reply(&mut self, r: Reply) -> &mut Self {
         self.reply = Some(r);
+        self.head.set_action(ACTION_REPLY);
         self
     }
 
-    pub fn validate_for_server(&self) -> Result<()> {
-        if self.get_action() % 2 != 0 {
-            return Err(anyhow!("illigal action"));
-        }
-        Ok(())
+    pub fn get_msg(&self) -> Option<DispatchMessage> {
+        self.msg.clone()
     }
 
-    pub fn validate_for_client(&self) -> Result<()> {
-        if self.get_action() % 2 == 0 {
-            return Err(anyhow!("illigal action"));
-        }
-        Ok(())
+    pub fn set_msg(&mut self, m: DispatchMessage) -> &mut Self {
+        self.msg = Some(m);
+        self.head.set_action(ACTION_MSG);
+        self
     }
 
     pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<V1> {
         match head.get_action() {
-            ACTION_IDENTITY => Ok(Identity::parse_from(reader, head).await?.buildv1()),
-            ACTION_TOUCH => Ok(Touch::parse_from(reader, head).await?.buildv1()),
-            ACTION_PUBLISH => Ok(Publish::parse_from(reader, head).await?.buildv1()),
-            ACTION_SUBSCRIBE => Ok(Subscribe::parse_from(reader, head).await?.buildv1()),
-            ACTION_REPLY => Ok(Reply::parse_from(reader, head).await?.buildv1()),
+            ACTION_IDENTITY => Ok(Identity::parse_from(reader).await?.buildv1()),
+            ACTION_TOUCH => Ok(Touch::parse_from(reader).await?.buildv1()),
+            ACTION_PUBLISH => Ok(Publish::parse_from(reader).await?.buildv1()),
+            ACTION_SUBSCRIBE => Ok(Subscribe::parse_from(reader).await?.buildv1()),
+            ACTION_REPLY => Ok(Reply::parse_from(reader).await?.buildv1()),
             // TODO:
             ACTION_MSG => unimplemented!(),
             ACTION_RESET => unimplemented!(),

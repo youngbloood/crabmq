@@ -77,6 +77,9 @@ pub trait ProtocolOperation {
     fn get_action(&self) -> u8;
     fn convert_to_message(&self) -> Result<Vec<Message>>;
     fn as_bytes(&self) -> Vec<u8>;
+
+    fn validate_for_client(&self) -> Result<()>;
+    fn validate_for_server(&self) -> Option<Protocol>;
 }
 
 #[derive(Debug, Clone)]
@@ -99,9 +102,12 @@ impl ReplyBuilder for Protocol {
     }
 }
 
+/// returns:
+/// 0: the correct Protocol,
+/// 1: the reply Protocol,
 pub async fn parse_protocol_from_reader(
     reader: &mut Pin<&mut impl AsyncReadExt>,
-) -> Result<Protocol> {
+) -> Result<(Protocol)> {
     let mut buf = BytesMut::new();
     buf.resize(HEAD_LENGTH, 0);
     reader.read_exact(&mut buf).await?;

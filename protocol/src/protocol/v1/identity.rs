@@ -1,10 +1,16 @@
 use super::auth::AuthType;
 use super::new_v1_head;
+use super::reply::Reply;
+use super::reply::ReplyBuilder;
 use super::BuilderV1;
 use super::Head;
+use super::ProtError;
+use super::E_BAD_CRC;
 use super::V1;
+use super::X25;
 use crate::consts::ACTION_IDENTITY;
-use crate::consts::PROPTOCOL_V1;
+use crate::protocol::Builder;
+use crate::protocol::Protocol;
 use anyhow::Result;
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation, BitOperation as _};
@@ -18,8 +24,7 @@ const IDENTITY_HEAD_LENGTH: usize = 4;
  * CONST [`IDENTITY_HEAD_LENGTH`] length head info:
  * 1st bytes:
  *          1 bit: has crc
- *          3 bit: *reserve bit*
- *          4 bits: msg number
+ *          7 bits: *reserve bit*
  * 2-4 bytes: reserve bytes
  *
  * EXTEND according the head:
@@ -46,13 +51,17 @@ impl IdentityHead {
         IdentityHead(head)
     }
 
-    pub fn has_crc(&self) -> bool {
-        self.0[0].is_1(6)
+    pub fn has_crc_flag(&self) -> bool {
+        self.0[0].is_1(7)
     }
 
-    pub fn set_crc(&mut self, has: bool) -> &mut Self {
-        self.set_head_flag(0, 6, has);
+    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(0, 7, has);
         self
+    }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
     }
 }
 
@@ -73,6 +82,14 @@ impl Default for Identity {
     }
 }
 
+impl Deref for Identity {
+    type Target = IdentityHead;
+
+    fn deref(&self) -> &Self::Target {
+        &self.identity_head
+    }
+}
+
 impl BuilderV1 for Identity {
     fn buildv1(self) -> super::V1 {
         let mut v1 = V1::default();
@@ -81,14 +98,43 @@ impl BuilderV1 for Identity {
     }
 }
 
+impl ReplyBuilder for Identity {
+    fn build_reply_ok(&self) -> Reply {
+        Reply::with_ok(ACTION_IDENTITY)
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_IDENTITY, err_code)
+    }
+}
+
 impl Identity {
+    pub fn validate(&self) -> Option<Protocol> {
+        if !self.identity_head.has_crc_flag() {
+            return None;
+        }
+        let src_crc = self.get_crc();
+        let mut identity = self.clone();
+        let dst_crc = identity.calc_crc().get_crc();
+        if src_crc != dst_crc {
+            return Some(self.build_reply_err(E_BAD_CRC).build());
+        }
+        None
+    }
+
     pub fn set_identity_head(&mut self, head: IdentityHead) -> &mut Self {
         self.identity_head = head;
         self
     }
 
-    pub fn set_crc(&mut self, crc: u16) -> &mut Self {
-        self.crc = crc;
+    pub fn get_crc(&self) -> u16 {
+        self.crc
+    }
+
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.identity_head.set_crc_flag(false);
+        let bts = self.as_bytes();
+        self.crc = X25.checksum(&bts);
         self
     }
 
@@ -97,7 +143,24 @@ impl Identity {
         self
     }
 
-    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.identity_head.as_bytes());
+
+        if self.identity_head.has_crc_flag() {
+            res.extend(self.get_crc().to_be_bytes())
+        }
+        res
+    }
+
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
+        let mut identity = Identity::default();
+        identity.parse_reader(reader).await?;
+        Ok(identity)
+    }
+
+    pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
         buf.resize(IDENTITY_HEAD_LENGTH, 0);
         reader.read_exact(&mut buf).await?;
@@ -107,22 +170,17 @@ impl Identity {
                 .try_into()
                 .expect("convert to publish head failed"),
         );
-
-        let mut identity = Identity::default();
-        identity
-            .set_head(head)
-            .set_identity_head(identity_head.clone());
+        self.identity_head = identity_head;
 
         // parse crc
-        if identity_head.has_crc() {
+        if self.has_crc_flag() {
             buf.resize(2, 0);
             reader.read_exact(&mut buf).await?;
-            identity.set_crc(u16::from_be_bytes(
-                buf.to_vec().try_into().expect("convert to crc vec failed"),
-            ));
+            self.crc =
+                u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc vec failed"));
         }
 
-        Ok(identity)
+        Ok(())
     }
 }
 
@@ -132,15 +190,16 @@ pub const IDENTITY_REPLY_HEAD_LENGTH: usize = 2;
 
 /**
  * 1st byte:
+ *         1 bit: has crc.
  *         1 bit: has support_auth_type.
  *         1 bit: has max_support_protocol_version.
  * 2nd byte: salt length.
  */
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct IdentityReplyHead([u8; IDENTITY_REPLY_HEAD_LENGTH]);
 
 impl IdentityReplyHead {
-    fn set_flag(&mut self, index: usize, pos: u8, on: bool) {
+    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
             return;
         }
@@ -153,21 +212,34 @@ impl IdentityReplyHead {
         self.0[index] = flag;
     }
 
-    pub fn has_support_auth_type(&self) -> bool {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    pub fn has_crc_flag(&self) -> bool {
         self.0[0].is_1(7)
     }
 
+    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(0, 7, has);
+        self
+    }
+
+    pub fn has_support_auth_type(&self) -> bool {
+        self.0[0].is_1(6)
+    }
+
     pub fn set_support_auth_type(&mut self, has: bool) -> &mut Self {
-        self.set_flag(0, 7, has);
+        self.set_head_flag(0, 6, has);
         self
     }
 
     pub fn has_max_support_protocol_version(&self) -> bool {
-        self.0[0].is_1(6)
+        self.0[0].is_1(5)
     }
 
     pub fn set_max_support_protocol_version(&mut self, has: bool) -> &mut Self {
-        self.set_flag(0, 6, has);
+        self.set_head_flag(0, 5, has);
         self
     }
 
@@ -181,10 +253,12 @@ impl IdentityReplyHead {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct IdentityReply {
     head: Head,
     reply_head: IdentityReplyHead,
+
+    crc: u16,
     support_auth_type: AuthType,
     max_support_protocol_version: u8,
     salt: String,
@@ -199,12 +273,57 @@ impl Deref for IdentityReply {
 }
 
 impl IdentityReply {
+    pub fn validate(&self) -> Result<()> {
+        if !self.has_crc_flag() {
+            return Ok(());
+        }
+        let src_crc = self.get_crc();
+        let mut identity_reply = self.clone();
+        let dst_crc = identity_reply.calc_crc().get_crc();
+        if src_crc != dst_crc {
+            return Err(ProtError::new(E_BAD_CRC).into());
+        }
+        Ok(())
+    }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.reply_head.as_bytes());
+        if self.has_crc_flag() {
+            res.extend(self.crc.to_be_bytes());
+        }
+        if self.has_support_auth_type() {
+            res.extend(self.support_auth_type.as_bytes());
+        }
+        if self.has_max_support_protocol_version() {
+            res.push(self.max_support_protocol_version);
+        }
+        if self.salt_len() != 0 {
+            res.extend(self.salt.as_bytes());
+        }
+        res
+    }
+
     pub fn get_head(&self) -> Head {
         self.head.clone()
     }
 
     pub fn set_head(&mut self, head: Head) -> &mut Self {
         self.head = head;
+        self
+    }
+
+    pub fn get_crc(&self) -> u16 {
+        self.crc
+    }
+
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.reply_head.set_crc_flag(false);
+        let bts = self.as_bytes();
+        self.crc = X25.checksum(&bts);
+        self.reply_head.set_crc_flag(true);
+
         self
     }
 
@@ -217,6 +336,13 @@ impl IdentityReply {
 
     pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
+
+        // parse crc
+        if self.has_crc_flag() {
+            buf.resize(2, 0);
+            reader.read_exact(&mut buf).await?;
+            self.crc = u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc failed"));
+        }
 
         // parse support auth type
         if self.has_support_auth_type() {

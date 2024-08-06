@@ -1,11 +1,11 @@
-use super::{new_v1_head, BuilderV1, PROPTOCOL_V1, V1};
+use super::{new_v1_head, BuilderV1, V1};
 use crate::consts::ACTION_REPLY;
 use crate::protocol::Protocol;
 use crate::protocol::{Builder, Head};
 use anyhow::Result;
 use bytes::BytesMut;
 use enum_dispatch::enum_dispatch;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
 
@@ -39,12 +39,6 @@ impl Deref for Reply {
 
     fn deref(&self) -> &Self::Target {
         &self.head
-    }
-}
-
-impl DerefMut for Reply {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.head
     }
 }
 
@@ -107,9 +101,8 @@ impl Reply {
         res
     }
 
-    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
         let mut reply = Reply::default();
-        reply.set_head(head);
         reply.parse_reader(reader).await?;
         Ok(reply)
     }

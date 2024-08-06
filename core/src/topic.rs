@@ -60,33 +60,34 @@ impl Topic {
 
     /// 将消息发下至consumers
     pub async fn deliver_message(&self, msg: Message) -> Result<()> {
+        let prot = msg.convert_to_protocol();
         let (sub_channel, _) = split_subscribe_type(self.meta.subscribe_type);
         match sub_channel {
             SUBSCRIBE_TYPE_BROADCAST_IN_CHANNEL => {
                 let iter = self.channels.values();
                 for chan in iter {
-                    chan.get().send_msg(msg.convert_to_protocol()).await?;
+                    chan.get().send_msg(prot.clone()).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_ROUNDROBIN_IN_CHANNEL => {
                 if let Some(chan) = self.channels.roundrobin_next() {
-                    chan.get().send_msg(msg.convert_to_protocol()).await?;
+                    chan.get().send_msg(prot).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_RAND_IN_CHANNEL => {
                 if let Some(chan) = self.channels.rand() {
-                    chan.get().send_msg(msg.convert_to_protocol()).await?;
+                    chan.get().send_msg(prot).await?;
                 }
                 Ok(())
             }
 
             SUBSCRIBE_TYPE_RAND_PROPERTY_IN_CHANNEL => {
                 if let Some(chan) = self.channels.rand_weight() {
-                    chan.get().send_msg(msg.convert_to_protocol()).await?;
+                    chan.get().send_msg(prot).await?;
                 }
                 Ok(())
             }

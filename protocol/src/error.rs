@@ -5,66 +5,26 @@ use std::{
     fmt::{write, Display},
 };
 
-pub const ERR_ZERO: u8 = 0;
-pub const ERR_TIMEOUT: u8 = 1;
-pub const ERR_NOT_SUPPORT_VERSION: u8 = 1;
-pub const ERR_NOT_SUPPORT_ACTION: u8 = 1;
-pub const RR_NEED_MSG: u8 = 1;
-pub const ERR_SHOULD_NOT_MSG: u8 = 2;
-pub const ERR_EXCEED_MAX_NUM: u8 = 3;
-pub const ERR_EXCEED_MAX_LEN: u8 = 4;
-pub const ERR_SHOULD_NOT_REJECT_CODE: u8 = 5;
-pub const ERR_SHOULD_HAS_ID: u8 = 6;
-pub const ERR_MSG_NUM_NOT_EQUAL: u8 = 7;
-pub const ERR_TOPIC_PROHIBIT_TYPE: u8 = 8;
-pub const ERR_TOPIC_PROHIBIT_DEFER: u8 = 9;
-pub const ERR_TOPIC_PROHIBIT_INSTANT: u8 = 10;
-pub const ERR_SUBSCRIBE_TYPE_IN_CHANNEL: u8 = 11;
-pub const ERR_SUBSCRIBE_TYPE_IN_CLIENT: u8 = 12;
+// ================== COMMON ERR CODE 0-60 ================
+pub const E_OK: u8 = 0;
+pub const E_PROT_NOT_SUPPORT_VERSION: u8 = 1;
+pub const E_ACTION_NOT_SUPPORT: u8 = 2;
+pub const E_BAD_CRC: u8 = 3;
+// ================== COMMON ERR CODE 0-60 ================
+
+// ================== BUSNIESS ERR CODE 61-256 ================
+
+// ================== BUSNIESS ERR CODE 61-256 ================
 
 lazy_static! {
     static ref REASON_MAP: HashMap<u8, String> = {
         let mut m = HashMap::new();
-        m.insert(ERR_ZERO, "not expect error".to_string());
-        m.insert(ERR_TIMEOUT, "".to_string());
+        m.insert(E_OK, "ok".to_string());
         m.insert(
-            ERR_NOT_SUPPORT_VERSION,
+            E_PROT_NOT_SUPPORT_VERSION,
             "not support protocol version".to_string(),
         );
-        m.insert(RR_NEED_MSG, "need message in protocol".to_string());
-        m.insert(
-            ERR_SHOULD_NOT_MSG,
-            "should not have message in protocol".to_string(),
-        );
-        m.insert(
-            ERR_EXCEED_MAX_NUM,
-            "message number exceed maxnium number".to_string(),
-        );
-        m.insert(
-            ERR_EXCEED_MAX_LEN,
-            "message number exceed maxnium length".to_string(),
-        );
-        m.insert(
-            ERR_SHOULD_NOT_REJECT_CODE,
-            "should not have reject code or flag in protocol head".to_string(),
-        );
-        m.insert(ERR_SHOULD_HAS_ID, "should has id in message".to_string());
-        m.insert(
-            ERR_MSG_NUM_NOT_EQUAL,
-            "message num in head and bodys not equal".to_string(),
-        );
-        m.insert(
-            ERR_TOPIC_PROHIBIT_TYPE,
-            "topic can't prohibit defer and instant message at same time".to_string(),
-        );
-        m.insert(
-            ERR_TOPIC_PROHIBIT_DEFER,
-            "this topic is prohibit defer message".to_string(),
-        );
-        m.insert(
-            ERR_TOPIC_PROHIBIT_INSTANT,
-            "this topic is prohibit instant message".to_string(),
-        );
+        m.insert(E_ACTION_NOT_SUPPORT, "not support action".to_string());
 
         m
     };

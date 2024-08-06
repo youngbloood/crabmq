@@ -1,7 +1,11 @@
 use super::MessageOperation;
 use crate::{
-    consts::{ACTION_MSG, PROPTOCOL_V1},
-    protocol::{Head, Protocol, HEAD_LENGTH},
+    consts::{ACTION_MSG, PROPTOCOL_V1, X25},
+    error::{ProtError, E_BAD_CRC},
+    protocol::{
+        v1::{dispatch_message::DispatchMessage, V1},
+        Head, Protocol, HEAD_LENGTH,
+    },
 };
 use anyhow::{anyhow, Result};
 use bytes::{Bytes, BytesMut};
@@ -15,6 +19,7 @@ use std::{
 use tokio::io::AsyncReadExt;
 
 /**
+ * [`MessageV1`] is a unit that store into Storage Media.
  * Encoding:
  *         2 bytes: head.
  *         1 byte: topic length.
@@ -71,8 +76,18 @@ impl MessageOperation for MessageV1 {
         res.to_vec()
     }
 
-    fn convert_to_protocol(&self) -> Protocol {
-        todo!()
+    fn convert_to_protocol(self) -> Protocol {
+        let version = self.head.get_version();
+        match version {
+            PROPTOCOL_V1 => {
+                let mut dispatch_msg = DispatchMessage::default();
+                dispatch_msg.set_msg(self.msg);
+                let mut v1 = V1::default();
+                v1.set_msg(dispatch_msg);
+                Protocol::V1(v1)
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn get_topic(&self) -> &str {
@@ -219,12 +234,15 @@ const MESSAGE_USER_V1_HEAD_LENGTH: usize = 12;
 *           1bit: is consume: mark the message has been consumed.
 * 2nd byte: ID-LENGTH
 * 3-10th bytes: BODY-LENGTH(8 bytes)
-* 11-12th bytes: extend bytes
+* 11th byte:
+*           1bit: has crc.
+* 12th byte: reserve byte
 *
 * optional:
-*           8byte defer time.
-*           id value(length determine by ID-LENGTH)
-*           body value(length determine by BODY-LENGTH)
+*           2 bytes: crc.
+*           8 bytes: defer time.
+*           id value(length determined by ID-LENGTH)
+*           body value(length determined by BODY-LENGTH)
 */
 
 #[derive(Default, Clone)]
@@ -248,7 +266,7 @@ impl Debug for MessageUserV1Head {
 }
 
 impl MessageUserV1Head {
-    fn set_flag(&mut self, index: usize, pos: u8, on: bool) {
+    fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
             return;
         }
@@ -272,7 +290,7 @@ impl MessageUserV1Head {
 
     /// set the update flag value.
     pub fn set_update(&mut self, update: bool) -> &mut Self {
-        self.set_flag(0, 7, update);
+        self.set_head_flag(0, 7, update);
         self
     }
 
@@ -283,7 +301,7 @@ impl MessageUserV1Head {
 
     /// set the ack flag value.
     pub fn set_ack(&mut self, ack: bool) -> &mut Self {
-        self.set_flag(0, 6, ack);
+        self.set_head_flag(0, 6, ack);
         self
     }
 
@@ -294,7 +312,7 @@ impl MessageUserV1Head {
 
     /// set the persist flag value.
     pub fn set_persist(&mut self, persist: bool) -> &mut Self {
-        self.set_flag(0, 5, persist);
+        self.set_head_flag(0, 5, persist);
         self
     }
 
@@ -305,7 +323,7 @@ impl MessageUserV1Head {
 
     /// set the defer flag value.
     pub fn set_defer(&mut self, defer: bool) -> &mut Self {
-        self.set_flag(0, 4, defer);
+        self.set_head_flag(0, 4, defer);
         self
     }
 
@@ -316,7 +334,7 @@ impl MessageUserV1Head {
 
     /// set the defer_concrete flag value.
     pub fn set_defer_concrete(&mut self, concrete: bool) -> &mut Self {
-        self.set_flag(0, 3, concrete);
+        self.set_head_flag(0, 3, concrete);
         self
     }
 
@@ -327,7 +345,7 @@ impl MessageUserV1Head {
 
     /// set the delete flag value.
     pub fn set_delete(&mut self, delete: bool) -> &mut Self {
-        self.set_flag(0, 2, delete);
+        self.set_head_flag(0, 2, delete);
         self
     }
 
@@ -338,7 +356,7 @@ impl MessageUserV1Head {
 
     /// set the notready flag value.
     pub fn set_notready(&mut self, notready: bool) -> &mut Self {
-        self.set_flag(0, 1, notready);
+        self.set_head_flag(0, 1, notready);
         self
     }
 
@@ -349,7 +367,7 @@ impl MessageUserV1Head {
 
     /// set the consume flag value.
     pub fn set_consume(&mut self, consume: bool) -> &mut Self {
-        self.set_flag(0, 0, consume);
+        self.set_head_flag(0, 0, consume);
         self
     }
 
@@ -381,12 +399,24 @@ impl MessageUserV1Head {
         }
         self
     }
+
+    pub fn has_crc_flag(&self) -> bool {
+        self.0[10].is_1(7)
+    }
+
+    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(10, 7, has);
+        self
+    }
 }
 
+/// The unit that store into storage
 #[derive(Default, Clone, Debug)]
 pub struct MessageUserV1 {
     head: MessageUserV1Head,
-    sid: i64,        // session_id: generate by ProtocolBodys
+    sid: i64, // session_id: generate by ProtocolBodys
+
+    crc: u16,
     defer_time: u64, // 8 bytes
     id: String,
     body: Bytes,
@@ -400,31 +430,48 @@ impl Deref for MessageUserV1 {
     }
 }
 
-impl DerefMut for MessageUserV1 {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.head
-    }
-}
-
 impl MessageUserV1 {
+    pub fn validate(&self) -> Result<()> {
+        if !self.has_crc_flag() {
+            return Ok(());
+        }
+        let src_crc = self.get_crc();
+        let mut msg = self.clone();
+        let dst_crc = msg.calc_crc().get_crc();
+        if src_crc != dst_crc {
+            return Err(ProtError::new(E_BAD_CRC).into());
+        }
+
+        Ok(())
+    }
+
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut res = vec![];
         res.extend(self.head.0.to_vec());
-        if self.head.is_defer() {
+        if self.has_crc_flag() {
+            res.extend(self.crc.to_be_bytes());
+        }
+        if self.is_defer() {
             res.extend(self.defer_time.to_be_bytes());
         }
-        res.extend(self.id.as_bytes());
-        res.extend(self.body.to_vec());
+        if self.id_len() != 0 {
+            res.extend(self.id.as_bytes());
+        }
+        if self.body_len() != 0 {
+            res.extend(self.body.to_vec());
+        }
 
         res
     }
 
-    pub fn get_head(&self) -> &MessageUserV1Head {
-        &self.head
+    pub fn get_crc(&self) -> u16 {
+        self.crc
     }
 
-    pub fn set_head(&mut self, head: MessageUserV1Head) -> &mut Self {
-        self.head = head;
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.head.set_crc_flag(false);
+        self.crc = X25.checksum(&self.as_bytes());
+        self.head.set_crc_flag(true);
         self
     }
 
@@ -468,63 +515,83 @@ impl MessageUserV1 {
         self
     }
 
+    pub fn convert_to_messagev1(self, topic_name: &str, channel_name: &str) -> MessageV1 {
+        let mut head = Head::default();
+        head.set_version(PROPTOCOL_V1).set_action(ACTION_MSG);
+        MessageV1 {
+            head,
+            topic: topic_name.to_string(),
+            channel: channel_name.to_string(),
+            msg: self,
+        }
+    }
+
     pub async fn parse_from(
         reader: &mut Pin<&mut impl AsyncReadExt>,
         mut num: u8,
     ) -> Result<Vec<Self>> {
-        let mut buf = BytesMut::new();
-
         let mut res = vec![];
         while num != 0 {
             num -= 1;
-            buf.resize(MESSAGE_USER_V1_HEAD_LENGTH, 0);
+            let mut msg = MessageUserV1::default();
+            msg.parse_reader(reader).await?;
+            res.push(msg);
+        }
+        Ok(res)
+    }
+
+    pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
+        let mut buf = BytesMut::new();
+
+        // parse head
+        buf.resize(MESSAGE_USER_V1_HEAD_LENGTH, 0);
+        reader.read_exact(&mut buf).await?;
+        self.head = MessageUserV1Head::with(
+            buf.to_vec()
+                .try_into()
+                .expect("convert to bin message-user-v1-head failed"),
+        );
+
+        // parse crc
+        if self.has_crc_flag() {
+            buf.resize(8, 0);
             reader.read_exact(&mut buf).await?;
-
-            let head = MessageUserV1Head::with(
-                buf.to_vec()
-                    .try_into()
-                    .expect("convert to bin message-user-v1-head failed"),
-            );
-
-            let mut bin_msg = MessageUserV1::default();
-            bin_msg.set_head(head.clone());
-
-            // parse defer time
-            if head.is_defer() {
-                buf.resize(8, 0);
-                reader.read_exact(&mut buf).await?;
-                let defer_time = u64::from_be_bytes(
-                    buf.to_vec()
-                        .try_into()
-                        .expect("convert to defer time failed"),
-                );
-                if head.is_defer_concrete() {
-                    bin_msg.set_defer_time(defer_time);
-                } else {
-                    let dt = Local::now();
-                    bin_msg.set_defer_time(dt.timestamp() as u64 + defer_time);
-                }
-            }
-
-            // parse id
-            let id_len = head.id_len();
-            if id_len != 0 {
-                buf.resize(id_len as usize, 0);
-                reader.read_exact(&mut buf).await?;
-                let _ = bin_msg.set_id(&String::from_utf8(buf.to_vec()).expect("illigal id value"));
-            }
-
-            // parse body
-            let body_len = head.body_len();
-            if body_len != 0 {
-                buf.resize(body_len as usize, 0);
-                reader.read_exact(&mut buf).await?;
-                bin_msg.set_body(Bytes::copy_from_slice(buf.as_ref()));
-            }
-
-            res.push(bin_msg);
+            self.crc = u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc failed"));
         }
 
-        Ok(res)
+        // parse defer time
+        if self.is_defer() {
+            buf.resize(8, 0);
+            reader.read_exact(&mut buf).await?;
+            let defer_time = u64::from_be_bytes(
+                buf.to_vec()
+                    .try_into()
+                    .expect("convert to defer time failed"),
+            );
+            if self.is_defer_concrete() {
+                self.defer_time = defer_time;
+            } else {
+                let dt = Local::now();
+                self.defer_time = dt.timestamp() as u64 + defer_time;
+            }
+        }
+
+        // parse id
+        let id_len = self.id_len();
+        if id_len != 0 {
+            buf.resize(id_len as usize, 0);
+            reader.read_exact(&mut buf).await?;
+            self.id = String::from_utf8(buf.to_vec()).expect("illigal id value");
+        }
+
+        // parse body
+        let body_len = self.body_len();
+        if body_len != 0 {
+            buf.resize(body_len as usize, 0);
+            reader.read_exact(&mut buf).await?;
+            self.body = Bytes::copy_from_slice(buf.as_ref());
+        }
+
+        Ok(())
     }
 }
