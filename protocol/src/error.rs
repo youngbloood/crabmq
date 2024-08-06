@@ -13,7 +13,10 @@ pub const E_BAD_CRC: u8 = 3;
 // ================== COMMON ERR CODE 0-60 ================
 
 // ================== BUSNIESS ERR CODE 61-256 ================
-
+// ======================== PUBLISH ===========================
+pub const E_TOPIC_PROHIBIT_TYPE: u8 = 61;
+pub const E_TOPIC_PROHIBIT_DEFER: u8 = 62;
+pub const E_TOPIC_PROHIBIT_INSTANT: u8 = 63;
 // ================== BUSNIESS ERR CODE 61-256 ================
 
 lazy_static! {

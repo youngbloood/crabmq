@@ -264,6 +264,11 @@ impl Publish {
         self
     }
 
+    pub fn set_ephemeral(&mut self, e: bool) -> &mut Self {
+        self.pub_head.set_ephemeral(e);
+        self
+    }
+
     pub fn get_topic(&self) -> &str {
         &self.topic
     }
@@ -340,6 +345,7 @@ impl Publish {
     pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
 
+        println!("parse publish");
         // parse pub-head
         buf.resize(PUBLISH_HEAD_LENGTH, 0);
         reader.read_exact(&mut buf).await?;

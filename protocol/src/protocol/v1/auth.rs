@@ -4,6 +4,7 @@ use crate::protocol::Head;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
@@ -12,6 +13,12 @@ pub const AUTH_HEAD_LENGTH: usize = 6;
 
 #[derive(Default, Clone)]
 pub struct AuthType(u8);
+
+impl Debug for AuthType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthType").finish()
+    }
+}
 
 impl AuthType {
     pub fn with(a: u8) -> Self {
@@ -32,8 +39,20 @@ impl AuthType {
  * 4-5 bytes: u16: password length.
  * 6th byte: salt length.
  */
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AuthHead([u8; AUTH_HEAD_LENGTH]);
+
+impl Debug for AuthHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthHead")
+            .field("has-crc", &self.has_crc_flag())
+            .field("auth-type", &self.get_authtype())
+            .field("username-len", &self.get_username_len())
+            .field("password-len", &self.get_password_len())
+            .field("salt-len", &self.get_salt_len())
+            .finish()
+    }
+}
 
 impl AuthHead {
     fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
@@ -217,8 +236,18 @@ const AUTH_REPLY_HEAD_LENGTH: usize = 2;
  *       1 bit: has timeout.
  * 2 byte: token length.  
  */
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct AuthReplyHead([u8; AUTH_REPLY_HEAD_LENGTH]);
+
+impl Debug for AuthReplyHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthReplyHead")
+            .field("has-crc", &self.has_crc_flag())
+            .field("has-timeout", &self.has_timeout_flag())
+            .field("token-len", &self.get_token_len())
+            .finish()
+    }
+}
 
 impl AuthReplyHead {
     pub fn with(head: [u8; AUTH_REPLY_HEAD_LENGTH]) -> Self {

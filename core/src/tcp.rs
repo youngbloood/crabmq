@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::crab::Crab;
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
 use protocol::message::Message;
-use protocol::protocol::Protocol;
+use protocol::protocol::{Protocol, ProtocolOperation as _};
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{net::TcpListener, select};
@@ -86,15 +86,10 @@ impl TcpServer {
                     }
                     debug!("msg = {:?}",prot_opt);
                     let (addr,prot) = prot_opt.unwrap();
-                    // let (resp, passed) = self.validate(addr.as_str(), &msg);
-                    // if !passed {
-                    //     let _ = self.out_sender.send((addr, resp.unwrap())).await;
-                    //     continue;
-                    // }
-                    // if let Err(e) = msg.init(){
-                    //     error!(addr = addr, "init msg error: {e}");
-                    //     continue;
-                    // }
+                    if let Some(resp) = prot.validate_for_server() {
+                        let _ = self.out_sender.send((addr, resp)).await;
+                        continue;
+                    }
                     let client_guard = self.clients.get(addr.as_str()).unwrap().clone();
                     self.crab.get_mut().handle_message(client_guard,self.out_sender.clone(),addr.as_str(),prot).await;
                 }

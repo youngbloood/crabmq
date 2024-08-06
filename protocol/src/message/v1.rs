@@ -261,6 +261,7 @@ impl Debug for MessageUserV1Head {
             .field("is-consume", &self.is_consume())
             .field("id-len", &self.id_len())
             .field("body-len", &self.body_len())
+            .field("has-crc", &self.has_crc_flag())
             .finish()
     }
 }
@@ -430,6 +431,13 @@ impl Deref for MessageUserV1 {
     }
 }
 
+/// user can custom the message head
+impl DerefMut for MessageUserV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.head
+    }
+}
+
 impl MessageUserV1 {
     pub fn validate(&self) -> Result<()> {
         if !self.has_crc_flag() {
@@ -554,7 +562,7 @@ impl MessageUserV1 {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(8, 0);
+            buf.resize(2, 0);
             reader.read_exact(&mut buf).await?;
             self.crc = u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc failed"));
         }

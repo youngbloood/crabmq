@@ -10,6 +10,7 @@ use crate::{
 use anyhow::Result;
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
+use std::fmt::Debug;
 use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 
@@ -22,7 +23,7 @@ const SUBSCRIBE_HEAD_LENGTH: usize = 6;
  *          1 bit: has crc
  *          1 bit: is ephemeral
  *          1 bit: set [`ready_number`]
- *          4 bits: msg number
+ *          4 bits: *reserve bits*
  * 2-3 bytes: reserve bytes
  * 4th byte: topic length
  * 5th byte: channel length
@@ -35,8 +36,22 @@ const SUBSCRIBE_HEAD_LENGTH: usize = 6;
  *          n bytes: channel name
  *          n bytes: token value
  */
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct SubscribeHead([u8; SUBSCRIBE_HEAD_LENGTH]);
+
+impl Debug for SubscribeHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscribeHead")
+            .field("is-heartbeat", &self.is_heartbeat())
+            .field("has-crc", &self.has_crc_flag())
+            .field("is-ephemeral", &self.is_ephemeral())
+            .field("set-readynumber", &self.has_ready_number())
+            .field("topic-len", &self.get_topic_len())
+            .field("channel-len", &self.get_channel_len())
+            .field("token-len", &self.get_token_len())
+            .finish()
+    }
+}
 
 impl SubscribeHead {
     fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {

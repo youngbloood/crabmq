@@ -15,9 +15,7 @@ use dashmap::DashMap;
 use defer::Defer;
 use instant::Instant;
 use protocol::{
-    error::{
-        ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
-    },
+    error::{ProtError, E_TOPIC_PROHIBIT_DEFER, E_TOPIC_PROHIBIT_INSTANT, E_TOPIC_PROHIBIT_TYPE},
     message::{Message, MessageOperation as _},
 };
 use serde::{Deserialize, Serialize};
@@ -120,7 +118,7 @@ impl StorageDisk {
             // validate
             // TODO: 移到协议端校验
             if meta.prohibit_defer && meta.prohibit_instant {
-                return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
+                return Err(Error::from(ProtError::new(E_TOPIC_PROHIBIT_TYPE)));
             }
 
             let parent = cfg.storage_dir.join(topic_name);
@@ -271,14 +269,14 @@ impl TopicMessage {
     async fn push(&self, msg: Message) -> Result<()> {
         if msg.defer_time() != 0 {
             if self.guard.get().meta.prohibit_defer {
-                return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_DEFER)));
+                return Err(Error::from(ProtError::new(E_TOPIC_PROHIBIT_DEFER)));
             }
             self.guard.get().defer.handle_msg(msg).await?;
             return Ok(());
         }
 
         if self.guard.get().meta.prohibit_instant {
-            return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_INSTANT)));
+            return Err(Error::from(ProtError::new(E_TOPIC_PROHIBIT_INSTANT)));
         }
         self.guard.get().instant.handle_msg(msg).await?;
         Ok(())

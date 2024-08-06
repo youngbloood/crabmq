@@ -8,7 +8,6 @@ use enum_dispatch::enum_dispatch;
 use std::fmt::Debug;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
-use tracing::debug;
 use v1::reply::{Reply, ReplyBuilder};
 use v1::V1;
 

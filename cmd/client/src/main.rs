@@ -130,8 +130,10 @@ impl Args {
                         if let Some(id) = msg.id.as_ref() {
                             msgv1.set_id(id).expect("set id err");
                         }
+                        msgv1.calc_crc();
                         publishv1.push_msg(msgv1)?;
                     }
+                    publishv1.calc_crc();
                     Ok(publishv1.build())
                 }
                 _ => unreachable!(),

@@ -1,7 +1,7 @@
 use super::{
     new_v1_head,
     reply::{Reply, ReplyBuilder},
-    BuilderV1, ProtError, E_BAD_CRC, V1, X25,
+    BuilderV1, E_BAD_CRC, E_TOPIC_PROHIBIT_TYPE, V1, X25,
 };
 use crate::{
     consts::ACTION_TOUCH,
@@ -10,7 +10,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
-use std::{ops::Deref, pin::Pin};
+use std::{fmt::Debug, ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
 
@@ -54,8 +54,32 @@ pub const TOUCH_HEAD_LENGTH: usize = 8;
 *           token value.
 *           custom defer message store format.
 */
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct TouchHead([u8; TOUCH_HEAD_LENGTH]);
+
+impl Debug for TouchHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TouchHead")
+            .field("topic-is-ephemeral", &self.topic_is_ephemeral())
+            .field("channel-is-ephemeral", &self.channel_is_ephemeral())
+            .field("is-heartbeat", &self.is_heartbeat())
+            .field("prohibit-instant", &self.prohibit_instant())
+            .field("prohibit-defer", &self.prohibit_defer())
+            .field("has-crc", &self.has_crc_flag())
+            .field("has-max-msg-num-per-file", &self.has_max_msg_num_per_file())
+            .field("has-max-size-per-file", &self.has_max_size_per_file())
+            .field("has-compress-type", &self.has_compress_type())
+            .field("has-subscribe-type", &self.has_subscribe_type())
+            .field("has-record-num-per-file", &self.has_record_num_per_file())
+            .field("has-record-size-per-file", &self.has_record_size_per_file())
+            .field("has-fd-cache-size", &self.has_fd_cache_size())
+            .field("topic-len", &self.get_token_len())
+            .field("channel-len", &self.get_channel_len())
+            .field("token-len", &self.get_token_len())
+            .field("defer-msg-format-len", &self.defer_format_len())
+            .finish()
+    }
+}
 
 impl TouchHead {
     fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
@@ -212,7 +236,7 @@ impl TouchHead {
     // 3rd byte ======================================== END
 
     // 4th byte ======================================== START
-    pub fn channel_len(&self) -> u8 {
+    pub fn get_channel_len(&self) -> u8 {
         self.0[3]
     }
 
@@ -223,7 +247,7 @@ impl TouchHead {
     // 4th byte ======================================== END
 
     // 5th byte ======================================== START
-    pub fn token_len(&self) -> u8 {
+    pub fn get_token_len(&self) -> u8 {
         self.0[4]
     }
     pub fn set_token_len(&mut self, l: u8) -> &mut Self {
@@ -325,13 +349,13 @@ impl Touch {
         let mut res = vec![];
         res.extend(self.head.as_bytes());
         res.extend(self.touch_head.as_bytes());
-        if self.token_len() != 0 {
+        if self.get_token_len() != 0 {
             res.extend(self.topic.as_bytes());
         }
-        if self.channel_len() != 0 {
+        if self.get_channel_len() != 0 {
             res.extend(self.channel.as_bytes());
         }
-        if self.token_len() != 0 {
+        if self.get_token_len() != 0 {
             res.extend(self.token.as_bytes());
         }
         if self.has_crc_flag() {
@@ -373,6 +397,9 @@ impl Touch {
         let dst_crc = touch.calc_crc().get_crc();
         if src_crc != dst_crc {
             return Some(self.build_reply_err(E_BAD_CRC).build());
+        }
+        if self.prohibit_defer() && self.prohibit_instant() {
+            return Some(self.build_reply_err(E_TOPIC_PROHIBIT_TYPE).build());
         }
 
         None
@@ -613,14 +640,14 @@ impl Touch {
         debug!(addr = "{self.addr:?}", "parse channel name");
 
         // parse channel name
-        buf.resize(self.channel_len() as usize, 0);
+        buf.resize(self.get_channel_len() as usize, 0);
         reader.read_exact(&mut buf).await?;
         let channel = String::from_utf8(buf.to_vec()).expect("illigal channel name");
         self.set_channel(channel.as_str())?;
 
         debug!(addr = "{self.addr:?}", "parse token");
         // parse token
-        buf.resize(self.token_len() as usize, 0);
+        buf.resize(self.get_token_len() as usize, 0);
         reader.read_exact(&mut buf).await?;
         let token = String::from_utf8(buf.to_vec()).expect("illigal token value");
         self.set_token(token.as_str())?;

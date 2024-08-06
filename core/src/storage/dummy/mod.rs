@@ -4,9 +4,7 @@ use anyhow::{Error, Result};
 use common::global::Guard;
 use dashmap::DashMap;
 use protocol::{
-    error::{
-        ProtError, ERR_TOPIC_PROHIBIT_DEFER, ERR_TOPIC_PROHIBIT_INSTANT, ERR_TOPIC_PROHIBIT_TYPE,
-    },
+    error::{ProtError, E_TOPIC_PROHIBIT_DEFER, E_TOPIC_PROHIBIT_INSTANT, E_TOPIC_PROHIBIT_TYPE},
     message::{Message, MessageOperation},
 };
 use std::sync::Arc;
@@ -41,7 +39,7 @@ impl Dummy {
 
         // create
         if meta.prohibit_defer && meta.prohibit_instant {
-            return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_TYPE)));
+            return Err(Error::from(ProtError::new(E_TOPIC_PROHIBIT_TYPE)));
         }
 
         self.insert(topic_name, meta)
@@ -122,14 +120,14 @@ impl TopicDummyBase {
     async fn push(&self, msg: Message) -> Result<()> {
         if msg.defer_time() != 0 {
             if self.meta.prohibit_defer {
-                return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_DEFER)));
+                return Err(Error::from(ProtError::new(E_TOPIC_PROHIBIT_DEFER)));
             }
             self.defer.push(msg).await?;
             return Ok(());
         }
 
         if self.meta.prohibit_instant {
-            return Err(Error::from(ProtError::new(ERR_TOPIC_PROHIBIT_INSTANT)));
+            return Err(Error::from(ProtError::new(E_TOPIC_PROHIBIT_INSTANT)));
         }
         self.instant.push(msg).await?;
         Ok(())

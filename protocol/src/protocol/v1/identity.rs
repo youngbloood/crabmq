@@ -14,6 +14,7 @@ use crate::protocol::Protocol;
 use anyhow::Result;
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation, BitOperation as _};
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
@@ -30,8 +31,16 @@ const IDENTITY_HEAD_LENGTH: usize = 4;
  * EXTEND according the head:
  *          2 bytes: crc value
  */
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct IdentityHead([u8; IDENTITY_HEAD_LENGTH]);
+
+impl Debug for IdentityHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityHead")
+            .field("has-crc", &self.has_crc_flag())
+            .finish()
+    }
+}
 
 impl IdentityHead {
     fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
@@ -198,6 +207,20 @@ pub const IDENTITY_REPLY_HEAD_LENGTH: usize = 2;
 #[derive(Default, Clone)]
 pub struct IdentityReplyHead([u8; IDENTITY_REPLY_HEAD_LENGTH]);
 
+impl Debug for IdentityReplyHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityReplyHead")
+            .field("has-crc", &self.has_crc_flag())
+            .field("has-support-auth-type", &self.has_support_auth_type())
+            .field(
+                "has-max-support-protocol-versioin",
+                &self.has_max_support_protocol_version(),
+            )
+            .field("salt-len", &self.get_salt_len())
+            .finish()
+    }
+}
+
 impl IdentityReplyHead {
     fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
@@ -243,7 +266,7 @@ impl IdentityReplyHead {
         self
     }
 
-    pub fn salt_len(&self) -> u8 {
+    pub fn get_salt_len(&self) -> u8 {
         self.0[1]
     }
 
@@ -299,7 +322,7 @@ impl IdentityReply {
         if self.has_max_support_protocol_version() {
             res.push(self.max_support_protocol_version);
         }
-        if self.salt_len() != 0 {
+        if self.get_salt_len() != 0 {
             res.extend(self.salt.as_bytes());
         }
         res
@@ -359,8 +382,8 @@ impl IdentityReply {
         }
 
         // parse salt
-        if self.salt_len() != 0 {
-            buf.resize(self.salt_len() as _, 0);
+        if self.get_salt_len() != 0 {
+            buf.resize(self.get_salt_len() as _, 0);
             reader.read_exact(&mut buf).await?;
             self.salt = String::from_utf8(buf.to_vec())?;
         }
