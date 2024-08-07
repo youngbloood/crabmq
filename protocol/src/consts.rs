@@ -1,5 +1,8 @@
 pub const X25: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_IBM_SDLC);
 
+// crc 检验和的长度： 2 bytes
+pub const CRC_LENGTH: usize = 2;
+
 // ========= PROTOCOL VERSION =========
 pub const PROPTOCOL_V1: u8 = 1;
 // ========= PROTOCOL VERSION =========

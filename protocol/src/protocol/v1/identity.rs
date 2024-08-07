@@ -1,10 +1,12 @@
 use super::auth::AuthType;
+use super::auth::AUTH_TYPE_LENGTH;
 use super::new_v1_head;
 use super::reply::Reply;
 use super::reply::ReplyBuilder;
 use super::BuilderV1;
 use super::Head;
 use super::ProtError;
+use super::CRC_LENGTH;
 use super::E_BAD_CRC;
 use super::V1;
 use super::X25;
@@ -144,6 +146,7 @@ impl Identity {
         self.identity_head.set_crc_flag(false);
         let bts = self.as_bytes();
         self.crc = X25.checksum(&bts);
+        self.identity_head.set_crc_flag(true);
         self
     }
 
@@ -183,7 +186,7 @@ impl Identity {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(2, 0);
+            buf.resize(CRC_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
             self.crc =
                 u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc vec failed"));
@@ -362,16 +365,20 @@ impl IdentityReply {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(2, 0);
+            buf.resize(CRC_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
             self.crc = u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc failed"));
         }
 
         // parse support auth type
         if self.has_support_auth_type() {
-            buf.resize(1, 0);
+            buf.resize(AUTH_TYPE_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
-            self.support_auth_type = AuthType::with(*buf.first().unwrap());
+            self.support_auth_type = AuthType::with(
+                buf.to_vec()
+                    .try_into()
+                    .expect("convert to auth-type failed"),
+            );
         }
 
         // parse max support protocol version

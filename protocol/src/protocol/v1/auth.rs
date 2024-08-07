@@ -1,6 +1,7 @@
-use super::{new_v1_head, ProtError, ACTION_AUTH_REPLY, E_BAD_CRC, X25};
+use super::reply::{Reply, ReplyBuilder};
+use super::{new_v1_head, ProtError, ACTION_AUTH_REPLY, CRC_LENGTH, E_BAD_CRC, X25};
 use crate::consts::ACTION_AUTH;
-use crate::protocol::Head;
+use crate::protocol::{Builder, Head, Protocol};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
@@ -9,10 +10,25 @@ use std::ops::Deref;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
 
-pub const AUTH_HEAD_LENGTH: usize = 6;
+pub const AUTH_TYPE_LENGTH: usize = 2;
+pub const AUTH_HEAD_LENGTH: usize = 5 + AUTH_TYPE_LENGTH;
 
+/**
+ * 1st byte: series: hash type.
+ * 2nd byte: branch: the branch of this hash type.
+ *
+ * 常见列表参考: [wiki](https://zh.wikipedia.org/wiki/%E6%95%A3%E5%88%97%E5%87%BD%E6%95%B8)
+ * SUPPORT LIST: 碰撞(collision)
+ * MD: 1-x
+ *      MD5: 1-2
+ * SHA: 2-x
+ *      SHA-0: 2-0
+ *      SHA-1: 2-1
+ *      SHA-256: 2-2
+ *      SHA-512: 2-3
+ */
 #[derive(Default, Clone)]
-pub struct AuthType(u8);
+pub struct AuthType([u8; AUTH_TYPE_LENGTH]);
 
 impl Debug for AuthType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -21,23 +37,96 @@ impl Debug for AuthType {
 }
 
 impl AuthType {
-    pub fn with(a: u8) -> Self {
-        AuthType(a)
+    fn series(&self) -> u8 {
+        self.0[0]
+    }
+
+    fn set_series(&mut self, s: u8) -> &mut Self {
+        self.0[0] = s;
+        self
+    }
+
+    fn branch(&self) -> u8 {
+        self.0[1]
+    }
+
+    fn set_branch(&mut self, b: u8) -> &mut Self {
+        self.0[1] = b;
+        self
+    }
+
+    pub fn with(auth: [u8; AUTH_TYPE_LENGTH]) -> Self {
+        AuthType(auth)
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
-        vec![self.0]
+        self.0.to_vec()
     }
+
+    //  ================= MD5 Series =================
+    pub fn is_md5(&self) -> bool {
+        self.series() == 1 && self.branch() == 2
+    }
+
+    pub fn set_md5(&mut self) -> &mut Self {
+        self.set_series(1).set_branch(2);
+        self
+    }
+    //  ================= MD5 Series =================
+
+    //  ================= SHA Series =================
+    pub fn is_sha0(&self) -> bool {
+        self.series() == 2 && self.branch() == 0
+    }
+
+    pub fn set_sha0(&mut self) -> &mut Self {
+        self.set_series(2).set_branch(0);
+        self
+    }
+
+    pub fn is_sha1(&self) -> bool {
+        self.series() == 2 && self.branch() == 1
+    }
+
+    pub fn set_sha1(&mut self) -> &mut Self {
+        self.set_series(2).set_branch(1);
+        self
+    }
+
+    pub fn is_sha256(&self) -> bool {
+        self.series() == 2 && self.branch() == 2
+    }
+
+    pub fn set_sha256(&mut self) -> &mut Self {
+        self.set_series(2).set_branch(2);
+        self
+    }
+
+    pub fn is_sha512(&self) -> bool {
+        self.series() == 2 && self.branch() == 3
+    }
+
+    pub fn set_sha512(&mut self) -> &mut Self {
+        self.set_series(2).set_branch(3);
+        self
+    }
+    //  ================= SHA Series =================
 }
 
 /**
  * 1st byte:
  *         1 bit: has crc.
  *         7 bit: *reserve bits*
- * 2nd byte: AuthType
- * 3rd byte: username length.
- * 4-5 bytes: u16: password length.
- * 6th byte: salt length.
+ * 2nd byte: username length.
+ * 3-4 bytes: u16: password length.
+ * 5th byte: salt length.
+ * [`AUTH_TYPE_LENGTH`] bytes: AuthType
+ *
+ * optional:
+ *        [`CRC_LENGTH`] bytes: crc value.
+ *        n bytes: username value.
+ *        n bytes: password value.
+ *        n bytes: salt value.
  */
 #[derive(Default, Clone)]
 pub struct AuthHead([u8; AUTH_HEAD_LENGTH]);
@@ -46,10 +135,10 @@ impl Debug for AuthHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthHead")
             .field("has-crc", &self.has_crc_flag())
-            .field("auth-type", &self.get_authtype())
             .field("username-len", &self.get_username_len())
             .field("password-len", &self.get_password_len())
             .field("salt-len", &self.get_salt_len())
+            .field("auth-type", &self.get_authtype())
             .finish()
     }
 }
@@ -81,37 +170,37 @@ impl AuthHead {
         self
     }
 
-    pub fn get_authtype(&self) -> AuthType {
-        AuthType::with(self.0[1])
-    }
-
     pub fn get_username_len(&self) -> u8 {
-        self.0[2]
+        self.0[1]
     }
 
     pub fn set_username_len(&mut self, l: u8) -> &mut Self {
-        self.0[2] = l;
+        self.0[1] = l;
         self
     }
 
     pub fn get_password_len(&self) -> u16 {
-        u16::from_be_bytes(self.0[3..4].try_into().expect("convert to u16 failed"))
+        u16::from_be_bytes(self.0[2..4].try_into().expect("convert to u16 failed"))
     }
 
     pub fn set_password_len(&mut self, l: u16) -> &mut Self {
         let bts = l.to_be_bytes();
-        self.0[3] = bts[0];
-        self.0[4] = bts[1];
+        self.0[2] = bts[0];
+        self.0[3] = bts[1];
         self
     }
 
     pub fn get_salt_len(&self) -> u8 {
-        self.0[5]
+        self.0[4]
     }
 
     pub fn set_salt_len(&mut self, l: u8) -> &mut Self {
-        self.0[5] = l;
+        self.0[4] = l;
         self
+    }
+
+    pub fn get_authtype(&self) -> AuthType {
+        AuthType::with(self.0[4..].try_into().expect("convert to auth-type failed"))
     }
 
     pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
@@ -133,10 +222,12 @@ impl AuthHead {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Auth {
     head: Head,
     auth_head: AuthHead,
 
+    crc: u16,
     username: String,
     password: String,
     salt: String,
@@ -147,6 +238,7 @@ impl Default for Auth {
         Self {
             head: new_v1_head(ACTION_AUTH),
             auth_head: AuthHead::default(),
+            crc: 0,
             username: String::new(),
             password: String::new(),
             salt: String::new(),
@@ -162,7 +254,60 @@ impl Deref for Auth {
     }
 }
 
+impl ReplyBuilder for Auth {
+    fn build_reply_ok(&self) -> Reply {
+        Reply::with_ok(ACTION_AUTH)
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_AUTH, err_code)
+    }
+}
+
 impl Auth {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.auth_head.as_bytes());
+        if self.has_crc_flag() {
+            res.extend(self.crc.to_be_bytes());
+        }
+        if self.get_username_len() != 0 {
+            res.extend(self.username.as_bytes());
+        }
+        if self.get_password_len() != 0 {
+            res.extend(self.password.as_bytes());
+        }
+        if self.get_salt_len() != 0 {
+            res.extend(self.salt.as_bytes())
+        }
+        res
+    }
+
+    pub fn validate(&self) -> Option<Protocol> {
+        if !self.has_crc_flag() {
+            return None;
+        }
+        let src_crc = self.get_crc();
+        let mut auth = self.clone();
+        let dst_crc = auth.calc_crc().get_crc();
+        if src_crc != dst_crc {
+            return Some(self.build_reply_err(E_BAD_CRC).build());
+        }
+
+        None
+    }
+
+    pub fn get_crc(&self) -> u16 {
+        self.crc
+    }
+
+    pub fn calc_crc(&mut self) -> &mut Self {
+        self.auth_head.set_crc_flag(false);
+        self.crc = X25.checksum(&self.as_bytes());
+        self
+    }
+
     pub fn set_head(&mut self, head: Head) -> &mut Self {
         self.head = head;
         self
@@ -172,27 +317,39 @@ impl Auth {
         &self.username
     }
 
-    pub fn set_username(&mut self, username: &str) -> &mut Self {
+    pub fn set_username(&mut self, username: &str) -> Result<()> {
+        if username.len() >= u8::MAX as usize {
+            return Err(anyhow!("username length excess the max u8"));
+        }
+        self.auth_head.set_username_len(username.len() as _);
         self.username = username.to_string();
-        self
+        Ok(())
     }
 
     pub fn get_password(&self) -> &str {
         &self.password
     }
 
-    pub fn set_password(&mut self, password: &str) -> &mut Self {
+    pub fn set_password(&mut self, password: &str) -> Result<()> {
+        if password.len() >= u16::MAX as usize {
+            return Err(anyhow!("password length excess the max u16"));
+        }
+        self.auth_head.set_password_len(password.len() as _);
         self.password = password.to_string();
-        self
+        Ok(())
     }
 
     pub fn get_salt(&self) -> &str {
         &self.salt
     }
 
-    pub fn set_salt(&mut self, salt: &str) -> &mut Self {
+    pub fn set_salt(&mut self, salt: &str) -> Result<()> {
+        if salt.len() >= u8::MAX as usize {
+            return Err(anyhow!("salt length excess the max u8"));
+        }
+        self.auth_head.set_salt_len(salt.len() as _);
         self.salt = salt.to_string();
-        self
+        Ok(())
     }
 
     pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
@@ -205,6 +362,14 @@ impl Auth {
     pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         self.auth_head = AuthHead::parse_from(reader).await?;
         let mut buf = BytesMut::new();
+
+        // parse crc
+        if self.has_crc_flag() {
+            buf.resize(CRC_LENGTH, 0);
+            reader.read_exact(&mut buf).await?;
+            self.crc = u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc failed"))
+        }
+
         // parse username
         if self.get_username_len() != 0 {
             buf.resize(self.get_username_len() as _, 0);
@@ -409,7 +574,7 @@ impl AuthReply {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(2, 0);
+            buf.resize(CRC_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
             self.crc = u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc failed"))
         }

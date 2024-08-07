@@ -9,6 +9,7 @@ use inquire::Text;
 use protocol::consts::PROPTOCOL_V1;
 use protocol::message::v1::MessageUserV1;
 use protocol::protocol::v1::publish::Publish as PublishV1;
+use protocol::protocol::v1::subscribe::Subscribe;
 use protocol::protocol::Builder;
 use protocol::protocol::Protocol;
 use protocol::protocol::ProtocolOperation as _;
@@ -136,7 +137,8 @@ impl Args {
                     publishv1.calc_crc();
                     Ok(publishv1.build())
                 }
-                _ => unreachable!(),
+
+                _ => unimplemented!(),
             },
             _ => unreachable!(),
         };

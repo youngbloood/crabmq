@@ -1,7 +1,7 @@
 use super::{
     new_v1_head,
     reply::{Reply, ReplyBuilder},
-    BuilderV1, Head, E_BAD_CRC, V1, X25,
+    BuilderV1, Head, CRC_LENGTH, E_BAD_CRC, V1, X25,
 };
 use crate::{
     consts::ACTION_SUBSCRIBE,
@@ -326,7 +326,7 @@ impl Subscribe {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(2, 0);
+            buf.resize(CRC_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
             self.crc =
                 u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc vec failed"));

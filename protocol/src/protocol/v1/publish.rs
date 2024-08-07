@@ -7,6 +7,7 @@ use super::E_BAD_CRC;
 use super::V1;
 use super::X25;
 use crate::consts::ACTION_PUBLISH;
+use crate::consts::CRC_LENGTH;
 use crate::message::v1::MessageUserV1;
 use crate::message::v1::MessageV1;
 use crate::message::Message;
@@ -34,7 +35,7 @@ const PUBLISH_HEAD_LENGTH: usize = 6;
  * 6th byte: token length
  *
  * EXTEND according the head:
- *          2 bytes: crc value
+ *          [`CRC_LENGTH`] bytes: crc value
  *          n bytes: topic name
  *          n bytes: token value
  */
@@ -357,7 +358,7 @@ impl Publish {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(2, 0);
+            buf.resize(CRC_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
             self.crc =
                 u16::from_be_bytes(buf.to_vec().try_into().expect("convert to crc vec failed"));

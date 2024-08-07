@@ -4,7 +4,7 @@ use super::{
     BuilderV1, E_BAD_CRC, E_TOPIC_PROHIBIT_TYPE, V1, X25,
 };
 use crate::{
-    consts::ACTION_TOUCH,
+    consts::{ACTION_TOUCH, CRC_LENGTH},
     protocol::{Builder, Head, Protocol},
 };
 use anyhow::{anyhow, Result};
@@ -570,7 +570,7 @@ impl Touch {
 
         // parse crc
         if self.has_crc_flag() {
-            buf.resize(2, 0);
+            buf.resize(CRC_LENGTH, 0);
             reader.read_exact(&mut buf).await?;
             self.crc =
                 u16::from_be_bytes(buf.to_vec().try_into().expect("convert to 2 bytes failed"));
