@@ -116,7 +116,6 @@ impl Args {
                         let mut msgv1 = MessageUserV1::default();
                         msgv1
                             .set_ack(msg.ack)
-                            .set_delete(msg.delete)
                             .set_persist(msg.persist)
                             .set_notready(msg.not_ready);
                         if let Some(body_str) = msg.body.as_ref() {

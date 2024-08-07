@@ -106,18 +106,6 @@ impl MessageOperation for MessageV1 {
         self.msg.get_defer_time()
     }
 
-    fn is_update(&self) -> bool {
-        self.msg.is_update()
-    }
-
-    fn is_deleted(&self) -> bool {
-        self.msg.is_delete()
-    }
-
-    fn is_consumed(&self) -> bool {
-        self.msg.is_consume()
-    }
-
     fn is_notready(&self) -> bool {
         self.msg.is_notready()
     }
@@ -128,6 +116,14 @@ impl MessageOperation for MessageV1 {
 
     fn is_persist(&self) -> bool {
         self.msg.is_persist()
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.msg.is_deleted()
+    }
+
+    fn is_consumed(&self) -> bool {
+        self.msg.is_consumed()
     }
 }
 
@@ -224,19 +220,17 @@ const MESSAGE_USER_V1_HEAD_LENGTH: usize = 12;
 ### FIXED HEAD LENGTH([[`PROTOCOL_HEAD_LEN`] bytes), Every body has the same structure:
 * head: 10 bytes:
 * 1st byte: flag:
-*           1bit: is update: only support [`delete`], [`consume`], [`notready`] flags.
+*           1bit: has crc.
 *           1bit: is ack: mark the message weather need ack.
 *           1bit: is persist immediately: mark this message need persist to [`Storage`].
 *           1bit: is defer: mark this message is a defer message.
 *           1bit: defer type: 0: offset expired timme; 1: concrete expired time.
-*           1bit: is delete: mark this message is delete, then will not be consumed if it not consume.(must with MSG_ID)（优先级高于is ready）
 *           1bit: is notready: mark this message if notready. false mean the message can't be consumed, true mean the message can be consumed.(must with MSG_ID)
-*           1bit: is consume: mark the message has been consumed.
+*           1bit: is consumed: denote the message is consumed.
+*           1bit: is deleted: denote the message is deleted.
 * 2nd byte: ID-LENGTH
 * 3-10th bytes: BODY-LENGTH(8 bytes)
-* 11th byte:
-*           1bit: has crc.
-* 12th byte: reserve byte
+* 11-12th byte: reserve byte
 *
 * optional:
 *           2 bytes: crc.
@@ -251,17 +245,15 @@ pub struct MessageUserV1Head([u8; MESSAGE_USER_V1_HEAD_LENGTH]);
 impl Debug for MessageUserV1Head {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageUserV1Head")
-            .field("is-update", &self.is_update())
+            .field("has-crc", &self.has_crc_flag())
             .field("is-ack", &self.is_ack())
             .field("is-persist", &self.is_persist())
             .field("is-defer", &self.is_defer())
             .field("is-defer-concrete", &self.is_defer_concrete())
-            .field("is-delete", &self.is_delete())
             .field("is-notready", &self.is_notready())
-            .field("is-consume", &self.is_consume())
+            .field("is-comsumed", &self.is_notready())
             .field("id-len", &self.id_len())
             .field("body-len", &self.body_len())
-            .field("has-crc", &self.has_crc_flag())
             .finish()
     }
 }
@@ -280,21 +272,18 @@ impl MessageUserV1Head {
         self.0[index] = flag;
     }
 
-    pub fn with(head: [u8; MESSAGE_USER_V1_HEAD_LENGTH]) -> Self {
+    fn with(head: [u8; MESSAGE_USER_V1_HEAD_LENGTH]) -> Self {
         MessageUserV1Head(head)
     }
 
-    // updated flag.
-    pub fn is_update(&self) -> bool {
+    pub fn has_crc_flag(&self) -> bool {
         self.0[0].is_1(7)
     }
 
-    /// set the update flag value.
-    pub fn set_update(&mut self, update: bool) -> &mut Self {
-        self.set_head_flag(0, 7, update);
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+        self.set_head_flag(0, 7, has);
         self
     }
-
     // ack flag
     pub fn is_ack(&self) -> bool {
         self.0[0].is_1(6)
@@ -323,7 +312,7 @@ impl MessageUserV1Head {
     }
 
     /// set the defer flag value.
-    pub fn set_defer(&mut self, defer: bool) -> &mut Self {
+    fn set_defer(&mut self, defer: bool) -> &mut Self {
         self.set_head_flag(0, 4, defer);
         self
     }
@@ -334,41 +323,41 @@ impl MessageUserV1Head {
     }
 
     /// set the defer_concrete flag value.
-    pub fn set_defer_concrete(&mut self, concrete: bool) -> &mut Self {
+    fn set_defer_concrete(&mut self, concrete: bool) -> &mut Self {
         self.set_head_flag(0, 3, concrete);
-        self
-    }
-
-    /// delete flag.
-    pub fn is_delete(&self) -> bool {
-        self.0[0].is_1(2)
-    }
-
-    /// set the delete flag value.
-    pub fn set_delete(&mut self, delete: bool) -> &mut Self {
-        self.set_head_flag(0, 2, delete);
         self
     }
 
     /// notready flag
     pub fn is_notready(&self) -> bool {
-        self.0[0].is_1(1)
+        self.0[0].is_1(2)
     }
 
     /// set the notready flag value.
     pub fn set_notready(&mut self, notready: bool) -> &mut Self {
-        self.set_head_flag(0, 1, notready);
+        self.set_head_flag(0, 2, notready);
         self
     }
 
-    /// consume flag.
-    pub fn is_consume(&self) -> bool {
+    /// consumed flag
+    pub fn is_consumed(&self) -> bool {
+        self.0[0].is_1(1)
+    }
+
+    /// set the consumed flag value.
+    fn set_consumed(&mut self, consumed: bool) -> &mut Self {
+        self.set_head_flag(0, 1, consumed);
+        self
+    }
+
+    /// deleted flag
+    pub fn is_deleted(&self) -> bool {
         self.0[0].is_1(0)
     }
 
-    /// set the consume flag value.
-    pub fn set_consume(&mut self, consume: bool) -> &mut Self {
-        self.set_head_flag(0, 0, consume);
+    /// set the deleted flag value.
+    fn set_deleted(&mut self, deleted: bool) -> &mut Self {
+        self.set_head_flag(0, 0, deleted);
         self
     }
 
@@ -376,7 +365,7 @@ impl MessageUserV1Head {
         self.0[1]
     }
 
-    pub fn set_id_len(&mut self, l: u8) -> &mut Self {
+    fn set_id_len(&mut self, l: u8) -> &mut Self {
         self.0[1] = l;
         self
     }
@@ -390,7 +379,7 @@ impl MessageUserV1Head {
         )
     }
 
-    pub fn set_body_len(&mut self, l: u64) -> &mut Self {
+    fn set_body_len(&mut self, l: u64) -> &mut Self {
         // set the body length in head
         let body_len = l.to_be_bytes();
         let mut pos = 2;
@@ -398,15 +387,6 @@ impl MessageUserV1Head {
             self.0[pos] = v;
             pos += 1;
         }
-        self
-    }
-
-    pub fn has_crc_flag(&self) -> bool {
-        self.0[10].is_1(7)
-    }
-
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
-        self.set_head_flag(10, 7, has);
         self
     }
 }

@@ -16,12 +16,11 @@ pub trait MessageOperation {
     fn get_channel(&self) -> &str;
     fn get_id(&self) -> &str;
     fn defer_time(&self) -> u64;
-    fn is_update(&self) -> bool;
-    fn is_deleted(&self) -> bool;
-    fn is_consumed(&self) -> bool;
     fn is_notready(&self) -> bool;
     fn is_ack(&self) -> bool;
     fn is_persist(&self) -> bool;
+    fn is_deleted(&self) -> bool;
+    fn is_consumed(&self) -> bool;
 }
 
 #[derive(Clone, Debug)]

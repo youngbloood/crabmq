@@ -305,6 +305,7 @@ impl Auth {
     pub fn calc_crc(&mut self) -> &mut Self {
         self.auth_head.set_crc_flag(false);
         self.crc = X25.checksum(&self.as_bytes());
+        self.auth_head.set_crc_flag(true);
         self
     }
 

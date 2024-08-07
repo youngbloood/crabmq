@@ -6,7 +6,7 @@ use std::{
 };
 
 // ================== COMMON ERR CODE 0-60 ================
-pub const E_OK: u8 = 0;
+pub const OK: u8 = 0;
 pub const E_PROT_NOT_SUPPORT_VERSION: u8 = 1;
 pub const E_ACTION_NOT_SUPPORT: u8 = 2;
 pub const E_BAD_CRC: u8 = 3;
@@ -22,7 +22,7 @@ pub const E_TOPIC_PROHIBIT_INSTANT: u8 = 63;
 lazy_static! {
     static ref REASON_MAP: HashMap<u8, String> = {
         let mut m = HashMap::new();
-        m.insert(E_OK, "ok".to_string());
+        m.insert(OK, "ok".to_string());
         m.insert(
             E_PROT_NOT_SUPPORT_VERSION,
             "not support protocol version".to_string(),

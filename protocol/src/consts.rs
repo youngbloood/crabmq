@@ -25,31 +25,16 @@ pub const ACTION_PUBLISH: u8 = 6;
 /// reply is [`ACTION_COMMON_REPLY`]
 pub const ACTION_SUBSCRIBE: u8 = 8;
 
-/// subs重置超时时间
-///
-/// no reply
-pub const ACTION_RESET: u8 = 11;
-
-/// pubs更新msg的元信息
+/// pubs/subs更新msg的元信息
 ///
 /// reply is [`ACTION_COMMON_REPLY`]
-pub const ACTION_UPDATE: u8 = 12;
-
-/// 客户端主动关闭链接
-///
-/// no reply
-pub const ACTION_CLOSE: u8 = 14;
-
-/// subs端标记一个消息被完整处理
-///
-/// no reply
-pub const ACTION_FIN: u8 = 16;
+pub const ACTION_UPDATE: u8 = 10;
 
 // server给subs发送消息
-pub const ACTION_MSG: u8 = 17;
+pub const ACTION_MSG: u8 = 11;
 
 // Server 通用响应
-pub const ACTION_REPLY: u8 = 19;
+pub const ACTION_REPLY: u8 = 13;
 // ========= PROTOCOL ACTION =========
 
 pub const COMPRESS_TYPE_NONE: u8 = 0;

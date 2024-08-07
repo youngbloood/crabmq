@@ -5,6 +5,7 @@ pub mod publish;
 pub mod reply;
 pub mod subscribe;
 pub mod touch;
+pub mod update;
 
 use super::{Builder, Head, Protocol, ProtocolOperation};
 use crate::{consts::*, error::*, message::Message};

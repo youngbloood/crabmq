@@ -1,4 +1,4 @@
-use super::{new_v1_head, BuilderV1, V1};
+use super::{new_v1_head, BuilderV1, OK, V1};
 use crate::consts::ACTION_REPLY;
 use crate::protocol::Protocol;
 use crate::protocol::{Builder, Head};
@@ -85,11 +85,11 @@ impl Reply {
     }
 
     pub fn is_ok(&self) -> bool {
-        self.err_code == 0
+        self.err_code == OK
     }
 
     pub fn is_err(&self) -> bool {
-        self.err_code != 0
+        self.err_code != OK
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
