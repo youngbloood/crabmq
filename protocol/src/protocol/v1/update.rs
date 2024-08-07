@@ -33,8 +33,8 @@ const UPDATE_HEAD_LENGTH: usize = 3;
 *
 *       The follow 1bit flag is can be used by publishers/subscribers.
 *           1bit: close: is close the client. If this flag is true, and the update flag is true. Then will do the update and close the client connection. #NNR
-* 2nd byte: reserve byte.
-* 2nd byte: ID-LENGTH
+* 2nd byte: topic length.
+* 3rd byte: ID-LENGTH
 *
 * #NNR denote the message Not-Need-Reply.
 * optional:
@@ -55,6 +55,7 @@ impl Debug for UpdateHead {
             .field("is-notready", &self.is_notready())
             .field("is-fin", &self.is_fin())
             .field("is-close", &self.is_fin())
+            .field("topic-len", &self.get_id_len())
             .field("id-len", &self.get_id_len())
             .finish()
     }
@@ -175,12 +176,21 @@ impl UpdateHead {
         self
     }
 
-    pub fn get_id_len(&self) -> u8 {
+    pub fn get_topic_len(&self) -> u8 {
         self.0[1]
     }
 
-    pub fn set_id_len(&mut self, l: u8) -> &mut Self {
+    pub fn set_topic_len(&mut self, l: u8) -> &mut Self {
         self.0[1] = l;
+        self
+    }
+
+    pub fn get_id_len(&self) -> u8 {
+        self.0[2]
+    }
+
+    pub fn set_id_len(&mut self, l: u8) -> &mut Self {
+        self.0[2] = l;
         self
     }
 
@@ -196,6 +206,7 @@ pub struct Update {
     update_head: UpdateHead,
 
     crc: u16,
+    topic: String,
     id: String,
 }
 
@@ -205,6 +216,7 @@ impl Default for Update {
             head: new_v1_head(ACTION_UPDATE),
             update_head: UpdateHead::default(),
             crc: Default::default(),
+            topic: String::new(),
             id: Default::default(),
         }
     }
@@ -242,6 +254,9 @@ impl Update {
         if self.has_crc_flag() {
             res.extend(self.crc.to_be_bytes());
         }
+        if self.get_topic_len() != 0 {
+            res.extend(self.topic.as_bytes());
+        }
         if self.get_id_len() != 0 {
             res.extend(self.id.as_bytes());
         }
@@ -278,6 +293,15 @@ impl Update {
         }
         self.set_id_len(id.len() as _);
         self.id = id.to_string();
+        Ok(())
+    }
+
+    pub fn set_topic(&mut self, topic: &str) -> Result<()> {
+        if topic.len() > u8::MAX as usize {
+            return Err(anyhow!("topic length excess the max u8"));
+        }
+        self.set_topic_len(topic.len() as _);
+        self.topic = topic.to_string();
         Ok(())
     }
 
