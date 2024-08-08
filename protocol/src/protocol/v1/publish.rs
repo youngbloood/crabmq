@@ -87,7 +87,7 @@ impl PublishHead {
         self.0[0].is_1(6)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 6, has);
         self
     }
@@ -96,7 +96,7 @@ impl PublishHead {
         self.0[0].is_1(5)
     }
 
-    pub fn set_ephemeral(&mut self, epehemral: bool) -> &mut Self {
+    fn set_ephemeral(&mut self, epehemral: bool) -> &mut Self {
         self.set_head_flag(0, 5, epehemral);
         self
     }
@@ -105,11 +105,12 @@ impl PublishHead {
         self.0[0] & 0b00001111
     }
 
-    pub fn set_msg_num(&mut self, num: u8) -> Result<()> {
+    fn set_msg_num(&mut self, num: u8) -> Result<()> {
         if num > 0b00001111 {
             return Err(anyhow!("num exceed maxnuim message number"));
         }
-        self.0[0] |= num;
+        let src_num = self.0[0];
+        self.0[0] = (src_num >> 4 << 4) | num;
 
         Ok(())
     }
@@ -118,7 +119,7 @@ impl PublishHead {
         self.0[4]
     }
 
-    pub fn set_topic_len(&mut self, l: u8) -> &mut Self {
+    fn set_topic_len(&mut self, l: u8) -> &mut Self {
         self.0[4] = l;
         self
     }
@@ -127,7 +128,7 @@ impl PublishHead {
         self.0[5]
     }
 
-    pub fn set_token_len(&mut self, l: u8) -> &mut Self {
+    fn set_token_len(&mut self, l: u8) -> &mut Self {
         self.0[5] = l;
         self
     }
@@ -189,7 +190,7 @@ impl Deref for Publish {
 impl Builder for Publish {
     fn build(self) -> Protocol {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_publish(self);
+        v1.set_publish(self);
         Protocol::V1(v1)
     }
 }
@@ -197,7 +198,7 @@ impl Builder for Publish {
 impl BuilderV1 for Publish {
     fn buildv1(self) -> V1 {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_publish(self);
+        v1.set_publish(self);
         v1
     }
 }
@@ -246,11 +247,6 @@ impl Publish {
 
     pub fn get_pub_head(&self) -> PublishHead {
         self.pub_head.clone()
-    }
-
-    pub fn set_pub_head(&mut self, head: PublishHead) -> &mut Self {
-        self.pub_head = head;
-        self
     }
 
     pub fn get_crc(&self) -> u16 {

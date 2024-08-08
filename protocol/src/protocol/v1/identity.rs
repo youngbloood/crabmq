@@ -1,6 +1,13 @@
+use super::auth::AuthType;
+use super::auth::AUTH_TYPE_LENGTH;
+use super::new_v1_head;
+use super::reply::Reply;
+use super::reply::ReplyBuilder;
+use super::BuilderV1;
+use super::Head;
+use super::V1;
 use crate::consts::*;
 use crate::error::*;
-use crate::message::Message;
 use crate::protocol::Builder;
 use crate::protocol::Protocol;
 use anyhow::{anyhow, Result};
@@ -10,16 +17,6 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
-
-use super::auth::AuthType;
-use super::auth::AUTH_TYPE_LENGTH;
-use super::new_v1_head;
-use super::reply::Reply;
-use super::reply::ReplyBuilder;
-use super::BuilderV1;
-use super::Head;
-use super::ProtocolOperation;
-use super::V1;
 
 const IDENTITY_HEAD_LENGTH: usize = 4;
 
@@ -58,7 +55,7 @@ impl IdentityHead {
         self.0[index] = flag;
     }
 
-    pub fn with(head: [u8; IDENTITY_HEAD_LENGTH]) -> Self {
+    fn with(head: [u8; IDENTITY_HEAD_LENGTH]) -> Self {
         IdentityHead(head)
     }
 
@@ -119,20 +116,8 @@ impl ReplyBuilder for Identity {
     }
 }
 
-impl ProtocolOperation for Identity {
-    fn get_version(&self) -> u8 {
-        self.head.get_version()
-    }
-
-    fn get_action(&self) -> u8 {
-        self.head.get_action()
-    }
-
-    fn convert_to_message(&self) -> Result<Vec<Message>> {
-        Ok(vec![])
-    }
-
-    fn as_bytes(&self) -> Vec<u8> {
+impl Identity {
+    pub fn as_bytes(&self) -> Vec<u8> {
         let mut res = vec![];
         res.extend(self.head.as_bytes());
         res.extend(self.identity_head.as_bytes());
@@ -143,16 +128,6 @@ impl ProtocolOperation for Identity {
         res
     }
 
-    fn validate_for_client(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn validate_for_server(&self) -> Result<()> {
-        self.validate()
-    }
-}
-
-impl Identity {
     pub fn validate(&self) -> Result<()> {
         if !self.identity_head.has_crc_flag() {
             return Ok(());
@@ -166,11 +141,6 @@ impl Identity {
         Ok(())
     }
 
-    fn set_identity_head(&mut self, head: IdentityHead) -> &mut Self {
-        self.identity_head = head;
-        self
-    }
-
     pub fn get_crc(&self) -> u16 {
         self.crc
     }
@@ -180,11 +150,6 @@ impl Identity {
         let bts = self.as_bytes();
         self.crc = X25.checksum(&bts);
         self.identity_head.set_crc_flag(true);
-        self
-    }
-
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
         self
     }
 

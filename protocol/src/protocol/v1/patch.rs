@@ -10,7 +10,6 @@ use rsbit::{BitFlagOperation as _, BitOperation as _};
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
-    path::Path,
     pin::Pin,
 };
 use tokio::io::AsyncReadExt;
@@ -88,7 +87,7 @@ impl PatchHead {
         self.0[0].is_1(7)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 7, has);
         self
     }
@@ -108,7 +107,7 @@ impl PatchHead {
     }
 
     /// set the update flag value.
-    pub fn set_update(&mut self, update: bool) -> &mut Self {
+    fn set_update(&mut self, update: bool) -> &mut Self {
         self.set_head_flag(0, 5, update);
         self
     }
@@ -175,7 +174,7 @@ impl PatchHead {
         self.0[1]
     }
 
-    pub fn set_topic_len(&mut self, l: u8) -> &mut Self {
+    fn set_topic_len(&mut self, l: u8) -> &mut Self {
         self.0[1] = l;
         self
     }
@@ -184,7 +183,7 @@ impl PatchHead {
         self.0[2]
     }
 
-    pub fn set_id_len(&mut self, l: u8) -> &mut Self {
+    fn set_id_len(&mut self, l: u8) -> &mut Self {
         self.0[2] = l;
         self
     }
@@ -296,6 +295,10 @@ impl Patch {
         self.crc
     }
 
+    pub fn get_id(&self) -> &str {
+        &self.id
+    }
+
     pub fn set_id(&mut self, id: &str) -> Result<()> {
         if id.len() > u8::MAX as usize {
             return Err(anyhow!("id length excess the max u8"));
@@ -303,6 +306,10 @@ impl Patch {
         self.set_id_len(id.len() as _);
         self.id = id.to_string();
         Ok(())
+    }
+
+    pub fn get_topic(&self) -> &str {
+        &self.topic
     }
 
     pub fn set_topic(&mut self, topic: &str) -> Result<()> {

@@ -7,10 +7,10 @@ use crate::{
     consts::ACTION_SUBSCRIBE,
     protocol::{Builder, Protocol},
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use rsbit::{BitFlagOperation as _, BitOperation as _};
-use std::fmt::Debug;
+use std::{fmt::Debug, ops::DerefMut};
 use std::{ops::Deref, pin::Pin};
 use tokio::io::AsyncReadExt;
 
@@ -84,7 +84,7 @@ impl SubscribeHead {
         self.0[0].is_1(6)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 6, has);
         self
     }
@@ -102,7 +102,7 @@ impl SubscribeHead {
         self.0[0].is_1(4)
     }
 
-    pub fn set_ready_number(&mut self, has: bool) -> &mut Self {
+    fn set_ready_number(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 4, has);
         self
     }
@@ -111,7 +111,7 @@ impl SubscribeHead {
         self.0[3]
     }
 
-    pub fn set_topic_len(&mut self, l: u8) -> &mut Self {
+    fn set_topic_len(&mut self, l: u8) -> &mut Self {
         self.0[3] = l;
         self
     }
@@ -120,7 +120,7 @@ impl SubscribeHead {
         self.0[4]
     }
 
-    pub fn set_channel_len(&mut self, l: u8) -> &mut Self {
+    fn set_channel_len(&mut self, l: u8) -> &mut Self {
         self.0[4] = l;
         self
     }
@@ -129,7 +129,7 @@ impl SubscribeHead {
         self.0[5]
     }
 
-    pub fn set_token_len(&mut self, l: u8) -> &mut Self {
+    fn set_token_len(&mut self, l: u8) -> &mut Self {
         self.0[5] = l;
         self
     }
@@ -181,10 +181,16 @@ impl Deref for Subscribe {
     }
 }
 
+impl DerefMut for Subscribe {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sub_head
+    }
+}
+
 impl Builder for Subscribe {
     fn build(self) -> Protocol {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_subscribe(self);
+        v1.set_subscribe(self);
         Protocol::V1(v1)
     }
 }
@@ -192,7 +198,7 @@ impl Builder for Subscribe {
 impl BuilderV1 for Subscribe {
     fn buildv1(self) -> V1 {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_subscribe(self);
+        v1.set_subscribe(self);
         v1
     }
 }
@@ -225,18 +231,8 @@ impl Subscribe {
         self.head.clone()
     }
 
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
-        self
-    }
-
     pub fn get_sub_head(&self) -> SubscribeHead {
         self.sub_head.clone()
-    }
-
-    pub fn set_sub_head(&mut self, head: SubscribeHead) -> &mut Self {
-        self.sub_head = head;
-        self
     }
 
     pub fn get_crc(&self) -> u16 {
@@ -255,7 +251,12 @@ impl Subscribe {
     }
 
     pub fn set_ready_number(&mut self, rn: u16) -> &mut Self {
-        self.ready_number = rn;
+        let mut num = rn;
+        if rn < 1 {
+            num = 1;
+        }
+        self.ready_number = num;
+        self.sub_head.set_ready_number(true);
         self
     }
 
@@ -263,27 +264,39 @@ impl Subscribe {
         &self.topic
     }
 
-    pub fn set_topic(&mut self, topic: &str) -> &mut Self {
+    pub fn set_topic(&mut self, topic: &str) -> Result<()> {
+        if topic.len() > u8::MAX as usize {
+            return Err(anyhow!("topic length excess the max u8"));
+        }
+        self.sub_head.set_topic_len(topic.len() as _);
         self.topic = topic.to_string();
-        self
+        Ok(())
     }
 
     pub fn get_channel(&self) -> &str {
         &self.channel
     }
 
-    pub fn set_channel(&mut self, channel: &str) -> &mut Self {
+    pub fn set_channel(&mut self, channel: &str) -> Result<()> {
+        if channel.len() > u8::MAX as usize {
+            return Err(anyhow!("channel length excess the max u8"));
+        }
+        self.sub_head.set_channel_len(channel.len() as _);
         self.channel = channel.to_string();
-        self
+        Ok(())
     }
 
     pub fn get_token(&self) -> &str {
         &self.token
     }
 
-    pub fn set_token(&mut self, token: &str) -> &mut Self {
+    pub fn set_token(&mut self, token: &str) -> Result<()> {
+        if token.len() > u8::MAX as usize {
+            return Err(anyhow!("token length excess the max u8"));
+        }
+        self.sub_head.set_token_len(token.len() as _);
         self.token = token.to_string();
-        self
+        Ok(())
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {

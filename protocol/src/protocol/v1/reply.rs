@@ -55,7 +55,7 @@ impl Deref for Reply {
 impl BuilderV1 for Reply {
     fn buildv1(self) -> V1 {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_reply(self);
+        v1.set_reply(self);
         v1
     }
 }
@@ -78,11 +78,6 @@ impl Reply {
         reply.set_action_type(resp_type).set_err_code(err_code);
         reply
     }
-
-    // pub fn set_head(&mut self, head: Head) -> &mut Self {
-    //     self.head = head;
-    //     self
-    // }
 
     pub fn get_action_type(&self) -> u8 {
         self.action_type

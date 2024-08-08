@@ -152,11 +152,6 @@ impl Builder for V1 {
 }
 
 impl V1 {
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
-        self
-    }
-
     pub fn get_identity(&self) -> Option<Identity> {
         self.identity.clone()
     }

@@ -153,7 +153,7 @@ impl TouchHead {
         self.0[0].is_1(2)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 2, has);
         self
     }
@@ -164,7 +164,7 @@ impl TouchHead {
         self.0[1].is_1(7)
     }
 
-    pub fn set_max_msg_num_per_file(&mut self, has: bool) -> &mut Self {
+    fn set_max_msg_num_per_file(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 7, has);
         self
     }
@@ -173,7 +173,7 @@ impl TouchHead {
         self.0[1].is_1(6)
     }
 
-    pub fn set_max_size_per_file(&mut self, has: bool) -> &mut Self {
+    fn set_max_size_per_file(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 6, has);
         self
     }
@@ -182,7 +182,7 @@ impl TouchHead {
         self.0[1].is_1(5)
     }
 
-    pub fn set_compress_type(&mut self, has: bool) -> &mut Self {
+    fn set_compress_type(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 5, has);
         self
     }
@@ -191,7 +191,7 @@ impl TouchHead {
         self.0[1].is_1(4)
     }
 
-    pub fn set_subscribe_type(&mut self, has: bool) -> &mut Self {
+    fn set_subscribe_type(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 4, has);
         self
     }
@@ -200,7 +200,7 @@ impl TouchHead {
         self.0[1].is_1(3)
     }
 
-    pub fn set_record_num_per_file(&mut self, has: bool) -> &mut Self {
+    fn set_record_num_per_file(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 3, has);
         self
     }
@@ -209,7 +209,7 @@ impl TouchHead {
         self.0[1].is_1(2)
     }
 
-    pub fn set_record_size_per_file(&mut self, has: bool) -> &mut Self {
+    fn set_record_size_per_file(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 2, has);
         self
     }
@@ -218,7 +218,7 @@ impl TouchHead {
         self.0[1].is_1(1)
     }
 
-    pub fn set_fd_cache_size(&mut self, has: bool) -> &mut Self {
+    fn set_fd_cache_size(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(1, 1, has);
         self
     }
@@ -229,7 +229,7 @@ impl TouchHead {
         self.0[2]
     }
 
-    pub fn set_topic_len(&mut self, l: u8) -> &mut Self {
+    fn set_topic_len(&mut self, l: u8) -> &mut Self {
         self.0[2] = l;
         self
     }
@@ -240,7 +240,7 @@ impl TouchHead {
         self.0[3]
     }
 
-    pub fn set_channel_len(&mut self, l: u8) -> &mut Self {
+    fn set_channel_len(&mut self, l: u8) -> &mut Self {
         self.0[3] = l;
         self
     }
@@ -250,7 +250,7 @@ impl TouchHead {
     pub fn get_token_len(&self) -> u8 {
         self.0[4]
     }
-    pub fn set_token_len(&mut self, l: u8) -> &mut Self {
+    fn set_token_len(&mut self, l: u8) -> &mut Self {
         self.0[4] = l;
         self
     }
@@ -261,7 +261,7 @@ impl TouchHead {
         self.0[5]
     }
 
-    pub fn set_defer_format_len(&mut self, l: u8) -> &mut Self {
+    fn set_defer_format_len(&mut self, l: u8) -> &mut Self {
         self.0[5] = l;
         self
     }
@@ -321,7 +321,7 @@ impl Deref for Touch {
 impl Builder for Touch {
     fn build(self) -> Protocol {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_touch(self);
+        v1.set_touch(self);
         Protocol::V1(v1)
     }
 }
@@ -329,7 +329,7 @@ impl Builder for Touch {
 impl BuilderV1 for Touch {
     fn buildv1(self) -> V1 {
         let mut v1 = V1::default();
-        v1.set_head(self.head.clone()).set_touch(self);
+        v1.set_touch(self);
         v1
     }
 }
@@ -438,7 +438,7 @@ impl Touch {
 
     pub fn set_topic(&mut self, topic: &str) -> Result<()> {
         if topic.len() > u8::MAX as usize {
-            return Err(anyhow!("topic len exceed max length 256"));
+            return Err(anyhow!("topic length excess the max u8"));
         }
         self.topic = topic.to_string();
         self.touch_head.set_topic_len(topic.len() as u8);
@@ -455,7 +455,7 @@ impl Touch {
 
     pub fn set_channel(&mut self, channel: &str) -> Result<()> {
         if channel.len() > u8::MAX as usize {
-            return Err(anyhow!("channel len exceed max length 256"));
+            return Err(anyhow!("channel length excess the max u8"));
         }
         self.channel = channel.to_string();
         self.touch_head.set_channel_len(channel.len() as u8);
@@ -464,7 +464,7 @@ impl Touch {
 
     pub fn set_token(&mut self, token: &str) -> Result<()> {
         if token.len() > u8::MAX as usize {
-            return Err(anyhow!("token len exceed max length 256"));
+            return Err(anyhow!("token length excess the max u8"));
         }
         self.token = token.to_string();
         self.touch_head.set_token_len(token.len() as u8);
@@ -540,7 +540,7 @@ impl Touch {
 
     pub fn set_defer_msg_format(&mut self, fmt: &str) -> Result<()> {
         if fmt.len() > u8::MAX as usize {
-            return Err(anyhow!("too long defer format"));
+            return Err(anyhow!("format length excess the max u8"));
         }
         self.defer_msg_format = fmt.to_string();
         self.touch_head.set_defer_format_len(fmt.len() as u8);
@@ -550,7 +550,6 @@ impl Touch {
     /// [`parse_from`] read the protocol head from bts.
     pub async fn parse_from(fd: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
         let mut touch = Self::default();
-        // touch.set_head(head);
         touch.read_parse(fd).await?;
         Ok(touch)
     }

@@ -426,7 +426,7 @@ impl Debug for AuthReplyHead {
 }
 
 impl AuthReplyHead {
-    pub fn with(head: [u8; AUTH_REPLY_HEAD_LENGTH]) -> Self {
+    fn with(head: [u8; AUTH_REPLY_HEAD_LENGTH]) -> Self {
         AuthReplyHead(head)
     }
 
@@ -451,7 +451,7 @@ impl AuthReplyHead {
         self.0[0].is_1(7)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_flag(0, 7, has);
         self
     }
@@ -460,7 +460,7 @@ impl AuthReplyHead {
         self.0[0].is_1(6)
     }
 
-    pub fn set_timeout_flag(&mut self, has: bool) -> &mut Self {
+    fn set_timeout_flag(&mut self, has: bool) -> &mut Self {
         self.set_flag(0, 6, has);
         self
     }
@@ -469,7 +469,7 @@ impl AuthReplyHead {
         self.0[1]
     }
 
-    pub fn set_token_len(&mut self, l: u8) -> &mut Self {
+    fn set_token_len(&mut self, l: u8) -> &mut Self {
         self.0[1] = l;
         self
     }
@@ -530,6 +530,10 @@ impl AuthReply {
         }
 
         Ok(())
+    }
+
+    pub fn get_head(&self) -> Head {
+        self.head.clone()
     }
 
     pub fn set_timeout(&mut self, timeout: u64) -> &mut Self {
