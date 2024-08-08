@@ -10,6 +10,8 @@ pub const OK: u8 = 0;
 pub const E_PROT_NOT_SUPPORT_VERSION: u8 = 1;
 pub const E_ACTION_NOT_SUPPORT: u8 = 2;
 pub const E_BAD_CRC: u8 = 3;
+pub const E_NEED_IDENTITY: u8 = 4;
+pub const E_NEED_AUTH: u8 = 5;
 // ================== COMMON ERR CODE 0-60 ================
 
 // ================== BUSNIESS ERR CODE 61-256 ================

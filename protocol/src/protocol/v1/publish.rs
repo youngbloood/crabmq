@@ -3,6 +3,7 @@ use super::reply::Reply;
 use super::reply::ReplyBuilder;
 use super::BuilderV1;
 use super::Head;
+use super::ProtError;
 use super::E_BAD_CRC;
 use super::V1;
 use super::X25;
@@ -225,18 +226,18 @@ impl Publish {
         res
     }
 
-    pub fn validate(&self) -> Option<Protocol> {
+    pub fn validate(&self) -> Result<()> {
         if !self.has_crc_flag() {
-            return None;
+            return Ok(());
         }
         let src_crc = self.get_crc();
 
         let mut publish = self.clone();
         let dst_crc = publish.calc_crc().get_crc();
         if dst_crc != src_crc {
-            return Some(self.build_reply_err(E_BAD_CRC).build());
+            return Err(ProtError::new(E_BAD_CRC).into());
         }
-        None
+        Ok(())
     }
 
     pub fn get_head(&self) -> Head {

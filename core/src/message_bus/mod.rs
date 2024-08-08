@@ -6,12 +6,15 @@ use crate::{
     topic::new_topic,
 };
 use anyhow::{anyhow, Result};
-use common::global::Guard;
+use common::{global::Guard, random_num, random_str};
 use dashmap::DashMap;
 use protocol::{
     consts::*,
-    error::ProtError,
-    protocol::{v1::reply::ReplyBuilder, Builder, Protocol, ProtocolOperation},
+    error::*,
+    protocol::{
+        v1::{auth::AuthType, identity::IdentityReply, reply::ReplyBuilder},
+        Builder, Protocol, ProtocolOperation,
+    },
 };
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;
@@ -129,24 +132,96 @@ impl MessageBus {
         prot: Protocol,
     ) {
         match prot.get_action() {
-            ACTION_FIN => self.fin(out_sender, addr, prot).await,
-            ACTION_PUBLISH => self.publish(out_sender, addr, prot).await,
-            ACTION_TOUCH => self.touch(out_sender, addr, prot).await,
-            ACTION_SUBSCRIBE => self.subscribe(out_sender, addr, prot, client).await,
-            ACTION_CLOSE => self.cls(out_sender, addr, prot).await,
-            ACTION_AUTH => self.auth(out_sender, addr, prot).await,
+            ACTION_TOUCH | ACTION_PUBLISH | ACTION_SUBSCRIBE | ACTION_PATCH => {
+                if client.get().is_need_identity() {
+                    let c = prot.build_reply_err(E_NEED_IDENTITY).build();
+                    let _ = out_sender.send((addr.to_string(), c)).await;
+                    return;
+                }
+                if client.get().is_need_auth() {
+                    let c = prot.build_reply_err(E_NEED_AUTH).build();
+                    let _ = out_sender.send((addr.to_string(), c)).await;
+                    return;
+                }
+            }
+
+            ACTION_AUTH => {
+                if client.get().is_need_identity() {
+                    let c = prot.build_reply_err(E_NEED_IDENTITY).build();
+                    let _ = out_sender.send((addr.to_string(), c)).await;
+                    return;
+                }
+            }
+
+            _ => {}
+        };
+
+        match prot.get_action() {
+            ACTION_IDENTITY => self.identity(out_sender, client, addr, prot).await,
+            ACTION_AUTH => self.auth(out_sender, client, addr, prot).await,
+            ACTION_TOUCH => self.touch(out_sender, client, addr, prot).await,
+            ACTION_PUBLISH => self.publish(out_sender, client, addr, prot).await,
+            ACTION_SUBSCRIBE => self.subscribe(out_sender, client, addr, prot).await,
+            ACTION_PATCH => self.update(out_sender, client, addr, prot).await,
             _ => unreachable!(),
         }
     }
 
     //============================ Handle Action ==============================//
-    pub async fn fin(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
+    pub async fn identity(
+        &self,
+        out_sender: Sender<(String, Protocol)>,
+        client: Guard<Client>,
+        addr: &str,
+        prot: Protocol,
+    ) {
+        let mut reply = IdentityReply::default();
+        // TODO: auth type determine by Config
+        let auth_type = AuthType::default();
+        reply.set_max_protocol_version(PROPTOCOL_V1);
+        // 需要auth，则返回salt
+        if !auth_type.is_no_need_auth() {
+            let salt = random_str(random_num(100, 200) as usize);
+            let _ = reply.set_salt(&salt);
+        } else {
+            client.get().set_has_auth();
+        }
+        reply.set_authtype(auth_type);
 
-    pub async fn rdy(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
+        client.get().set_has_identity();
+        debug!("reply-identity={:?}", reply.clone().build());
+        let _ = out_sender.send((addr.to_string(), reply.build())).await;
+    }
+
+    pub async fn auth(
+        &self,
+        out_sender: Sender<(String, Protocol)>,
+        client: Guard<Client>,
+        addr: &str,
+        msg: Protocol,
+    ) {
+        client.get().set_has_auth();
+    }
+
+    pub async fn touch(
+        &mut self,
+        out_sender: Sender<(String, Protocol)>,
+        client: Guard<Client>,
+        addr: &str,
+        msg: Protocol,
+    ) {
+        // TODO:
+        // let topic_name = msg.get_topic();
+        // match self.get_or_create_topic(topic_name, &msg.get_head()).await {
+        //     Ok(_) => todo!(),
+        //     Err(_) => todo!(),
+        // }
+    }
 
     pub async fn publish(
         &mut self,
         out_sender: Sender<(String, Protocol)>,
+        client: Guard<Client>,
         addr: &str,
         prot: Protocol,
     ) {
@@ -172,30 +247,12 @@ impl MessageBus {
         }
     }
 
-    pub async fn req(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
-
-    pub async fn nop(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
-
-    pub async fn touch(
-        &mut self,
-        out_sender: Sender<(String, Protocol)>,
-        addr: &str,
-        msg: Protocol,
-    ) {
-        // TODO:
-        // let topic_name = msg.get_topic();
-        // match self.get_or_create_topic(topic_name, &msg.get_head()).await {
-        //     Ok(_) => todo!(),
-        //     Err(_) => todo!(),
-        // }
-    }
-
     pub async fn subscribe(
         &mut self,
         out_sender: Sender<(String, Protocol)>,
+        client: Guard<Client>,
         addr: &str,
         prot: Protocol,
-        guard: Guard<Client>,
     ) {
         match prot {
             Protocol::V1(v1) => {
@@ -217,7 +274,7 @@ impl MessageBus {
                             .topic
                             .get_mut()
                             .get_create_mut_channel(chan_name);
-                        chan.get_mut().set_client(addr, guard);
+                        chan.get_mut().set_client(addr, client);
                         info!(addr = addr, "sub topic: {topic_name}, channel: {chan_name}",);
                         // TODO:
                         // let _ = out_sender
@@ -230,9 +287,14 @@ impl MessageBus {
         }
     }
 
-    pub async fn cls(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
-
-    pub async fn auth(&self, out_sender: Sender<(String, Protocol)>, addr: &str, msg: Protocol) {}
+    pub async fn update(
+        &mut self,
+        out_sender: Sender<(String, Protocol)>,
+        client: Guard<Client>,
+        addr: &str,
+        prot: Protocol,
+    ) {
+    }
     //============================ Handle Action ==============================//
 }
 

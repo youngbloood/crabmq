@@ -2,12 +2,11 @@ use crate::client::{io_loop, Client};
 use crate::config::Config;
 use crate::crab::Crab;
 use common::global::{Guard, CANCEL_TOKEN, CLIENT_DROP_GUARD};
-use protocol::message::Message;
-use protocol::protocol::{Protocol, ProtocolOperation as _};
+use protocol::protocol::Protocol;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{net::TcpListener, select};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 pub struct TcpServer {
     // 控制消息流入(从客户端流入MQ)
@@ -86,7 +85,7 @@ impl TcpServer {
                     }
                     debug!("msg = {:?}",prot_opt);
                     let (addr,prot) = prot_opt.unwrap();
-                    if let Some(resp) = prot.validate_for_server() {
+                    if let Some(resp) = prot.validate_for_server_with_resp() {
                         let _ = self.out_sender.send((addr, resp)).await;
                         continue;
                     }

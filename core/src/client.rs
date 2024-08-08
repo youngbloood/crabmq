@@ -6,7 +6,7 @@ use common::global::{Guard, CANCEL_TOKEN};
 use common::Weight;
 use protocol::protocol::Protocol;
 use protocol::protocol::ProtocolOperation as _;
-
+use rsbit::{BitFlagOperation as _, BitOperation as _};
 use std::cell::UnsafeCell;
 use std::net::SocketAddr;
 use std::ops::Deref;
@@ -18,11 +18,47 @@ use tokio::time::Interval;
 use tokio::{select, time};
 use tracing::{debug, error, info, warn};
 
-type ClientState = u8;
-const CLIENT_STATE_NOT_READY: ClientState = 1;
+/**
+ * 1 byte:
+ *       1 bit: need identity?
+ *       1 bit: need auth?
+ */
+struct ClientState(u8);
+impl Default for ClientState {
+    fn default() -> Self {
+        let mut state = 0;
+        (&mut state).set_1(7);
+        (&mut state).set_1(6);
+        Self(state)
+    }
+}
 
-pub trait ClientResp {
-    fn send(&mut self);
+impl ClientState {
+    fn is_need_identity(&self) -> bool {
+        self.0.is_1(7)
+    }
+
+    fn set_need_identity(&mut self, need: bool) -> &mut Self {
+        if need {
+            (&mut self.0).set_1(7);
+        } else {
+            (&mut self.0).set_0(7);
+        }
+        self
+    }
+
+    fn is_need_auth(&self) -> bool {
+        self.0.is_1(6)
+    }
+
+    fn set_need_auth(&mut self, need: bool) -> &mut Self {
+        if need {
+            (&mut self.0).set_1(6);
+        } else {
+            (&mut self.0).set_0(6);
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -65,7 +101,7 @@ pub struct Client {
     msg_rx: UnsafeCell<Receiver<Protocol>>,
     msg_tx: UnsafeCell<Sender<Protocol>>,
 
-    state: ClientState,
+    state: Guard<ClientState>,
 
     weight: usize,
     crab: Guard<Crab>,
@@ -101,7 +137,7 @@ impl Client {
                 opt.get().global.client_heartbeat_interval as _,
             ))),
             defeat_count: AtomicU16::new(0),
-            state: CLIENT_STATE_NOT_READY,
+            state: Guard::new(ClientState::default()),
             opt,
 
             msg_rx: UnsafeCell::new(rx),
@@ -116,6 +152,22 @@ impl Client {
 
     pub fn get_weight(&self) -> usize {
         self.weight
+    }
+
+    pub fn is_need_identity(&self) -> bool {
+        self.state.get().is_need_identity()
+    }
+
+    pub fn set_has_identity(&self) {
+        self.state.get_mut().set_need_identity(false);
+    }
+
+    pub fn is_need_auth(&self) -> bool {
+        self.state.get().is_need_auth()
+    }
+
+    pub fn set_has_auth(&self) {
+        self.state.get_mut().set_need_auth(false);
     }
 
     pub async fn send_msg(&self, prot: Protocol) -> Result<()> {

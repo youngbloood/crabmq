@@ -1,5 +1,5 @@
 use super::reply::{Reply, ReplyBuilder};
-use super::{new_v1_head, ProtError, ACTION_AUTH_REPLY, CRC_LENGTH, E_BAD_CRC, X25};
+use super::{new_v1_head, BuilderV1, ProtError, ACTION_REPLY, CRC_LENGTH, E_BAD_CRC, V1, X25};
 use crate::consts::ACTION_AUTH;
 use crate::protocol::{Builder, Head, Protocol};
 use anyhow::{anyhow, Result};
@@ -63,6 +63,9 @@ impl AuthType {
         self.0.to_vec()
     }
 
+    pub fn is_no_need_auth(&self) -> bool {
+        self.series() == 0 && self.branch() == 0
+    }
     //  ================= MD5 Series =================
     pub fn is_md5(&self) -> bool {
         self.series() == 1 && self.branch() == 2
@@ -264,6 +267,20 @@ impl ReplyBuilder for Auth {
     }
 }
 
+impl BuilderV1 for Auth {
+    fn buildv1(self) -> super::V1 {
+        let mut v1 = V1::default();
+        v1.set_auth(self);
+        v1
+    }
+}
+
+impl Builder for Auth {
+    fn build(self) -> Protocol {
+        Protocol::V1(Self::buildv1(self))
+    }
+}
+
 impl Auth {
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut res = vec![];
@@ -284,18 +301,17 @@ impl Auth {
         res
     }
 
-    pub fn validate(&self) -> Option<Protocol> {
+    pub fn validate(&self) -> Result<()> {
         if !self.has_crc_flag() {
-            return None;
+            return Ok(());
         }
         let src_crc = self.get_crc();
         let mut auth = self.clone();
         let dst_crc = auth.calc_crc().get_crc();
         if src_crc != dst_crc {
-            return Some(self.build_reply_err(E_BAD_CRC).build());
+            return Err(ProtError::new(E_BAD_CRC).into());
         }
-
-        None
+        Ok(())
     }
 
     pub fn get_crc(&self) -> u16 {
@@ -306,11 +322,6 @@ impl Auth {
         self.auth_head.set_crc_flag(false);
         self.crc = X25.checksum(&self.as_bytes());
         self.auth_head.set_crc_flag(true);
-        self
-    }
-
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
         self
     }
 
@@ -353,9 +364,8 @@ impl Auth {
         Ok(())
     }
 
-    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
         let mut auth = Auth::default();
-        auth.set_head(head);
         auth.parse_reader(reader).await?;
         Ok(auth)
     }
@@ -478,7 +488,7 @@ pub struct AuthReply {
 impl Default for AuthReply {
     fn default() -> Self {
         Self {
-            head: new_v1_head(ACTION_AUTH_REPLY),
+            head: new_v1_head(ACTION_REPLY),
             reply_head: Default::default(),
             token: Default::default(),
             timeout: Default::default(),
@@ -492,6 +502,18 @@ impl Deref for AuthReply {
 
     fn deref(&self) -> &Self::Target {
         &self.reply_head
+    }
+}
+
+impl ReplyBuilder for AuthReply {
+    fn build_reply_ok(&self) -> Reply {
+        let mut reply = Reply::with_ok(ACTION_AUTH);
+        let _ = reply.set_auth_reply(self.clone());
+        reply
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_AUTH, err_code)
     }
 }
 
@@ -541,7 +563,8 @@ impl AuthReply {
 
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut res = vec![];
-        res.extend(self.head.as_bytes());
+        // ignore the head in reply
+        // res.extend(self.head.as_bytes());
         res.extend(self.reply_head.as_bytes());
         if self.has_crc_flag() {
             res.extend(self.crc.to_be_bytes());

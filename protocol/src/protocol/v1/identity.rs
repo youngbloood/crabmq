@@ -1,3 +1,16 @@
+use crate::consts::*;
+use crate::error::*;
+use crate::message::Message;
+use crate::protocol::Builder;
+use crate::protocol::Protocol;
+use anyhow::{anyhow, Result};
+use bytes::BytesMut;
+use rsbit::{BitFlagOperation, BitOperation as _};
+use std::fmt::Debug;
+use std::ops::Deref;
+use std::pin::Pin;
+use tokio::io::AsyncReadExt;
+
 use super::auth::AuthType;
 use super::auth::AUTH_TYPE_LENGTH;
 use super::new_v1_head;
@@ -5,21 +18,8 @@ use super::reply::Reply;
 use super::reply::ReplyBuilder;
 use super::BuilderV1;
 use super::Head;
-use super::ProtError;
-use super::CRC_LENGTH;
-use super::E_BAD_CRC;
+use super::ProtocolOperation;
 use super::V1;
-use super::X25;
-use crate::consts::ACTION_IDENTITY;
-use crate::protocol::Builder;
-use crate::protocol::Protocol;
-use anyhow::Result;
-use bytes::BytesMut;
-use rsbit::{BitFlagOperation, BitOperation as _};
-use std::fmt::Debug;
-use std::ops::Deref;
-use std::pin::Pin;
-use tokio::io::AsyncReadExt;
 
 const IDENTITY_HEAD_LENGTH: usize = 4;
 
@@ -66,12 +66,12 @@ impl IdentityHead {
         self.0[0].is_1(7)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 7, has);
         self
     }
 
-    pub fn as_bytes(&self) -> Vec<u8> {
+    fn as_bytes(&self) -> Vec<u8> {
         self.0.to_vec()
     }
 }
@@ -119,21 +119,54 @@ impl ReplyBuilder for Identity {
     }
 }
 
+impl ProtocolOperation for Identity {
+    fn get_version(&self) -> u8 {
+        self.head.get_version()
+    }
+
+    fn get_action(&self) -> u8 {
+        self.head.get_action()
+    }
+
+    fn convert_to_message(&self) -> Result<Vec<Message>> {
+        Ok(vec![])
+    }
+
+    fn as_bytes(&self) -> Vec<u8> {
+        let mut res = vec![];
+        res.extend(self.head.as_bytes());
+        res.extend(self.identity_head.as_bytes());
+
+        if self.identity_head.has_crc_flag() {
+            res.extend(self.get_crc().to_be_bytes())
+        }
+        res
+    }
+
+    fn validate_for_client(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn validate_for_server(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
 impl Identity {
-    pub fn validate(&self) -> Option<Protocol> {
+    pub fn validate(&self) -> Result<()> {
         if !self.identity_head.has_crc_flag() {
-            return None;
+            return Ok(());
         }
         let src_crc = self.get_crc();
         let mut identity = self.clone();
         let dst_crc = identity.calc_crc().get_crc();
         if src_crc != dst_crc {
-            return Some(self.build_reply_err(E_BAD_CRC).build());
+            return Err(ProtError::new(E_BAD_CRC).into());
         }
-        None
+        Ok(())
     }
 
-    pub fn set_identity_head(&mut self, head: IdentityHead) -> &mut Self {
+    fn set_identity_head(&mut self, head: IdentityHead) -> &mut Self {
         self.identity_head = head;
         self
     }
@@ -153,17 +186,6 @@ impl Identity {
     pub fn set_head(&mut self, head: Head) -> &mut Self {
         self.head = head;
         self
-    }
-
-    pub fn as_bytes(&self) -> Vec<u8> {
-        let mut res = vec![];
-        res.extend(self.head.as_bytes());
-        res.extend(self.identity_head.as_bytes());
-
-        if self.identity_head.has_crc_flag() {
-            res.extend(self.get_crc().to_be_bytes())
-        }
-        res
     }
 
     pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
@@ -225,6 +247,10 @@ impl Debug for IdentityReplyHead {
 }
 
 impl IdentityReplyHead {
+    fn with(head: [u8; IDENTITY_REPLY_HEAD_LENGTH]) -> Self {
+        Self(head)
+    }
+
     fn set_head_flag(&mut self, index: usize, pos: u8, on: bool) {
         if index >= self.0.len() || pos > 7 {
             return;
@@ -238,7 +264,7 @@ impl IdentityReplyHead {
         self.0[index] = flag;
     }
 
-    pub fn as_bytes(&self) -> Vec<u8> {
+    fn as_bytes(&self) -> Vec<u8> {
         self.0.to_vec()
     }
 
@@ -246,7 +272,7 @@ impl IdentityReplyHead {
         self.0[0].is_1(7)
     }
 
-    pub fn set_crc_flag(&mut self, has: bool) -> &mut Self {
+    fn set_crc_flag(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 7, has);
         self
     }
@@ -255,7 +281,7 @@ impl IdentityReplyHead {
         self.0[0].is_1(6)
     }
 
-    pub fn set_support_auth_type(&mut self, has: bool) -> &mut Self {
+    fn set_support_auth_type(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 6, has);
         self
     }
@@ -264,7 +290,7 @@ impl IdentityReplyHead {
         self.0[0].is_1(5)
     }
 
-    pub fn set_max_support_protocol_version(&mut self, has: bool) -> &mut Self {
+    fn set_max_support_protocol_version(&mut self, has: bool) -> &mut Self {
         self.set_head_flag(0, 5, has);
         self
     }
@@ -273,13 +299,13 @@ impl IdentityReplyHead {
         self.0[1]
     }
 
-    pub fn set_salt_len(&mut self, l: u8) -> &mut Self {
+    fn set_salt_len(&mut self, l: u8) -> &mut Self {
         self.0[1] = l;
         self
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Debug)]
 pub struct IdentityReply {
     head: Head,
     reply_head: IdentityReplyHead,
@@ -290,11 +316,53 @@ pub struct IdentityReply {
     salt: String,
 }
 
+impl Default for IdentityReply {
+    fn default() -> Self {
+        let mut reply_head = IdentityReplyHead::default();
+        reply_head.set_max_support_protocol_version(true);
+        Self {
+            head: new_v1_head(ACTION_REPLY),
+            reply_head,
+            crc: 0,
+            support_auth_type: AuthType::default(),
+            max_support_protocol_version: PROPTOCOL_V1,
+            salt: String::new(),
+        }
+    }
+}
+
 impl Deref for IdentityReply {
     type Target = IdentityReplyHead;
 
     fn deref(&self) -> &Self::Target {
         &self.reply_head
+    }
+}
+
+impl BuilderV1 for IdentityReply {
+    fn buildv1(self) -> V1 {
+        let mut v1 = V1::default();
+        let reply = self.build_reply_ok();
+        v1.set_reply(reply);
+        v1
+    }
+}
+
+impl Builder for IdentityReply {
+    fn build(self) -> Protocol {
+        Protocol::V1(self.buildv1())
+    }
+}
+
+impl ReplyBuilder for IdentityReply {
+    fn build_reply_ok(&self) -> Reply {
+        let mut reply = Reply::with_ok(ACTION_IDENTITY);
+        let _ = reply.set_identity_reply(self.clone());
+        reply
+    }
+
+    fn build_reply_err(&self, err_code: u8) -> Reply {
+        Reply::with_action_err(ACTION_IDENTITY, err_code)
     }
 }
 
@@ -314,7 +382,8 @@ impl IdentityReply {
 
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut res = vec![];
-        res.extend(self.head.as_bytes());
+        // ignore the head in reply.
+        // res.extend(self.head.as_bytes());
         res.extend(self.reply_head.as_bytes());
         if self.has_crc_flag() {
             res.extend(self.crc.to_be_bytes());
@@ -335,11 +404,6 @@ impl IdentityReply {
         self.head.clone()
     }
 
-    pub fn set_head(&mut self, head: Head) -> &mut Self {
-        self.head = head;
-        self
-    }
-
     pub fn get_crc(&self) -> u16 {
         self.crc
     }
@@ -353,15 +417,56 @@ impl IdentityReply {
         self
     }
 
-    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>, head: Head) -> Result<Self> {
+    pub fn get_authtype(&self) -> AuthType {
+        self.support_auth_type.clone()
+    }
+
+    pub fn set_authtype(&mut self, auth_type: AuthType) -> &mut Self {
+        self.support_auth_type = auth_type;
+        self.reply_head.set_support_auth_type(true);
+        self
+    }
+
+    pub fn get_max_protocol_version(&self) -> u8 {
+        self.max_support_protocol_version
+    }
+
+    pub fn set_max_protocol_version(&mut self, v: u8) -> &mut Self {
+        self.max_support_protocol_version = v;
+        self.reply_head.set_max_support_protocol_version(true);
+        self
+    }
+
+    pub fn get_salt(&self) -> &str {
+        &self.salt
+    }
+
+    pub fn set_salt(&mut self, salt: &str) -> Result<()> {
+        if salt.len() > u8::MAX as usize {
+            return Err(anyhow!("salt length excess the max u8"));
+        }
+        self.reply_head.set_salt_len(salt.len() as _);
+        self.salt = salt.to_string();
+        Ok(())
+    }
+
+    pub async fn parse_from(reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<Self> {
         let mut ir = IdentityReply::default();
-        ir.set_head(head);
         ir.parse_reader(reader).await?;
         Ok(ir)
     }
 
     pub async fn parse_reader(&mut self, reader: &mut Pin<&mut impl AsyncReadExt>) -> Result<()> {
         let mut buf = BytesMut::new();
+
+        // parse identity reply head
+        buf.resize(IDENTITY_REPLY_HEAD_LENGTH, 0);
+        reader.read_exact(&mut buf).await?;
+        self.reply_head = IdentityReplyHead::with(
+            buf.to_vec()
+                .try_into()
+                .expect("convert to identity-reply-head failed"),
+        );
 
         // parse crc
         if self.has_crc_flag() {

@@ -6,8 +6,10 @@ use common::global;
 use core::conn::Conn;
 use futures::executor::block_on;
 use inquire::Text;
+use protocol::consts::ACTION_IDENTITY;
 use protocol::consts::PROPTOCOL_V1;
 use protocol::message::v1::MessageUserV1;
+use protocol::protocol::v1::identity::Identity;
 use protocol::protocol::v1::publish::Publish as PublishV1;
 use protocol::protocol::v1::subscribe::Subscribe;
 use protocol::protocol::Builder;
@@ -15,10 +17,13 @@ use protocol::protocol::Protocol;
 use protocol::protocol::ProtocolOperation as _;
 use std::env::args;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpSocket;
 use tokio::select;
 use tokio::signal;
 use tokio::sync::mpsc;
+
+static mut MAX_SUPPORT_PROTOCOL_VERSION: u8 = 0;
 
 const DEFAULT_NAME: &str = "default";
 
@@ -212,6 +217,7 @@ async fn main() -> Result<()> {
 
     let _ = loop_tx.send(1).await;
     let mut conn = Conn::new(stream);
+    send_identity(&mut conn).await;
     let mut args = Args::new();
     loop {
         select! {
@@ -295,8 +301,18 @@ async fn main() -> Result<()> {
 
             resp = conn.read_parse(30) =>{
                 match resp {
-                    Ok(msg) => {
-                        println!("recieve message: {msg:?}\n");
+                    Ok(prot) => {
+                        println!("recieve message: {prot:?}\n");
+                        match prot {
+                            Protocol::V1(v1) => {
+                                let reply = v1.get_reply().unwrap();
+                                if reply.get_action_type() == ACTION_IDENTITY && reply.is_ok(){
+                                    let identity_reply = reply.get_identity_reply().unwrap();
+                                    unsafe{MAX_SUPPORT_PROTOCOL_VERSION = identity_reply.get_max_protocol_version()};
+                                }
+                            }
+                        }
+                        unsafe{println!("MAX_SUPPORT_PROTOCOL_VERSION: {MAX_SUPPORT_PROTOCOL_VERSION:?}\n")};
                     }
                     Err(e) => {
                         eprintln!("recieve err: {e}\n");
@@ -320,4 +336,10 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn send_identity(conn: &mut Conn) {
+    let mut identity = Identity::default();
+    identity.calc_crc();
+    conn.writer.write_all(&identity.as_bytes()).await;
 }

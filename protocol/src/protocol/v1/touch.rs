@@ -1,7 +1,7 @@
 use super::{
     new_v1_head,
     reply::{Reply, ReplyBuilder},
-    BuilderV1, E_BAD_CRC, E_TOPIC_PROHIBIT_TYPE, V1, X25,
+    BuilderV1, ProtError, E_BAD_CRC, E_TOPIC_PROHIBIT_TYPE, V1, X25,
 };
 use crate::{
     consts::{ACTION_TOUCH, CRC_LENGTH},
@@ -388,21 +388,21 @@ impl Touch {
         res
     }
 
-    pub fn validate(&self) -> Option<Protocol> {
-        if !self.has_crc_flag() {
-            return None;
-        }
-        let src_crc = self.get_crc();
-        let mut touch = self.clone();
-        let dst_crc = touch.calc_crc().get_crc();
-        if src_crc != dst_crc {
-            return Some(self.build_reply_err(E_BAD_CRC).build());
-        }
-        if self.prohibit_defer() && self.prohibit_instant() {
-            return Some(self.build_reply_err(E_TOPIC_PROHIBIT_TYPE).build());
+    pub fn validate(&self) -> Result<()> {
+        if self.has_crc_flag() {
+            let src_crc = self.get_crc();
+            let mut touch = self.clone();
+            let dst_crc = touch.calc_crc().get_crc();
+            if src_crc != dst_crc {
+                return Err(ProtError::new(E_BAD_CRC).into());
+            }
         }
 
-        None
+        if self.prohibit_defer() && self.prohibit_instant() {
+            return Err(ProtError::new(E_TOPIC_PROHIBIT_TYPE).into());
+        }
+
+        Ok(())
     }
 
     pub fn get_crc(&self) -> u16 {

@@ -11,10 +11,8 @@ pub const PROPTOCOL_V1: u8 = 1;
 // even number denote the Client -> Server
 // odd number denote the Server -> Client
 pub const ACTION_IDENTITY: u8 = 0;
-pub const ACTION_IDENTITY_REPLY: u8 = 1;
 
 pub const ACTION_AUTH: u8 = 2;
-pub const ACTION_AUTH_REPLY: u8 = 3;
 
 /// reply is [`ACTION_COMMON_REPLY`]
 pub const ACTION_TOUCH: u8 = 4;
@@ -27,8 +25,8 @@ pub const ACTION_SUBSCRIBE: u8 = 8;
 
 /// pubs/subs更新msg的元信息
 ///
-/// reply is [`ACTION_COMMON_REPLY`]
-pub const ACTION_UPDATE: u8 = 10;
+/// reply is [`ACTION_REPLY`]
+pub const ACTION_PATCH: u8 = 10;
 
 // server给subs发送消息
 pub const ACTION_MSG: u8 = 11;

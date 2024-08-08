@@ -1,7 +1,7 @@
 use super::{
     new_v1_head,
     reply::{Reply, ReplyBuilder},
-    BuilderV1, Head, CRC_LENGTH, E_BAD_CRC, V1, X25,
+    BuilderV1, Head, ProtError, CRC_LENGTH, E_BAD_CRC, V1, X25,
 };
 use crate::{
     consts::ACTION_SUBSCRIBE,
@@ -208,17 +208,17 @@ impl ReplyBuilder for Subscribe {
 }
 
 impl Subscribe {
-    pub fn validate(&self) -> Option<Protocol> {
+    pub fn validate(&self) -> Result<()> {
         if !self.has_crc_flag() {
-            return None;
+            return Ok(());
         }
         let src_crc = self.get_crc();
         let mut subscribe = self.clone();
         let dst_crc = subscribe.calc_crc().get_crc();
         if src_crc != dst_crc {
-            return Some(self.build_reply_err(E_BAD_CRC).build());
+            return Err(ProtError::new(E_BAD_CRC).into());
         }
-        None
+        Ok(())
     }
 
     pub fn get_head(&self) -> Head {

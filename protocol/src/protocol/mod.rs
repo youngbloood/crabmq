@@ -1,6 +1,7 @@
 pub mod v1;
 
-use crate::consts::PROPTOCOL_V1;
+use crate::consts::{ACTION_PATCH, PROPTOCOL_V1};
+use crate::error::ProtError;
 use crate::message::Message;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
@@ -8,6 +9,7 @@ use enum_dispatch::enum_dispatch;
 use std::fmt::Debug;
 use std::pin::Pin;
 use tokio::io::AsyncReadExt;
+use tracing::debug;
 use v1::reply::{Reply, ReplyBuilder};
 use v1::V1;
 
@@ -78,7 +80,7 @@ pub trait ProtocolOperation {
     fn as_bytes(&self) -> Vec<u8>;
 
     fn validate_for_client(&self) -> Result<()>;
-    fn validate_for_server(&self) -> Option<Protocol>;
+    fn validate_for_server(&self) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -101,12 +103,36 @@ impl ReplyBuilder for Protocol {
     }
 }
 
+impl Protocol {
+    pub fn validate_for_server_with_resp(&self) -> Option<Protocol> {
+        if let Err(e) = self.validate_for_server() {
+            let err: ProtError = e.into();
+            return match self {
+                Protocol::V1(v1) => match v1.get_action() {
+                    ACTION_PATCH => {
+                        if let Some(patch) = v1.get_patch() {
+                            if patch.is_nnr() {
+                                debug!("No-Need-Reply");
+                                return None;
+                            }
+                        }
+                        Some(v1.build_reply_err(err.code).build())
+                    }
+                    _ => Some(v1.build_reply_err(err.code).build()),
+                },
+            };
+        }
+
+        None
+    }
+}
+
 /// returns:
 /// 0: the correct Protocol,
 /// 1: the reply Protocol,
 pub async fn parse_protocol_from_reader(
     reader: &mut Pin<&mut impl AsyncReadExt>,
-) -> Result<(Protocol)> {
+) -> Result<Protocol> {
     let mut buf = BytesMut::new();
     buf.resize(HEAD_LENGTH, 0);
     reader.read_exact(&mut buf).await?;

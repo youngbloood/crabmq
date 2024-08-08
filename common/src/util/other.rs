@@ -88,6 +88,10 @@ pub fn random_str(length: usize) -> String {
         .collect()
 }
 
+pub fn random_num(start: u64, end: u64) -> u64 {
+    thread_rng().gen_range(start..end)
+}
+
 pub async fn interval(dur: Duration) -> Interval {
     let mut ticker = async_interval(dur);
     ticker.tick().await;
