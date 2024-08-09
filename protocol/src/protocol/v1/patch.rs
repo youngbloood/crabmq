@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 
-const UPDATE_HEAD_LENGTH: usize = 3;
+const UPDATE_HEAD_LENGTH: usize = 4;
 /**
 ### FIXED HEAD LENGTH([[`PROTOCOL_HEAD_LEN`] bytes), Every body has the same structure:
 * head: 10 bytes:
@@ -22,19 +22,22 @@ const UPDATE_HEAD_LENGTH: usize = 3;
 *           1bit: has crc.
 *           1bit: is heartbeat.
 *
-*       The follow 3bits flags always used by publisher.
-*           1bit: is update: only support [`delete`], [`fin`], [`notready`] flags.
+*       The follow flags[`delete`], [`fin`], [`notready`] always used by publisher.
+*           1bit: is update-delete: only update [`delete`] flag.
 *           1bit: is delete: mark this message is delete, then will not be consumed if it not consume.(must with MSG_ID)（优先级高于is notready)
+*           1bit: is update-notready: only update [`notready`] flag.
 *           1bit: is notready: mark this message if notready. false mean the message can't be consumed, true mean the message can be consumed.(must with MSG_ID)
-*
-*       The follow 2bits flags always used by subscribers.
+*           1bit: is update-fin: only update [`fin`] flag.
 *           1bit: is fin: mark the message has been consumed, then the message will not re-transport to client. #NNR
-*           1bit: rrt: Reset Re-transport Timeout. #NNR
 *
+* 2nd byte:
+*       The follow 2bits flags always used by subscribers.
+*           1bit: rrt: Reset Re-transport Timeout. #NNR
 *       The follow 1bit flag is can be used by publishers/subscribers.
 *           1bit: close: is close the client. If this flag is true, and the update flag is true. Then will do the update and close the client connection. #NNR
-* 2nd byte: topic length.
-* 3rd byte: ID-LENGTH
+
+* 3rd byte: topic length.
+* 4th byte: ID-LENGTH
 *
 * #NNR denote the message Not-Need-Reply.
 * optional:
@@ -50,8 +53,9 @@ impl Debug for PatchHead {
         f.debug_struct("PatchHead")
             .field("has-crc", &self.has_crc_flag())
             .field("is-heartbeat", &self.is_heartbeat())
-            .field("is-update", &self.is_update())
+            .field("is-update-delete", &self.is_update_delete())
             .field("is-delete", &self.is_delete())
+            .field("is-update-notready", &self.is_update_delete())
             .field("is-notready", &self.is_notready())
             .field("is-fin", &self.is_fin())
             .field("is-close", &self.is_fin())
@@ -102,12 +106,12 @@ impl PatchHead {
     }
 
     // updated flag.
-    fn is_update(&self) -> bool {
+    pub fn is_update_delete(&self) -> bool {
         self.0[0].is_1(5)
     }
 
     /// set the update flag value.
-    fn set_update(&mut self, update: bool) -> &mut Self {
+    fn set_update_delete(&mut self, update: bool) -> &mut Self {
         self.set_head_flag(0, 5, update);
         self
     }
@@ -120,71 +124,93 @@ impl PatchHead {
     /// set the delete flag value.
     pub fn set_delete(&mut self, delete: bool) -> &mut Self {
         self.set_head_flag(0, 4, delete);
-        self.set_update(true);
+        self.set_update_delete(true);
+        self
+    }
+
+    // updated flag.
+    pub fn is_update_notready(&self) -> bool {
+        self.0[0].is_1(3)
+    }
+
+    /// set the update flag value.
+    fn set_update_notready(&mut self, update: bool) -> &mut Self {
+        self.set_head_flag(0, 3, update);
         self
     }
 
     /// notready flag
     pub fn is_notready(&self) -> bool {
-        self.0[0].is_1(3)
+        self.0[0].is_1(2)
     }
 
     /// set the notready flag value.
     pub fn set_notready(&mut self, notready: bool) -> &mut Self {
-        self.set_head_flag(0, 3, notready);
-        self.set_update(true);
+        self.set_head_flag(0, 2, notready);
+        self.set_update_notready(true);
+        self
+    }
+
+    // updated flag.
+    pub fn is_update_fin(&self) -> bool {
+        self.0[0].is_1(1)
+    }
+
+    /// set the update flag value.
+    fn set_update_fin(&mut self, update: bool) -> &mut Self {
+        self.set_head_flag(0, 1, update);
         self
     }
 
     /// fin flag.
     pub fn is_fin(&self) -> bool {
-        self.0[0].is_1(2)
+        self.0[0].is_1(0)
     }
 
     /// set the fin flag value.
     pub fn set_fin(&mut self, fin: bool) -> &mut Self {
-        self.set_head_flag(0, 2, fin);
-        self.set_update(true);
+        self.set_head_flag(0, 0, fin);
+        self.set_update_fin(true);
         self
     }
 
     /// rrt: Reset Re-transport Timeout flag.
     pub fn is_rrt(&self) -> bool {
-        self.0[0].is_1(1)
+        self.0[1].is_1(7)
     }
 
     /// set the rrt flag value.
     pub fn set_rrt(&mut self, rrt: bool) -> &mut Self {
-        self.set_head_flag(0, 1, rrt);
+        self.set_head_flag(1, 7, rrt);
         self
     }
 
     /// fin flag.
     pub fn is_close(&self) -> bool {
-        self.0[0].is_1(0)
+        self.0[1].is_1(6)
     }
 
     /// set the close flag value.
     pub fn set_close(&mut self, close: bool) -> &mut Self {
-        self.set_head_flag(0, 0, close);
+        self.set_head_flag(1, 6, close);
         self
     }
 
     pub fn get_topic_len(&self) -> u8 {
-        self.0[1]
+        self.0[2]
     }
 
     fn set_topic_len(&mut self, l: u8) -> &mut Self {
-        self.0[1] = l;
+        self.0[2] = l;
         self
     }
 
     pub fn get_id_len(&self) -> u8 {
-        self.0[2]
+        self.0[3]
     }
 
     fn set_id_len(&mut self, l: u8) -> &mut Self {
-        self.0[2] = l;
+        self.0[3] = l;
         self
     }
 
