@@ -19,6 +19,12 @@ pub const E_NEED_AUTH: u8 = 5;
 pub const E_TOPIC_PROHIBIT_TYPE: u8 = 61;
 pub const E_TOPIC_PROHIBIT_DEFER: u8 = 62;
 pub const E_TOPIC_PROHIBIT_INSTANT: u8 = 63;
+// 超过topic上限
+pub const E_TOPIC_EXCESS_UPPER_LIMIT: u8 = 64;
+pub const E_TOPIC_GET_FAILED: u8 = 65;
+pub const E_TOPIC_CREATE_FAILED: u8 = 66;
+
+pub const E_PUBLISH_FAILED: u8 = 67;
 // ================== BUSNIESS ERR CODE 61-256 ================
 
 lazy_static! {

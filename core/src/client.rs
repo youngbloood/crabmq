@@ -59,6 +59,10 @@ impl ClientState {
         }
         self
     }
+
+    fn is_ready(&self) -> bool {
+        !self.is_need_identity() && !self.is_need_auth()
+    }
 }
 
 #[derive(Clone)]

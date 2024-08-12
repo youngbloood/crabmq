@@ -12,7 +12,9 @@ use disk::StorageDisk;
 use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
 use protocol::consts::ACTION_TOUCH;
+use protocol::error::{ProtError, E_PUBLISH_FAILED, E_TOPIC_CREATE_FAILED, E_TOPIC_GET_FAILED};
 use protocol::message::{Message, MessageOperation as _, TopicCustom};
+use protocol::protocol::v1::reply::ReplyBuilder;
 use protocol::protocol::{Protocol, ProtocolOperation as _};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -25,6 +27,8 @@ use tokio::{
     time::interval,
 };
 use tracing::error;
+
+use crate::error::ProtocolError;
 
 pub const STORAGE_TYPE_DUMMY: &str = "dummy";
 pub const STORAGE_TYPE_LOCAL: &str = "local";
@@ -157,17 +161,23 @@ impl StorageWrapper {
                 }
             }
             Err(e) => {
-                error!("get topic[{topic_name}] from storage failed: {e:?}")
+                error!("get topic[{topic_name}] from storage failed: {e:?}");
+                return Err(ProtError::new(E_TOPIC_GET_FAILED).into());
             }
         }
 
         // 不存在，则直接插入
         if ephemeral {
-            self.dummy.insert(topic_name, meta)?;
-            return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone()));
+            match self.dummy.insert(topic_name, meta) {
+                Ok(_) => return Ok((true, self.dummy.get(topic_name).await?.unwrap().clone())),
+                Err(_) => return Err(ProtError::new(E_TOPIC_CREATE_FAILED).into()),
+            }
         }
-        let topic = self.storage.get_or_create_topic(topic_name, meta).await?;
-        Ok((false, topic))
+
+        match self.storage.get_or_create_topic(topic_name, meta).await {
+            Ok(topic) => Ok((false, topic)),
+            Err(_) => Err(ProtError::new(E_TOPIC_CREATE_FAILED).into()),
+        }
     }
 
     pub async fn send_persist_singal(&self) -> Result<()> {
@@ -192,14 +202,19 @@ impl StorageWrapper {
         }
         let topic_name = msgs[0].get_topic();
         let meta = covert_protocol_to_topicmeta(&prot);
+
         let (ephemeral, _) = self
             .get_or_create_topic(topic_name, epehemral, &meta)
             .await?;
 
         if ephemeral {
-            self.dummy.push(msgs, &meta).await?;
-        } else {
-            self.storage.push(msgs, &meta).await?;
+            if let Err(e) = self.dummy.push(msgs, &meta).await {
+                error!("push to dummy err: {e:?}");
+                return Err(ProtError::new(E_PUBLISH_FAILED).into());
+            }
+        } else if let Err(e) = self.storage.push(msgs, &meta).await {
+            error!("push to storage err: {e:?}");
+            return Err(ProtError::new(E_PUBLISH_FAILED).into());
         }
 
         self.persist_factor_now.fetch_add(1, Relaxed);
@@ -300,7 +315,7 @@ impl TopicMeta {
     }
 }
 
-fn covert_protocol_to_topicmeta(prot: &Protocol) -> TopicMeta {
+pub fn covert_protocol_to_topicmeta(prot: &Protocol) -> TopicMeta {
     match prot {
         Protocol::V1(v1) => match v1.get_action() {
             ACTION_TOUCH => {

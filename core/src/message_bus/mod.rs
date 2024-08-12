@@ -1,8 +1,11 @@
 pub mod topic_bus;
+
 use crate::{
     client::Client,
     config::Config,
-    storage::{new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY},
+    storage::{
+        covert_protocol_to_topicmeta, new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY,
+    },
     topic::new_topic,
 };
 use anyhow::{anyhow, Result};
@@ -95,23 +98,20 @@ impl MessageBus {
         &mut self,
         topic_name: &str,
         epehemral: bool,
+        prot: &Protocol,
     ) -> Result<Guard<TopicBus>> {
         let topics_len = self.topics.len();
         if !self.topics.contains_key(topic_name)
             && topics_len >= (self.cfg.get().global.max_topic_num as _)
         {
-            return Err(anyhow!("exceed upper limit of topic"));
+            return Err(ProtError::new(E_TOPIC_EXCESS_UPPER_LIMIT).into());
         }
 
         if !self.topics.contains_key(topic_name) {
             let (_, topic_storage) = self
                 .storage
                 .get_mut()
-                .get_or_create_topic(
-                    topic_name,
-                    epehemral,
-                    &self.cfg.get().message_storage_disk_config.gen_topic_meta(),
-                )
+                .get_or_create_topic(topic_name, epehemral, &covert_protocol_to_topicmeta(prot))
                 .await?;
             let topic = new_topic(self.cfg.clone(), topic_name, topic_storage.get_meta()?)?;
 
@@ -162,7 +162,7 @@ impl MessageBus {
             ACTION_TOUCH => self.touch(out_sender, client, addr, prot).await,
             ACTION_PUBLISH => self.publish(out_sender, client, addr, prot).await,
             ACTION_SUBSCRIBE => self.subscribe(out_sender, client, addr, prot).await,
-            ACTION_PATCH => self.update(out_sender, client, addr, prot).await,
+            ACTION_PATCH => self.patch(out_sender, client, addr, prot).await,
             _ => unreachable!(),
         }
     }
@@ -173,7 +173,7 @@ impl MessageBus {
         out_sender: Sender<(String, Protocol)>,
         client: Guard<Client>,
         addr: &str,
-        prot: Protocol,
+        _prot: Protocol,
     ) {
         let mut reply = IdentityReply::default();
         // TODO: auth type determine by Config
@@ -208,14 +208,22 @@ impl MessageBus {
         out_sender: Sender<(String, Protocol)>,
         client: Guard<Client>,
         addr: &str,
-        msg: Protocol,
+        prot: Protocol,
     ) {
-        // TODO:
-        // let topic_name = msg.get_topic();
-        // match self.get_or_create_topic(topic_name, &msg.get_head()).await {
-        //     Ok(_) => todo!(),
-        //     Err(_) => todo!(),
-        // }
+        match prot.clone() {
+            Protocol::V1(v1) => {
+                if let Some(touch) = v1.get_touch() {
+                    let topic_name = touch.topic();
+                    let _ = self
+                        .get_or_create_topic(topic_name, touch.topic_is_ephemeral(), &prot)
+                        .await;
+                }
+            }
+        };
+
+        let _ = out_sender
+            .send((addr.to_string(), prot.build_reply_ok().build()))
+            .await;
     }
 
     pub async fn publish(
@@ -237,9 +245,6 @@ impl MessageBus {
             Err(e) => {
                 let err: ProtError = e.into();
                 error!("send msg failed: {err:?}");
-                // TODO:
-                // let mut resp = convert_to_resp(msg);
-                // resp.set_reject_code(err.code);
                 let _ = out_sender
                     .send((addr.to_string(), prot.build_reply_err(err.code).build()))
                     .await;
@@ -254,14 +259,14 @@ impl MessageBus {
         addr: &str,
         prot: Protocol,
     ) {
-        match prot {
+        match prot.clone() {
             Protocol::V1(v1) => {
                 let sub = v1.get_subscribe().unwrap();
                 let topic_name = sub.get_topic();
                 let chan_name = sub.get_channel();
 
                 match self
-                    .get_or_create_topic(topic_name, sub.is_ephemeral())
+                    .get_or_create_topic(topic_name, sub.is_ephemeral(), &prot)
                     .await
                 {
                     Ok(topic_sub) => {
@@ -276,18 +281,24 @@ impl MessageBus {
                             .get_create_mut_channel(chan_name);
                         chan.get_mut().set_client(addr, client);
                         info!(addr = addr, "sub topic: {topic_name}, channel: {chan_name}",);
-                        // TODO:
-                        // let _ = out_sender
-                        //     .send((addr.to_string(), convert_to_resp(msg)))
-                        //     .await;
+
+                        let _ = out_sender
+                            .send((addr.to_string(), prot.build_reply_ok().build()))
+                            .await;
                     }
-                    Err(e) => todo!("resp the err to client"),
+                    Err(e) => {
+                        let err: ProtError = e.into();
+
+                        let _ = out_sender
+                            .send((addr.to_string(), prot.build_reply_err(err.code).build()))
+                            .await;
+                    }
                 }
             }
         }
     }
 
-    pub async fn update(
+    pub async fn patch(
         &mut self,
         out_sender: Sender<(String, Protocol)>,
         client: Guard<Client>,
