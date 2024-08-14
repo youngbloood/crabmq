@@ -580,12 +580,26 @@ impl PersistTopicOperation for TopicMessage {
     fn get_meta(&self) -> Result<TopicMeta> {
         Ok(self.guard.get().meta.meta.clone())
     }
-    // async fn push(&self, msg: Message) -> Result<()> {
-    //     if msg.is_defer() {
-    //         self.get().defer.push(msg).await?;
-    //         return Ok(());
-    //     }
-    //     self.get().instant.push(msg).await?;
-    //     Ok(())
-    // }
+
+    async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        self.guard.get().instant.update_consume(id, consume).await?;
+        self.guard.get().defer.update_consume(id, consume).await?;
+        Ok(())
+    }
+
+    async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        self.guard.get().instant.update_delete(id, delete).await?;
+        self.guard.get().defer.update_delete(id, delete).await?;
+        Ok(())
+    }
+
+    async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        self.guard
+            .get()
+            .instant
+            .update_notready(id, notready)
+            .await?;
+        self.guard.get().defer.update_notready(id, notready).await?;
+        Ok(())
+    }
 }

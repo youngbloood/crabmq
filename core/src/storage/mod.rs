@@ -106,6 +106,12 @@ pub trait PersistTopicOperation: Send + Sync {
     // TODO: 增加如下接口
     // ready(&mut self,id:&str)->Result<()>;
     // delete(&mut self,id:&str)->Result<()>;
+
+    async fn update_consume(&self, id: &str, consume: bool) -> Result<()>;
+
+    async fn update_delete(&self, id: &str, delete: bool) -> Result<()>;
+
+    async fn update_notready(&self, id: &str, notready: bool) -> Result<()>;
 }
 
 #[enum_dispatch(PersistStorageOperation)]

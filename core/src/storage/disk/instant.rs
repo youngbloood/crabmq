@@ -191,6 +191,18 @@ impl Instant {
 
         Ok(())
     }
+
+    pub async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ use super::{
     message_manager::MessageManager,
     record::{RecordManager, RecordManagerStrategy as _, RecordManagerStrategyTime, TimePtr},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Ok, Result};
 use protocol::message::{Message, MessageOperation as _};
 
 use std::path::PathBuf;
@@ -195,6 +195,49 @@ impl Defer {
         // self.read_ptr.persist()?;
         Ok(())
     }
+
+    pub async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        self.ready_record_manager
+            .update_consume_flag(id, consume)
+            .await?;
+        self.not_ready_record_manager
+            .update_consume_flag(id, consume)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        self.ready_record_manager
+            .update_delete_flag(id, delete)
+            .await?;
+        self.not_ready_record_manager
+            .update_delete_flag(id, delete)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        if notready {
+            let record = self.ready_record_manager.find(id).await?;
+            if record.is_none() {
+                return Ok(());
+            }
+            let (_, record) = record.unwrap();
+            self.not_ready_record_manager.push(record).await?;
+            self.ready_record_manager.delete(id).await?;
+            return Ok(());
+        }
+        let record = self.not_ready_record_manager.find(id).await?;
+        if record.is_none() {
+            return Ok(());
+        }
+        let (_, record) = record.unwrap();
+        self.ready_record_manager.push(record).await?;
+        self.not_ready_record_manager.delete(id).await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +245,7 @@ mod tests {
     use super::*;
     use common::util::interval;
     use protocol::message::v1::MessageV1;
+    use std::result::Result::Ok;
     use std::{path::Path, time::Duration};
 
     #[tokio::test]

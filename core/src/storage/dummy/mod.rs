@@ -177,4 +177,22 @@ impl PersistTopicOperation for TopicDummy {
     fn get_meta(&self) -> Result<TopicMeta> {
         Ok(self.get().meta.clone())
     }
+
+    async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        self.get().defer.update_consume(id, consume).await?;
+        self.get().instant.update_consume(id, consume).await?;
+        Ok(())
+    }
+
+    async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        self.get().defer.update_delete(id, delete).await?;
+        self.get().instant.update_delete(id, delete).await?;
+        Ok(())
+    }
+
+    async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        self.get().defer.update_notready(id, notready).await?;
+        self.get().instant.update_notready(id, notready).await?;
+        Ok(())
+    }
 }

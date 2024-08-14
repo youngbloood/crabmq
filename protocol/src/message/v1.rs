@@ -106,10 +106,6 @@ impl MessageOperation for MessageV1 {
         self.msg.get_defer_time()
     }
 
-    fn is_notready(&self) -> bool {
-        self.msg.is_notready()
-    }
-
     fn is_ack(&self) -> bool {
         self.msg.is_ack()
     }
@@ -118,12 +114,31 @@ impl MessageOperation for MessageV1 {
         self.msg.is_persist()
     }
 
+    fn is_notready(&self) -> bool {
+        self.msg.is_notready()
+    }
+
+    fn update_notready(&mut self, notready: bool) -> Result<()> {
+        self.msg.set_notready(notready);
+        Ok(())
+    }
+
     fn is_deleted(&self) -> bool {
         self.msg.is_deleted()
     }
 
+    fn update_delete(&mut self, delete: bool) -> Result<()> {
+        self.msg.set_deleted(delete);
+        Ok(())
+    }
+
     fn is_consumed(&self) -> bool {
         self.msg.is_consumed()
+    }
+
+    fn update_consume(&mut self, consume: bool) -> Result<()> {
+        self.msg.set_consumed(consume);
+        Ok(())
     }
 }
 

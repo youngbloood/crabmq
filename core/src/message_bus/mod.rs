@@ -8,7 +8,7 @@ use crate::{
     },
     topic::new_topic,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use common::{global::Guard, random_num, random_str};
 use dashmap::DashMap;
 use protocol::{
@@ -305,6 +305,41 @@ impl MessageBus {
         addr: &str,
         prot: Protocol,
     ) {
+        match prot {
+            Protocol::V1(v1) => {
+                let patch = v1.get_patch();
+                if patch.is_none() {
+                    return;
+                }
+                let patch = patch.unwrap();
+                let topic_name = patch.get_topic();
+                let topic_bus = self.topics.get(topic_name);
+                if topic_bus.is_none() {
+                    return;
+                }
+                let topic_bus = topic_bus.unwrap();
+                let id = patch.get_id();
+                if patch.is_update_delete() && patch.is_delete() {
+                    let _ = topic_bus
+                        .get_mut()
+                        .update_delete(id, patch.is_delete())
+                        .await;
+                }
+                if patch.is_update_notready() {
+                    let _ = topic_bus
+                        .get_mut()
+                        .update_notready(id, patch.is_notready())
+                        .await;
+                }
+                if patch.is_update_fin() {
+                    let _ = topic_bus.get_mut().update_consume(id, patch.is_fin()).await;
+                }
+
+                let _ = out_sender
+                    .send((addr.to_string(), patch.build_reply_ok().build()))
+                    .await;
+            }
+        }
     }
     //============================ Handle Action ==============================//
 }

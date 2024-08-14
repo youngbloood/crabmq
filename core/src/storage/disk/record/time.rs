@@ -310,6 +310,22 @@ impl RecordManagerStrategy for RecordManagerStrategyTime {
         }
     }
 
+    async fn delete(&self, id: &str) -> Result<()> {
+        todo!()
+    }
+
+    async fn update_delete_flag(&self, id: &str, delete: bool) -> Result<()> {
+        todo!()
+    }
+
+    async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()> {
+        todo!()
+    }
+
+    async fn update_consume_flag(&self, id: &str, delete: bool) -> Result<()> {
+        todo!()
+    }
+
     async fn persist(&self) -> Result<()> {
         let rd = self.writers.read().expect("get sharedlock read failed");
         for (_, record_disk) in rd.iter() {
@@ -482,7 +498,7 @@ impl TimePtr {
         let record_rd = self
             .record_filename
             .read()
-            .expect("get sharedlock write failed");
+            .expect("get sharedlock read failed");
         if !check_exist(&*record_rd) {
             return Ok((false, None));
         }

@@ -3,7 +3,7 @@ use common::global::CANCEL_TOKEN;
 use common::{global::Guard, util::interval};
 use dynamic_queue::{FlowControl, Queue};
 use parking_lot::RwLock;
-use protocol::message::Message;
+use protocol::message::{Message, MessageOperation};
 use std::sync::atomic::Ordering::Relaxed;
 use std::{sync::atomic::AtomicUsize, time::Duration};
 use tokio::select;
@@ -56,29 +56,7 @@ pub struct MessageCacheSlidingWindows {
     msgs: RwLock<Vec<MessageWrapper>>,
 }
 
-struct MessageWrapper {
-    msg: Message,
-    consumed: bool,
-    acked: bool,
-}
-
-impl MessageWrapper {
-    pub fn new(msg: Message) -> Self {
-        MessageWrapper {
-            msg,
-            consumed: false,
-            acked: false,
-        }
-    }
-
-    pub fn clone(&self) -> Self {
-        MessageWrapper {
-            msg: self.msg.clone(),
-            consumed: self.consumed,
-            acked: self.acked,
-        }
-    }
-}
+type MessageWrapper = Guard<Message>;
 
 impl MessageCacheSlidingWindows {
     pub fn new(cap: usize, slide_win: usize) -> Self {
@@ -98,6 +76,16 @@ impl MessageCacheSlidingWindows {
         let mut wd = self.msgs.write();
         wd.pop()
     }
+
+    fn get(&self, id: &str) -> Option<(usize, MessageWrapper)> {
+        for (index, v) in self.msgs.read().iter().enumerate() {
+            if v.get().get_id() == id {
+                return Some((index, v.clone()));
+            }
+        }
+
+        None
+    }
 }
 
 impl CacheOperation for MessageCacheSlidingWindows {
@@ -113,7 +101,7 @@ impl CacheOperation for MessageCacheSlidingWindows {
     async fn push(&self, msg: Message) -> Result<()> {
         self.ctrl.grant(1).await;
         let mut wd = self.msgs.write();
-        wd.push(MessageWrapper::new(msg));
+        wd.push(Guard::new(msg));
         Ok(())
     }
 
@@ -132,7 +120,7 @@ impl CacheOperation for MessageCacheSlidingWindows {
                     if read_ptr >= rd.len() {
                         return None;
                     }
-                    Some(rd.get(read_ptr).unwrap().msg.clone())
+                    Some(rd.get(read_ptr).unwrap().get().clone())
                 } => {
                     match msg {
                         Some(msg) => {
@@ -167,14 +155,14 @@ impl CacheOperation for MessageCacheSlidingWindows {
                     if let Some(msg_wrapper) = self.msgs.read().get(self.read_ptr.load(Relaxed)) {
                         // rorate the read_ptr
                         self.read_ptr.fetch_add(1, Relaxed);
-                        return Some(msg_wrapper.msg.clone());
+                        return Some(msg_wrapper.clone());
                     }
 
                     None
                 } => {
                     match msg {
                         Some(msg) => {
-                            return Some(msg);
+                            return Some(msg.get().clone());
                         }
                         None => {
                             if block {
@@ -196,34 +184,6 @@ impl CacheOperation for MessageCacheSlidingWindows {
         }
     }
 
-    async fn consume(&self, id: &str) -> Option<Message> {
-        let mut wd = self.msgs.write();
-        let mut index = -1;
-        for (i, msg_wrapper) in wd.iter_mut().enumerate() {
-            // TODO:
-            // if id != msg_wrapper.msg.id() {
-            //     continue;
-            // }
-            msg_wrapper.consumed = true;
-            index = i as i32;
-        }
-        drop(wd);
-
-        // 消费确认了index=0的消息，则该消息需要出队列
-        if index == 0 {
-            if let Some(msg_wrapper) = self.pop_really() {
-                self.ctrl.revert(1).await;
-                // rorate the read_ptr
-                if self.read_ptr.load(Relaxed) >= 1 {
-                    self.read_ptr.fetch_sub(1, Relaxed);
-                }
-
-                return Some(msg_wrapper.msg);
-            }
-        }
-        None
-    }
-
     #[doc = " resize the buffer length in cache."]
     async fn resize(&self, cap: usize, slide_win: usize) {
         self.ctrl.resize(cap);
@@ -234,6 +194,36 @@ impl CacheOperation for MessageCacheSlidingWindows {
         self.slide_win
             .store(_slide_win, std::sync::atomic::Ordering::Relaxed);
         self.slide_win.store(_slide_win, Relaxed);
+    }
+
+    async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        if let Some((index, msg)) = self.get(id) {
+            msg.get_mut().update_consume(consume)?;
+            if index == 0 && self.pop_really().is_some() {
+                self.ctrl.revert(1).await;
+                // rorate the read_ptr
+                // TODO: 测试fetch_sub可以减至负数吗
+                self.read_ptr.fetch_sub(1, Relaxed);
+                // return Some(msg_wrapper.msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// consume a message by id.
+    async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        if let Some((_, msg)) = self.get(id) {
+            msg.get_mut().update_notready(notready)?;
+        }
+        Ok(())
+    }
+
+    /// consume a message by id.
+    async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        if let Some((_, msg)) = self.get(id) {
+            msg.get_mut().update_delete(delete)?;
+        }
+        Ok(())
     }
 }
 
@@ -312,7 +302,7 @@ mod tests {
             assert!(sw.pop(false).await.is_some());
         }
         // consume非队头消息
-        assert!(sw.consume("2").await.is_none());
+        assert!(sw.update_consume("2", true).await.is_ok());
         // consume非队头消息，push结果err
         for i in 0..100 {
             let msg = Message::default();
@@ -320,7 +310,7 @@ mod tests {
         }
 
         // consume
-        assert!(sw.consume("0").await.is_some());
+        assert!(sw.update_consume("0", true).await.is_ok());
         // 消费掉一个，再次push结果ok
         let msg = Message::default();
         assert!(sw.try_push(msg.clone()).await.is_ok());

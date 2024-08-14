@@ -49,6 +49,12 @@ pub trait RecordManagerStrategy {
     /// find a record accord id, and return the file path and the record value.
     async fn find(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>>;
 
+    async fn delete(&self, id: &str) -> Result<()>;
+
+    async fn update_delete_flag(&self, id: &str, delete: bool) -> Result<()>;
+    async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()>;
+    async fn update_consume_flag(&self, id: &str, delete: bool) -> Result<()>;
+
     /// persist the records to the storage.
     async fn persist(&self) -> Result<()>;
 }
@@ -117,6 +123,14 @@ impl MessageRecord {
 
     fn calc_len(&self) -> usize {
         self.format().len()
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.delete_time != 0
+    }
+
+    pub fn is_consumed(&self) -> bool {
+        self.consume_time != 0
     }
 }
 

@@ -145,6 +145,18 @@ impl MessageManager {
         let msg = self.compress.decompress(&buf).await?;
         Ok(Some(msg))
     }
+
+    pub async fn update_consume_flag(&self, record: MessageRecord, consume: bool) -> Result<()> {
+        todo!()
+    }
+
+    pub async fn update_delete_flag(&self, record: MessageRecord, consume: bool) -> Result<()> {
+        todo!()
+    }
+
+    pub async fn update_notready_flag(&self, record: MessageRecord, consume: bool) -> Result<()> {
+        todo!()
+    }
 }
 
 /// 普通消息，一个消息对应一个文件

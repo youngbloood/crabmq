@@ -130,6 +130,22 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
         };
     }
 
+    async fn delete(&self, id: &str) -> Result<()> {
+        todo!()
+    }
+
+    async fn update_delete_flag(&self, id: &str, delete: bool) -> Result<()> {
+        todo!()
+    }
+
+    async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()> {
+        todo!()
+    }
+
+    async fn update_consume_flag(&self, id: &str, delete: bool) -> Result<()> {
+        todo!()
+    }
+
     async fn persist(&self) -> Result<()> {
         self.writer.persist()?;
         Ok(())

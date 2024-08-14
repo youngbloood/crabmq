@@ -27,11 +27,17 @@ pub trait CacheOperation {
     /// pop a message from cache. if it is defer message, cache should control it pop when it's expired. or pop the None
     async fn pop(&self, _: bool) -> Option<Message>;
 
-    /// consume a message by id.
-    async fn consume(&self, id: &str) -> Option<Message>;
-
     /// resize the buffer length in cache.
     async fn resize(&self, cap: usize, slide_win: usize);
+
+    /// consume a message by id.
+    async fn update_consume(&self, id: &str, consumed: bool) -> Result<()>;
+
+    /// consume a message by id.
+    async fn update_notready(&self, id: &str, notready: bool) -> Result<()>;
+
+    /// consume a message by id.
+    async fn update_delete(&self, id: &str, deleted: bool) -> Result<()>;
 }
 
 #[enum_dispatch(CacheOperation)]
@@ -75,12 +81,20 @@ impl CacheWrapper {
         self.inner.pop(block).await
     }
 
-    pub async fn consume(&self, id: &str) -> Option<Message> {
-        self.inner.consume(id).await
-    }
-
     pub async fn resize(&self, cap: usize, slide_win: usize) {
         self.inner.resize(cap, slide_win).await
+    }
+
+    pub async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        self.inner.update_consume(id, consume).await
+    }
+
+    pub async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        self.inner.update_delete(id, delete).await
+    }
+
+    pub async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        self.inner.update_notready(id, notready).await
     }
 }
 

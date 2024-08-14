@@ -122,8 +122,8 @@ impl PatchHead {
     }
 
     /// set the delete flag value.
-    pub fn set_delete(&mut self, delete: bool) -> &mut Self {
-        self.set_head_flag(0, 4, delete);
+    pub fn set_delete(&mut self) -> &mut Self {
+        self.set_head_flag(0, 4, true);
         self.set_update_delete(true);
         self
     }
@@ -168,8 +168,8 @@ impl PatchHead {
     }
 
     /// set the fin flag value.
-    pub fn set_fin(&mut self, fin: bool) -> &mut Self {
-        self.set_head_flag(0, 0, fin);
+    pub fn set_fin(&mut self) -> &mut Self {
+        self.set_head_flag(0, 0, true);
         self.set_update_fin(true);
         self
     }

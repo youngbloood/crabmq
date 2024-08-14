@@ -94,6 +94,27 @@ impl TopicBus {
     pub async fn pop(&mut self, block: bool) -> Option<Message> {
         self.ready_queue.pop(block).await
     }
+
+    pub async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        self.ready_queue.update_consume(id, consume).await?;
+        self.defer_cache.update_consume(id, consume).await?;
+        self.storage_topic.update_consume(id, consume).await?;
+        Ok(())
+    }
+
+    pub async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        self.ready_queue.update_delete(id, delete).await?;
+        self.defer_cache.update_delete(id, delete).await?;
+        self.storage_topic.update_delete(id, delete).await?;
+        Ok(())
+    }
+
+    pub async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        self.ready_queue.update_notready(id, notready).await?;
+        self.defer_cache.update_notready(id, notready).await?;
+        self.storage_topic.update_notready(id, notready).await?;
+        Ok(())
+    }
 }
 
 pub async fn topic_message_loop(guard: Guard<TopicBus>) {
