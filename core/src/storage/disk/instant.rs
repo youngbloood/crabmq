@@ -90,15 +90,15 @@ impl Instant {
 
     pub async fn set_not_ready(&self, id: &str, not_ready: bool) -> Result<()> {
         if not_ready {
-            if let Some((_, src)) = self.ready_record_manager.strategy.find(id).await? {
-                self.not_ready_record_manager.strategy.push(src).await?;
+            if let Some((_, src)) = self.ready_record_manager.find(id).await? {
+                self.not_ready_record_manager.push(src).await?;
                 return Ok(());
             }
             return Err(anyhow!("not found the record: id[{id}]"));
         }
 
-        if let Some((_, src)) = self.not_ready_record_manager.strategy.find(id).await? {
-            self.ready_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.not_ready_record_manager.find(id).await? {
+            self.ready_record_manager.push(src).await?;
             return Ok(());
         }
 
@@ -169,38 +169,69 @@ impl Instant {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        if let Some((_, src)) = self.ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
-        if let Some((_, src)) = self.not_ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.not_ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
         Ok(())
     }
 
     async fn consume(&self, id: &str) -> Result<()> {
-        if let Some((_, src)) = self.ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
-        if let Some((_, src)) = self.not_ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.not_ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
         Ok(())
     }
 
     pub async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
+        self.ready_record_manager
+            .update_consume_flag(id, consume)
+            .await?;
+        self.not_ready_record_manager
+            .update_consume_flag(id, consume)
+            .await?;
+
         Ok(())
     }
 
     pub async fn update_delete(&self, id: &str, delete: bool) -> Result<()> {
+        self.ready_record_manager
+            .update_delete_flag(id, delete)
+            .await?;
+        self.not_ready_record_manager
+            .update_delete_flag(id, delete)
+            .await?;
         Ok(())
     }
 
     pub async fn update_notready(&self, id: &str, notready: bool) -> Result<()> {
+        if notready {
+            let record = self.ready_record_manager.find(id).await?;
+            if record.is_none() {
+                return Ok(());
+            }
+            let (_, record) = record.unwrap();
+            self.not_ready_record_manager.push(record).await?;
+            self.ready_record_manager.delete(id).await?;
+            return Ok(());
+        }
+        let record = self.not_ready_record_manager.find(id).await?;
+        if record.is_none() {
+            return Ok(());
+        }
+        let (_, record) = record.unwrap();
+        self.ready_record_manager.push(record).await?;
+        self.not_ready_record_manager.delete(id).await?;
+
         Ok(())
     }
 }

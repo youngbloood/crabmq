@@ -199,7 +199,7 @@ impl CacheOperation for MessageCacheSlidingWindows {
     async fn update_consume(&self, id: &str, consume: bool) -> Result<()> {
         if let Some((index, msg)) = self.get(id) {
             msg.get_mut().update_consume(consume)?;
-            if index == 0 && self.pop_really().is_some() {
+            if index == 0 && consume && self.pop_really().is_some() {
                 self.ctrl.revert(1).await;
                 // rorate the read_ptr
                 // TODO: 测试fetch_sub可以减至负数吗

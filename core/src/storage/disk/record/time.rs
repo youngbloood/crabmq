@@ -2,7 +2,7 @@ use super::index::{Index, IndexCache};
 use super::{FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use chrono::{Datelike, FixedOffset, Timelike};
+use chrono::{Datelike, FixedOffset, Local, Timelike};
 use common::util::{check_exist, dir_recursive};
 use crossbeam::sync::ShardedLock;
 use lru::LruCache;
@@ -310,20 +310,48 @@ impl RecordManagerStrategy for RecordManagerStrategyTime {
         }
     }
 
-    async fn delete(&self, id: &str) -> Result<()> {
-        todo!()
+    async fn delete(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>> {
+        Ok(None)
     }
 
     async fn update_delete_flag(&self, id: &str, delete: bool) -> Result<()> {
-        todo!()
+        if let Some((filename, mut record)) = self.find(id).await? {
+            if delete {
+                record.delete_time = Local::now().timestamp() as u64;
+            } else {
+                record.delete_time = 0;
+            }
+
+            // sync to file
+            let fd = self.fd_cache.get_or_create(&filename)?;
+            let mut wg = fd.write();
+            wg.seek(SeekFrom::Start(record.delete_time_offset()))?;
+            wg.write_all(&record.as_bytes())?;
+        }
+
+        Ok(())
     }
 
-    async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()> {
-        todo!()
-    }
+    // async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()> {
+    //     todo!()
+    // }
 
-    async fn update_consume_flag(&self, id: &str, delete: bool) -> Result<()> {
-        todo!()
+    async fn update_consume_flag(&self, id: &str, consume: bool) -> Result<()> {
+        if let Some((filename, mut record)) = self.find(id).await? {
+            if consume {
+                record.consume_time = Local::now().timestamp() as u64;
+            } else {
+                record.consume_time = 0;
+            }
+
+            // sync to file
+            let fd = self.fd_cache.get_or_create(&filename)?;
+            let mut wg = fd.write();
+            wg.seek(SeekFrom::Start(record.consume_time_offset()))?;
+            wg.write_all(&record.consume_time.to_be_bytes())?;
+        }
+
+        Ok(())
     }
 
     async fn persist(&self) -> Result<()> {
@@ -452,13 +480,17 @@ impl RecordDisk {
 
         let mut bts = BytesMut::new();
         let mut wfd = fd.write();
-        let read_records = self.records.read().expect("get sharedlock read failed");
-        let iter = read_records.iter();
+        let mut records_wg = self.records.write().expect("get sharedlock write failed");
+        let iter = records_wg.iter_mut();
+        let mut offset = 0;
         for record in iter {
             // println!("record = {}", record.format());
-            bts.extend(record.format().as_bytes());
+            record.record_start = offset;
+            record.record_length = record.calc_len() as u64;
+            offset += record.record_length;
+            bts.extend(record.as_bytes());
         }
-        drop(read_records);
+        drop(records_wg);
         wfd.seek(SeekFrom::Start(0))?;
         wfd.write_all(&bts)?;
         drop(wfd);
@@ -756,6 +788,8 @@ mod tests {
                     defer_time: now as u64 + rng.gen_range(10..50),
                     consume_time: 0,
                     delete_time: 0,
+                    record_start: 0,
+                    record_length: 0
                 })
                 .await
                 .is_ok());

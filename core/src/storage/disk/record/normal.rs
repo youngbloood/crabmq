@@ -2,9 +2,11 @@ use super::index::{Index, IndexCache};
 use super::{gen_filename, FdCache, MessageRecord, RecordManagerStrategy};
 use anyhow::Result;
 use bytes::BytesMut;
+use chrono::Local;
 use common::util::{check_exist, SwitcherVec};
 use crossbeam::sync::ShardedLock;
 use parking_lot::RwLock;
+use serde::de;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::process::Command;
 use std::sync::atomic::Ordering::Relaxed;
@@ -89,9 +91,7 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
         Ok(())
     }
 
-    async fn push(&self, record: MessageRecord) -> Result<(PathBuf, usize)> {
-        self.index.push(record.clone())?;
-
+    async fn push(&self, mut record: MessageRecord) -> Result<(PathBuf, usize)> {
         if self.writer.record_size.load(Relaxed) + record.calc_len() as u64
             > self.record_size_per_file
             || self.writer.record_num.load(Relaxed) + 1 > self.record_num_per_file
@@ -99,7 +99,8 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
             self.persist().await?;
             self.rorate();
         }
-        let index = self.writer.push(record, false);
+        let index = self.writer.push(&mut record, false);
+        self.index.push(record.clone())?;
         Ok((PathBuf::from(&*self.writer.filename.read()), index))
     }
 
@@ -130,20 +131,56 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
         };
     }
 
-    async fn delete(&self, id: &str) -> Result<()> {
-        todo!()
+    async fn delete(&self, id: &str) -> Result<Option<(PathBuf, MessageRecord)>> {
+        Ok(None)
     }
 
     async fn update_delete_flag(&self, id: &str, delete: bool) -> Result<()> {
-        todo!()
+        if let Some((filename, mut record)) = self.find(id).await? {
+            if delete {
+                record.delete_time = Local::now().timestamp() as u64;
+            } else {
+                record.delete_time = 0;
+            }
+
+            // sync to file
+            let fd = self.fd_cache.get_or_create(&filename)?;
+            let mut wg = fd.write();
+            wg.seek(SeekFrom::Start(record.delete_time_offset()))?;
+            wg.write_all(&record.as_bytes())?;
+        }
+
+        Ok(())
     }
 
-    async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()> {
-        todo!()
-    }
+    // async fn update_notready_flag(&self, id: &str, delete: bool) -> Result<()> {
+    //     if let Some((_, mut record)) = self.find(id).await? {
+    //         if delete {
+    //             record.delete_time = Local::now().timestamp() as u64;
+    //         } else {
+    //             record.delete_time = 0;
+    //         }
+    //     }
 
-    async fn update_consume_flag(&self, id: &str, delete: bool) -> Result<()> {
-        todo!()
+    //     Ok(())
+    // }
+
+    async fn update_consume_flag(&self, id: &str, consume: bool) -> Result<()> {
+        if let Some((filename, mut record)) = self.find(id).await? {
+            if consume {
+                record.consume_time = Local::now().timestamp() as u64;
+            } else {
+                record.consume_time = 0;
+            }
+
+            // sync to file
+            let fd = self.fd_cache.get_or_create(&filename)?;
+            let mut wg = fd.write();
+            wg.seek(SeekFrom::Start(record.consume_time_offset()))?;
+            wg.write_all(&record.consume_time.to_be_bytes())?;
+        }
+
+        Ok(())
     }
 
     async fn persist(&self) -> Result<()> {
@@ -253,11 +290,13 @@ impl RecordDisk {
         // self.records.write().clear();
     }
 
-    fn push(&self, record: MessageRecord, _sort: bool) -> usize {
+    fn push(&self, record: &mut MessageRecord, _sort: bool) -> usize {
         self.record_num.fetch_add(1, Relaxed);
+        record.record_start = self.record_size.load(Relaxed);
+        record.record_length = record.calc_len() as u64;
         self.record_size
             .fetch_add(record.calc_len() as u64, Relaxed);
-        self.records.push(record);
+        self.records.push(record.clone());
         self.record_num.load(Relaxed) as usize
     }
 
@@ -283,8 +322,7 @@ impl RecordDisk {
         }
         let iter = records.iter();
         for record in iter {
-            let record_str = record.format();
-            let record_bts = record_str.as_bytes();
+            let record_bts = record.as_bytes();
             self.write_offset
                 .fetch_add(record_bts.len() as u64, Relaxed);
             bts.extend(record_bts);
@@ -503,6 +541,8 @@ mod tests {
                     defer_time: 0,
                     consume_time: 0,
                     delete_time: 0,
+                    record_start: 0,
+                    record_length: 0
                 })
                 .await
                 .is_ok());

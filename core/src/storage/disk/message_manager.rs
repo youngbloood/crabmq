@@ -75,6 +75,8 @@ impl MessageManager {
             defer_time,
             consume_time: 0,
             delete_time: 0,
+            record_start: 0,
+            record_length: 0,
         };
 
         self.writer.push(compressed_msg);

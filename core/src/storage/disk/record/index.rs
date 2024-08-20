@@ -163,7 +163,7 @@ impl IndexWrapper {
     fn push(&self, record: MessageRecord) -> Result<()> {
         let writer = self.writer.borrow_mut();
         writer.add_document(doc! {
-            *self.fields.first().unwrap() => record.format()
+            *self.fields.first().unwrap() => record.as_bytes()
         })?;
 
         Ok(())

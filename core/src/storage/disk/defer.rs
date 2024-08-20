@@ -81,39 +81,39 @@ impl Defer {
 
     pub async fn set_not_ready(&self, id: &str, not_ready: bool) -> Result<()> {
         if not_ready {
-            if let Some((_, src)) = self.ready_record_manager.strategy.find(id).await? {
-                self.not_ready_record_manager.strategy.push(src).await?;
+            if let Some((_, src)) = self.ready_record_manager.find(id).await? {
+                self.not_ready_record_manager.push(src).await?;
                 return Ok(());
             }
             return Err(anyhow!("not found the record: id[{id}]"));
         }
 
-        if let Some((_, src)) = self.not_ready_record_manager.strategy.find(id).await? {
-            self.ready_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.not_ready_record_manager.find(id).await? {
+            self.ready_record_manager.push(src).await?;
             return Ok(());
         }
         Err(anyhow!("not found the record: id[{id}]"))
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        if let Some((_, src)) = self.ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
-        if let Some((_, src)) = self.not_ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.not_ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
         Ok(())
     }
 
     async fn consume(&self, id: &str) -> Result<()> {
-        if let Some((_, src)) = self.ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
-        if let Some((_, src)) = self.not_ready_record_manager.strategy.find(id).await? {
-            self.delete_record_manager.strategy.push(src).await?;
+        if let Some((_, src)) = self.not_ready_record_manager.find(id).await? {
+            self.delete_record_manager.push(src).await?;
         }
 
         Ok(())
