@@ -6,7 +6,6 @@ use chrono::Local;
 use common::util::{check_exist, SwitcherVec};
 use crossbeam::sync::ShardedLock;
 use parking_lot::RwLock;
-use serde::de;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::process::Command;
 use std::sync::atomic::Ordering::Relaxed;
@@ -144,10 +143,13 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
             }
 
             // sync to file
+            // TODO: user the file region lock to control the concurrency write and read.
             let fd = self.fd_cache.get_or_create(&filename)?;
             let mut wg = fd.write();
+            let old_pos = wg.seek(SeekFrom::Current(0))?;
             wg.seek(SeekFrom::Start(record.delete_time_offset()))?;
             wg.write_all(&record.as_bytes())?;
+            wg.seek(SeekFrom::Start(old_pos))?;
         }
 
         Ok(())
@@ -176,8 +178,10 @@ impl RecordManagerStrategy for RecordManagerStrategyNormal {
             // sync to file
             let fd = self.fd_cache.get_or_create(&filename)?;
             let mut wg = fd.write();
+            let old_pos = wg.seek(SeekFrom::Current(0))?;
             wg.seek(SeekFrom::Start(record.consume_time_offset()))?;
             wg.write_all(&record.consume_time.to_be_bytes())?;
+            wg.seek(SeekFrom::Start(old_pos))?;
         }
 
         Ok(())

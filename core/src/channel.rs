@@ -1,12 +1,10 @@
 use std::ops::Deref;
 
-use crate::{
-    client::{Client, ClientWrapper},
-    storage::TopicMeta,
-};
+use crate::client::{Client, ClientWrapper};
 use anyhow::Result;
 use common::{global::Guard, Name, OrderedMap, Weight};
 use protocol::{consts::*, message::Message, protocol::Protocol};
+use storage::TopicMeta;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 #[derive(Clone)]

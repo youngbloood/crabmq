@@ -1,0 +1,60 @@
+// client 与 coo 交互协议
+syntax = "proto3";
+package clientcoosvc;
+
+// 导入 Empty 类型
+// import "google/protobuf/empty.proto";
+import "common.proto";
+
+service ClientCooService {
+    rpc Auth (AuthReq) returns (AuthResp);
+    rpc List (commonsvc.CooListReq) returns (commonsvc.CooListResp);
+    rpc AddTopic (AddTopicReq) returns (AddTopicResp);
+    rpc AddPartitions (AddPartitionsReq) returns (AddPartitionsResp);
+    rpc Pull (PullReq) returns (stream commonsvc.TopicList);
+}
+
+message AuthReq {
+    string username = 1;
+    string password = 2;
+    string nonce = 3;
+    string crypto_type = 4;
+}
+
+message AuthResp {
+    string error = 1;
+    string token = 2;
+}
+
+message AddTopicReq {
+    // topic 
+    string topic = 1;
+    // 该 topic 的分区数量
+    uint32 partition = 2;
+    string token = 3;
+}
+
+message AddTopicResp {
+    bool success = 1;
+    string error = 2;
+}
+
+message AddPartitionsReq {
+    // topic 
+    string topic = 1;
+    // 该 topic 的增加的分区数量
+    uint32 partition = 2; 
+    string token = 3;
+}
+
+message AddPartitionsResp {
+    bool success = 1;
+    string error = 2;
+}
+
+message PullReq {
+    // 过滤条件
+    string topic = 1;
+    repeated uint32 partitions = 2;
+    repeated uint32 broker_ids = 3;
+}

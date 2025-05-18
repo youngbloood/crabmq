@@ -6,7 +6,6 @@ use bytes::BytesMut;
 use common::util::{check_exist, is_debug, SwitcherVec};
 use parking_lot::RwLock;
 use protocol::message::{Message, MessageOperation as _};
-
 use std::fs::{self};
 use std::io::{Seek as _, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;

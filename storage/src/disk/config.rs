@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use crate::storage::TopicMeta;
+use crate::TopicMeta;
 
 #[derive(Parser, Debug, serde::Deserialize, Clone)]
 pub struct DiskConfig {

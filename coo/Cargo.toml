@@ -1,0 +1,21 @@
+[package]
+name = "coo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+dashmap = "6.1.0"
+log = "0.4.27"
+protobuf = "2.28.0"
+raft = "0.7.0"
+sled = "0.34.7"
+tonic = "0.13.1"
+tonic-build = "0.13.1"
+prost = "0.13.5"
+tokio = "1.45.0"
+async-stream = "0.3.6"
+serde_json = "1.0.140"
+parking_lot = "0.12.3"
+chrono = "0.4.41"
+grpcx = { version = "0.1.0", path = "../grpcx" }

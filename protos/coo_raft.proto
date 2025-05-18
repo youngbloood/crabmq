@@ -1,0 +1,54 @@
+// coo 之间raft消息交互协议
+syntax = "proto3";
+package cooraftsvc;
+
+message RaftMessage {
+  bytes message = 1;  // Serialized raft::eraftpb::Message
+}
+
+message RaftResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message IDResp {
+  uint32 id = 1;
+}
+
+message Empty {}
+
+// 支持 ConfChange 和 ConfChangeV2
+message ConfChangeReq {
+  uint64 version = 1;
+  bytes message = 2;
+}
+
+message ConfChangeResp {
+  bool success = 1;
+  string error = 2;
+}
+
+// TODO: 
+message ProposeDataReq {}
+
+// TODO:
+message ProposeDataResp {}
+
+message SnapshotReq {}
+
+message SnapshotResp {
+  bytes data = 1;
+}
+
+service RaftService {
+  // 获取目标节点的 ID
+  rpc GetID(Empty) returns (IDResp);
+  // 提交数据
+  rpc ProposeData (ProposeDataReq) returns (ProposeDataResp);
+  // 提交 ConfChange
+  rpc ProposeConfChange(ConfChangeReq) returns (ConfChangeResp);
+  // 发送 Raft 的消息
+  rpc SendRaftMessage(RaftMessage) returns (RaftResponse);
+  // 获取 snapshot
+  rpc GetSnapshot(SnapshotReq) returns (SnapshotResp);
+}

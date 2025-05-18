@@ -1,9 +1,9 @@
 use crate::{
     cache::{CacheWrapper, CACHE_TYPE_MEM},
     config::Config,
-    storage::{PersistTopicOperation, STORAGE_TYPE_DUMMY},
     topic::Topic,
 };
+
 use anyhow::Result;
 use chrono::Local;
 use common::{
@@ -11,6 +11,7 @@ use common::{
     util::interval,
 };
 use protocol::message::{Message, MessageOperation as _};
+use storage::{PersistTopicOperation, STORAGE_TYPE_DUMMY};
 
 use std::{sync::Arc, time::Duration};
 use tokio::select;

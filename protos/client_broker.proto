@@ -1,0 +1,21 @@
+// client 与 broker 交互协议
+syntax = "proto3";
+
+package clientbrokersvc;
+
+service ClientBrokerService{
+    rpc Publish (stream PublishReq) returns (stream PublishResp);
+    rpc Subscribe (SubscribeReq) returns (stream SubscribeResp);
+}
+
+message PublishReq {
+
+}
+
+message PublishResp {
+
+}
+
+message SubscribeReq {}
+
+message SubscribeResp {}

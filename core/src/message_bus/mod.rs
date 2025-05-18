@@ -1,13 +1,6 @@
 pub mod topic_bus;
 
-use crate::{
-    client::Client,
-    config::Config,
-    storage::{
-        covert_protocol_to_topicmeta, new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY,
-    },
-    topic::new_topic,
-};
+use crate::{client::Client, config::Config, topic::new_topic};
 use anyhow::Result;
 use common::{global::Guard, random_num, random_str};
 use dashmap::DashMap;
@@ -18,6 +11,9 @@ use protocol::{
         v1::{auth::AuthType, identity::IdentityReply, reply::ReplyBuilder},
         Builder, Protocol, ProtocolOperation,
     },
+};
+use storage::{
+    covert_protocol_to_topicmeta, new_storage_wrapper, StorageWrapper, STORAGE_TYPE_DUMMY,
 };
 use tokio::sync::mpsc::Sender;
 pub use topic_bus::TopicBus;

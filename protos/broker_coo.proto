@@ -1,0 +1,63 @@
+// broker 与 coo 交互协议
+syntax = "proto3";
+package brokercoosvc;
+
+// 导入 Empty 类型
+// import "google/protobuf/empty.proto";
+import "common.proto";
+
+service BrokerCooService {
+    rpc Auth (AuthReq) returns (AuthResp);
+    rpc List (commonsvc.CooListReq) returns (commonsvc.CooListResp);
+    rpc Report (stream BrokerState) returns (stream BrokerStateResp);
+    rpc Pull (PullReq) returns (stream commonsvc.TopicList);
+}
+
+message AuthReq {
+    string username = 1;
+    string password = 2;
+    string nonce = 3;
+    string crypto_type = 4;
+}
+
+message AuthResp {
+    string error = 1;
+    string token = 2;
+}
+
+message BrokerState {
+    // broker 唯一标识
+    uint32 id = 1;
+    string addr = 2;
+    uint64 version  = 3;
+    // 生产者 生产的消息
+    uint32 wps  = 4;// 每秒收到多少个消息
+    uint32 wbps = 5;// 每秒收到的消息字节数
+    // 消费者 消费的消息
+    uint32 rps = 6; // 每秒收到多少个消息
+    uint32 rbps = 7;// 每秒读取的消息字节数
+   
+    uint32 netrate = 8;// 该节点的网络速率
+    uint32 cpurat = 9;// 该节点的cpu占用率
+    uint32 memrate = 10;// 该节点的mem占用率
+    uint32 diskrate = 11;// 该节点的磁盘占用率
+
+    repeated string slaves = 12; // 该节点的所有子节点（ip:port）
+    repeated TopicInfos topic_infos = 13; // 该节点下的所有topic及其partition
+}
+
+message BrokerStateResp {
+    // broker 唯一标识
+    uint32 id = 1;
+    bool success = 2;
+}
+
+message TopicInfos {
+    string topic = 1;
+    repeated string partition = 2;
+}
+
+message PullReq {
+    // broker 唯一标识
+    uint32 id = 1;
+}

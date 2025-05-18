@@ -1,10 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use std::fs;
+use storage::disk::config::DiskConfig;
 use tracing::Level;
 use tracing_appender::rolling::{daily, hourly, minutely, never};
-
-use crate::storage::disk::config::DiskConfig;
 
 const DEFAULT_BUFFER: u64 = 10000;
 const DEFAULT_FACTOR: u16 = 100;

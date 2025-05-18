@@ -1,10 +1,10 @@
 use crate::channel::{Channel, ChannelWrapper};
 use crate::config::Config;
-use crate::storage::TopicMeta;
 use anyhow::{anyhow, Result};
 use common::global::Guard;
 use common::{Name, OrderedMap};
 use protocol::consts::*;
+use storage::TopicMeta;
 
 use protocol::message::{Message, MessageOperation};
 use tokio_util::sync::CancellationToken;

@@ -2,8 +2,10 @@
  * Persist Messages into Storage and parse Messages from Storage
  */
 
+mod cache;
+mod compress;
 pub mod disk;
-mod dummy;
+pub mod dummy;
 
 use anyhow::Result;
 use common::global::{Guard, CANCEL_TOKEN};
@@ -13,11 +15,9 @@ use dummy::Dummy;
 use enum_dispatch::enum_dispatch;
 use protocol::consts::ACTION_TOUCH;
 use protocol::error::{ProtError, E_PUBLISH_FAILED, E_TOPIC_CREATE_FAILED, E_TOPIC_GET_FAILED};
-use protocol::message::{Message, MessageOperation as _, TopicCustom};
-use protocol::protocol::v1::reply::ReplyBuilder;
+use protocol::message::{Message, MessageOperation as _};
 use protocol::protocol::{Protocol, ProtocolOperation as _};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::{sync::atomic::AtomicU64, time::Duration};
@@ -26,9 +26,8 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::interval,
 };
-use tracing::error;
 
-use crate::error::ProtocolError;
+use tracing::error;
 
 pub const STORAGE_TYPE_DUMMY: &str = "dummy";
 pub const STORAGE_TYPE_LOCAL: &str = "local";

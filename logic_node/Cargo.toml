@@ -1,0 +1,17 @@
+[package]
+name = "logic_node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+async-stream = "0.3.6"
+broker = { version = "0.1.0", path = "../broker" }
+coo = { version = "0.1.0", path = "../coo" }
+dashmap = "6.1.0"
+grpcx = { version = "0.1.0", path = "../grpcx" }
+log = "0.4.27"
+storagev2 = { version = "0.1.0", path = "../storagev2" }
+tokio = "1.45.0"
+tokio-stream = "0.1.17"
+tonic = "0.13.1"

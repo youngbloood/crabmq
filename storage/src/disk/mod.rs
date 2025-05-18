@@ -349,7 +349,7 @@ impl TopicMetaWrapper {
             .read(true)
             .open(&self.filename)?;
         let out = serde_json::to_string_pretty(&self.meta)?;
-        fd.write_all(out.as_bytes())?;
+        fd.write_all(&out.as_bytes())?;
         Ok(())
     }
 }

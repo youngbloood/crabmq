@@ -1,0 +1,15 @@
+[package]
+name = "crabmqd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+broker = { version = "0.1.0", path = "../../broker" }
+coo = { version = "0.1.0", path = "../../coo" }
+env_logger = "0.11.8"
+log = "0.4.27"
+logic_node = { version = "0.1.0", path = "../../logic_node" }
+storagev2 = { version = "0.1.0", path = "../../storagev2" }
+structopt = "0.3.26"
+tokio = { version = "1.45.0", features = ["rt-multi-thread"] }

@@ -1,0 +1,35 @@
+syntax = "proto3";
+package commonsvc;
+
+message TopicList {
+    TopicInfoType tit = 1;
+    repeated TopicInfos topics = 2;
+}
+
+message TopicInfos {
+    string topic = 2;
+    repeated PartitionInfos partition =3;
+}
+
+message PartitionInfos{
+    // 该 partition 的id
+    uint32 id = 1;
+    // 该 partition 所在的 broker id
+    uint32 broker_id = 2;
+    // 该 broker 的地址 
+    string broker_addr = 3;
+}
+
+enum TopicInfoType {
+    Init = 0;
+    Add = 1;
+}
+
+
+message CooListReq {
+    string token = 1;
+}
+
+message CooListResp {
+
+}
