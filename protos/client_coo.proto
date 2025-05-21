@@ -9,7 +9,7 @@ import "common.proto";
 service ClientCooService {
     rpc Auth (AuthReq) returns (AuthResp);
     rpc List (commonsvc.CooListReq) returns (commonsvc.CooListResp);
-    rpc AddTopic (AddTopicReq) returns (AddTopicResp);
+    rpc NewTopic (AddTopicReq) returns (AddTopicResp);
     rpc AddPartitions (AddPartitionsReq) returns (AddPartitionsResp);
     rpc Pull (PullReq) returns (stream commonsvc.TopicList);
 }

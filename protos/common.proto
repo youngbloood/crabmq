@@ -2,8 +2,19 @@ syntax = "proto3";
 package commonsvc;
 
 message TopicList {
-    TopicInfoType tit = 1;
-    repeated TopicInfos topics = 2;
+    oneof list {
+        TopicListInit init = 1;
+        TopicListAdd add = 2;
+    }
+}
+
+
+message TopicListInit {
+    repeated TopicInfos topics = 1;
+}
+
+message TopicListAdd {
+    repeated TopicInfos topics = 1;
 }
 
 message TopicInfos {
@@ -18,11 +29,6 @@ message PartitionInfos{
     uint32 broker_id = 2;
     // 该 broker 的地址 
     string broker_addr = 3;
-}
-
-enum TopicInfoType {
-    Init = 0;
-    Add = 1;
 }
 
 

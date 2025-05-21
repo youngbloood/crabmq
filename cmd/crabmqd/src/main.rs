@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use broker::Broker;
 use coo::coo::Coordinator;
-use logic_node::{LogicNode, start_logic_node};
+use logic_node::{LogicNode, Slave};
 use std::{env::join_paths, net::SocketAddr, path::Path};
 use storagev2::mem;
 use structopt::StructOpt;
@@ -32,7 +32,7 @@ struct Args {
     #[structopt(short = "s", default_value = "")]
     slave: String,
 
-    /// Indicate the Coordinator Leader gprc address
+    /// Indicate the Coordinator Raft Leader gprc address
     #[structopt(long = "coo-leader", default_value = "")]
     coo_leader: String,
 }
@@ -91,10 +91,9 @@ async fn main() -> Result<()> {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let mut ln = LogicNode::new();
+    let mut builder = logic_node::Builder::new();
     if !args.coo.is_empty() {
         let db_path = Path::new(&args.db_path).join(format!("coo{}", args.id));
-        println!("db_path = {:?}", &db_path);
         let coo = Coordinator::new(
             args.id,
             db_path.as_os_str(),
@@ -102,15 +101,16 @@ async fn main() -> Result<()> {
             args.coo_raft,
             args.coo_leader.clone(),
         );
-        ln.with_coo(coo);
+        builder = builder.coo(coo);
     }
     if !args.broker.is_empty() {
         let store = mem::MemStorage::new();
-        let broker = Broker::new(args.id, args.broker, store);
-        ln.with_broker(broker);
+        let broker = Broker::new(args.id, args.broker, args.coo_leader.clone(), store);
+        builder = builder.broker(broker);
     }
-
-    let mut coo_leader = args.coo_leader;
-    start_logic_node(ln, &mut coo_leader).await;
+    if !args.slave.is_empty() {
+        builder = builder.slave(Slave);
+    }
+    builder.build().run(args.coo_leader).await?;
     Ok(())
 }

@@ -1,150 +1,308 @@
-use crate::message_bus::MessageBus;
+use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use grpcx::brokercoosvc::BrokerState;
-use grpcx::brokercoosvc::broker_coo_service_client::BrokerCooServiceClient;
-use grpcx::clientbrokersvc;
-use grpcx::commonsvc::TopicList;
-use log::error;
-use std::{pin::Pin, sync::Arc, time::Duration};
+use grpcx::{
+    brokercoosvc::BrokerState,
+    clientbrokersvc::{
+        Message, PublishReq, PublishResp, Status as BrokerStatus, SubscribeReq,
+        client_broker_service_server::{ClientBrokerService, ClientBrokerServiceServer},
+        subscribe_req,
+    },
+    commonsvc::TopicList,
+};
+use log::{error, info};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use storagev2::Storage;
 use tokio::{sync::mpsc, time::interval};
-use tonic::transport::Channel;
-pub struct Broker<T>
-where
-    T: Storage,
-{
+use tonic::{Request, Response, Status, async_trait, transport::Server};
+
+use crate::{
+    consumer_group::{ConsumerGroup, SubSession},
+    message_bus::{self, MessageBus},
+    partition::PartitionManager,
+};
+
+#[derive(Clone)]
+pub struct Broker<T: Storage> {
     id: u32,
-    addr: String,
-    topics: Arc<DashMap<String, Vec<Partition>>>,
-
-    msg_bus: MessageBus<Bytes>,
-
-    coos: Arc<DashMap<u32, CooNode>>,
+    broker_addr: String,
     storage: T,
+    partitions: PartitionManager,
+    consumers: ConsumerGroup<T>,
+    message_bus: MessageBus,
+
+    state_bus: Arc<DashMap<String, mpsc::Sender<BrokerState>>>,
 }
 
-unsafe impl<T> Send for Broker<T> where T: Storage {}
-unsafe impl<T> Sync for Broker<T> where T: Storage {}
-struct BrokerStateManager {}
-
-impl BrokerStateManager {
-    /// 获取 broker 所在节点的节点信息
-    pub fn get_state(&self) -> BrokerState {
-        BrokerState {
-            id: 0,
-            addr: String::new(),
-            version: 0,
-            wps: 0,
-            wbps: 0,
-            rps: 0,
-            rbps: 0,
-            netrate: 0,
-            cpurat: 0,
-            memrate: 0,
-            diskrate: 0,
-            slaves: Vec::new(),
-            topic_infos: Vec::new(),
-        }
-    }
-}
-struct CooNode {
-    id: u32,
-    addr: String,
-    status: u32,
-    client: Option<BrokerCooServiceClient<Channel>>,
-}
-
-struct Partition {
-    id: u32,
-    path: String,
-}
-
-impl<T> Broker<T>
-where
-    T: Storage,
-{
-    pub fn new(id: u32, addr: String, storage: T) -> Self {
+impl<T: Storage> Broker<T> {
+    pub fn new(id: u32, broker_addr: String, coo_addr: String, storage: T) -> Self {
         Self {
             id,
-            addr,
-            topics: Arc::new(DashMap::default()),
-            coos: Arc::new(DashMap::default()),
+            broker_addr,
             storage,
-            msg_bus: MessageBus::new(),
+            partitions: PartitionManager::new(id, coo_addr),
+            consumers: ConsumerGroup::new(),
+            message_bus: MessageBus::new(),
+            state_bus: Arc::new(DashMap::new()),
         }
     }
+}
 
+#[async_trait]
+impl<T: Storage> ClientBrokerService for Broker<T> {
+    type PublishStream = tonic::codegen::BoxStream<PublishResp>;
+    type SubscribeStream = tonic::codegen::BoxStream<Message>;
+
+    async fn publish(
+        &self,
+        request: Request<tonic::Streaming<PublishReq>>,
+    ) -> Result<Response<Self::PublishStream>, Status> {
+        let mut stream = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+
+        let broker = self.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(req)) = stream.message().await {
+                let result = broker.process_publish(req).await;
+                let _ = tx.send(result.map_err(Into::into)).await;
+            }
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    async fn subscribe(
+        &self,
+        request: Request<tonic::Streaming<SubscribeReq>>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let remote_addr = request.remote_addr().unwrap().to_string();
+        let mut stream = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+
+        let broker = self.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(req)) = stream.message().await {
+                match broker.process_subscribe(&remote_addr, req, &tx).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+}
+
+impl<T: Storage> Broker<T> {
     pub fn get_id(&self) -> u32 {
         self.id
     }
 
-    fn get_state_manager(&self) -> BrokerStateManager {
-        BrokerStateManager {}
-    }
-
-    /// 应用 topics 信息至本 broker 节点
-    pub fn apply_topic_info(&self, topics: TopicList) {
-        todo!()
-    }
-
-    pub fn get_state_reciever(&self) -> mpsc::Receiver<BrokerState> {
+    pub fn get_state_reciever(&self, module: String) -> mpsc::Receiver<BrokerState> {
         let (tx, rx) = mpsc::channel(1);
-        let state_mngr = self.get_state_manager();
-        tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_millis(150));
+        self.state_bus.insert(module, tx);
+
+        rx
+    }
+
+    pub fn get_state(&self) -> BrokerState {
+        BrokerState::default()
+    }
+
+    pub fn apply_topic_infos(&self, tl: TopicList) {
+        self.partitions.apply_topic_infos(tl)
+    }
+
+    pub async fn run(&self) -> Result<()> {
+        let svc = ClientBrokerServiceServer::new(self.clone());
+        let server = Server::builder().add_service(svc);
+
+        let broker = self.clone();
+        let broker_state_handle = tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(5));
+            let timeout = Duration::from_millis(100);
             loop {
                 ticker.tick().await;
-                if let Err(e) = tx.send(state_mngr.get_state()).await {
-                    error!("get_state_reciever get err: {:?}", e);
-                    break;
+                let state = broker.get_state();
+                for sender in broker.state_bus.iter() {
+                    if let Err(e) = sender.send_timeout(state.clone(), timeout).await {
+                        error!("Send BrokerState to {} err: {:?}", sender.key(), e);
+                    }
                 }
             }
         });
-        rx
+
+        let broker_socket = self.broker_addr.parse().expect("need correct socket addr");
+        let server_handle = tokio::spawn(async move {
+            match server.serve(broker_socket).await {
+                Ok(_) => {
+                    info!("Broker service listen at: {}", broker_socket);
+                }
+                Err(e) => {
+                    error!(
+                        "Broker service listen at: {} failed: {:?}",
+                        broker_socket, e
+                    );
+                }
+            }
+        });
+
+        tokio::try_join!(broker_state_handle, server_handle);
+        Ok(())
+    }
+
+    async fn process_publish(&self, req: PublishReq) -> Result<PublishResp, BrokerError> {
+        // 验证分区归属
+        if !self.partitions.is_my_partition(&req.topic, req.partition) {
+            return Err(BrokerError::InvalidPartition);
+        }
+
+        let payload = Bytes::from(req.payload);
+        // 存储消息
+        let message_id = self
+            .storage
+            .store(&req.topic, req.partition, payload.clone())
+            .await
+            .map_err(|e| {
+                error!(
+                    "process_publish req[{}-{}] error: {:?}",
+                    req.topic, req.partition, e,
+                );
+                BrokerError::StorageFailure
+            })?;
+
+        // 写入消息总线
+        self.message_bus
+            .broadcast_producer_message(&req.topic, req.partition, payload)
+            .await;
+
+        Ok(PublishResp {
+            message_id: String::new(),
+            status: BrokerStatus::Success.into(),
+        })
+    }
+
+    async fn process_subscribe(
+        &self,
+        client_addr: &str,
+        req: SubscribeReq,
+        tx: &tokio::sync::mpsc::Sender<Result<Message, Status>>,
+    ) -> Result<(), Status> {
+        match req.request {
+            Some(subscribe_req::Request::Sub(sub)) => {
+                // 验证分区归属
+                if !self.partitions.is_my_partition(&sub.topic, sub.partition) {
+                    return Err(Status::new(
+                        tonic::Code::InvalidArgument,
+                        "Invalid partition",
+                    ));
+                }
+
+                // 检查是否已有订阅
+                if self.consumers.has_subscription(&sub.topic, sub.partition) {
+                    return Err(Status::new(
+                        tonic::Code::PermissionDenied,
+                        "Partition has been subscribed",
+                    ));
+                }
+
+                // 创建会话
+                let session: SubSession<T> = SubSession::new(
+                    sub.topic.clone(),
+                    sub.partition,
+                    client_addr.to_string(),
+                    self.storage.clone(),
+                );
+
+                // 启动消息推送
+                let broker = self.clone();
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    broker.push_messages(session, tx_clone).await;
+                });
+            }
+            Some(subscribe_req::Request::Ack(ack)) => {
+                let sess = self.consumers.get_session(client_addr);
+                if sess.is_none() {
+                    // 统一由外部处理
+                    return Err(tonic::Status::new(
+                        tonic::Code::InvalidArgument,
+                        "Must be sub firstly",
+                    ));
+                }
+                let sess = sess.unwrap();
+                // 处理ACK逻辑
+                sess.handle_ack(ack);
+            }
+            Some(subscribe_req::Request::Flow(flow)) => {
+                // 更新流量控制
+                let sess = self.consumers.get_session(client_addr);
+                if sess.is_none() {
+                    // 统一由外部处理
+                    return Err(tonic::Status::new(
+                        tonic::Code::InvalidArgument,
+                        "Must be sub firstly",
+                    ));
+                }
+                let sess = sess.unwrap();
+                // 处理ACK逻辑
+                sess.handle_flow(flow);
+            }
+            None => return Err(tonic::Status::new(tonic::Code::InvalidArgument, "Unkown ")),
+        }
+        Ok(())
+    }
+
+    async fn push_messages(
+        &self,
+        mut session: SubSession<T>,
+        tx: mpsc::Sender<Result<Message, Status>>,
+    ) {
+        loop {
+            match session.next().await {
+                Ok(msg) => {
+                    tx.send(Ok(msg.clone())).await;
+                    self.message_bus
+                        .broadcast_consumer_message("topic", 1, Bytes::new())
+                        .await
+                }
+                Err(status) => {
+                    if status.code() == tonic::Code::DeadlineExceeded {
+                        tx.send(Err(status)).await;
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
-// impl<T> clientbrokersvc::client_broker_service_server::ClientBrokerService for Broker<T>
-// where
-//     T: Storage + 'static,
-// {
-//     /// Server streaming response type for the Publish method.
-//     type PublishStream = Pin<
-//         Box<
-//             dyn tonic::codegen::tokio_stream::Stream<
-//                     Item = Result<clientbrokersvc::PublishResp, tonic::Status>,
-//                 > + Send,
-//         >,
-//     >;
+#[derive(thiserror::Error, Debug)]
+pub enum BrokerError {
+    #[error("Storage operation failed")]
+    StorageFailure,
+    #[error("Partition not owned by this node")]
+    InvalidPartition,
+    #[error("Already subscribed to this partition")]
+    AlreadySubscribed,
+    #[error("Invalid request format")]
+    InvalidRequest,
+}
 
-//     async fn publish(
-//         &self,
-//         request: tonic::Request<tonic::Streaming<clientbrokersvc::PublishReq>>,
-//     ) -> std::result::Result<tonic::Response<Self::PublishStream>, tonic::Status> {
-
-//         // T::store("topic", 11, Bytes::new()).await;
-
-//         // let strm = async_stream::try_stream! {
-
-//         // }
-
-//         // Ok(Pin::new(Box::pin(x)))
-//     }
-
-//     /// Server streaming response type for the Publish method.
-//     type SubscribeStream = Pin<
-//         Box<
-//             dyn tonic::codegen::tokio_stream::Stream<
-//                     Item = Result<clientbrokersvc::SubscribeResp, tonic::Status>,
-//                 > + Send,
-//         >,
-//     >;
-
-//     async fn subscribe(
-//         &self,
-//         request: tonic::Request<clientbrokersvc::SubscribeReq>,
-//     ) -> std::result::Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
-//         todo!()
-//     }
-// }
+impl From<BrokerError> for Status {
+    fn from(e: BrokerError) -> Self {
+        match e {
+            BrokerError::StorageFailure => Status::internal(e.to_string()),
+            BrokerError::InvalidPartition => Status::failed_precondition(e.to_string()),
+            BrokerError::AlreadySubscribed => Status::already_exists(e.to_string()),
+            _ => Status::invalid_argument(e.to_string()),
+        }
+    }
+}

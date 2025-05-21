@@ -9,6 +9,9 @@ use dashmap::DashMap;
 use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
 use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
 use grpcx::commonsvc;
+use grpcx::commonsvc::TopicListAdd;
+use grpcx::commonsvc::TopicListInit;
+use grpcx::commonsvc::topic_list;
 use grpcx::{brokercoosvc, clientcoosvc};
 use log::error;
 use log::info;
@@ -19,13 +22,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::Response;
+use tonic::Status;
 use tonic::transport::Server;
 
 #[derive(Clone)]
 pub struct Coordinator {
     id: u32,
+    // coordinator 节点监听的 grpc 地址
     coo_addr: String,
+    // coordinator 节点间的 raft 通信模块监听的 grpc 地址
     raft_addr: String,
+    // coordinator 节点指向的 raft leader 节点地址 （raft-leader 监听的地址）
+    raft_leader_addr: String,
+
     // raft_node 节点
     raft_node: Arc<RaftNode>,
     // 向 raft_node 节点发送消息的通道
@@ -59,6 +68,7 @@ impl Coordinator {
             id,
             coo_addr,
             raft_addr,
+            raft_leader_addr,
             raft_node: raft_node.clone(),
             raft_node_sender,
             brokers: Arc::new(DashMap::new()),
@@ -67,13 +77,13 @@ impl Coordinator {
             broker_event_bus: EventBus::new(),
             client_event_bus: EventBus::new(),
         };
-        tokio::spawn(start_coo_service(coo.clone()));
-        tokio::spawn(async move {
-            if !raft_leader_addr.is_empty() {
-                let _ = raft_node.join(raft_leader_addr).await;
-            }
-            raft_node.run().await
-        });
+        // tokio::spawn(start_coo_service(coo.clone()));
+        // tokio::spawn(async move {
+        //     if !raft_leader_addr.is_empty() {
+        //         let _ = raft_node.join(raft_leader_addr).await;
+        //     }
+        //     raft_node.run().await
+        // });
         coo
     }
 
@@ -108,6 +118,35 @@ impl Coordinator {
                 entry.state.memrate = state.memrate;
             })
             .or_insert_with(|| BrokerNode { state });
+    }
+
+    pub async fn run(&self) -> Result<()> {
+        let raft_node = self.raft_node.clone();
+        let raft_leader_addr = self.raft_leader_addr.clone();
+        tokio::spawn(async move {
+            if !raft_leader_addr.is_empty() {
+                let _ = raft_node.join(raft_leader_addr).await;
+            }
+            raft_node.run().await;
+        });
+
+        let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
+        let clientcoo_svc = ClientCooServiceServer::new(self.clone());
+        let addr = self.coo_addr.parse().unwrap();
+
+        info!("Coordinator listen: {}", addr);
+        match Server::builder()
+            .add_service(brokercoo_svc)
+            .add_service(clientcoo_svc)
+            .serve(addr)
+            .await
+        {
+            Ok(_) => {
+                info!("Coordinator server started at {}", addr);
+            }
+            Err(e) => panic!("Coordinator listen : {}, err: {:?}", addr, e),
+        }
+        Ok(())
     }
 
     /// broker_pull
@@ -189,6 +228,10 @@ impl Coordinator {
 
 #[derive(Debug, Clone)]
 pub enum PartitionEvent {
+    // NotLeader {
+    //     NewLeaderID: u32,
+    //     NewLeaderAddr: String,
+    // },
     NewTopic {
         topic: String,
         partitions: Arc<Vec<PartitionInfo>>,
@@ -360,14 +403,14 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         todo!()
     }
 
-    /// add_topic: 新增 `topic` 及其分区分配
+    /// new_topic: 新增 `topic` 及其分区分配
     ///
     /// 1. 分区模块对新 `topic` 及其分区进行分配
     ///
     /// 2. 将topic元信息提交至 `raft` 集群
     ///
     /// 3. 发送topic元信息广播至 `broker_event_bus` 和 `client_event_bus`
-    async fn add_topic(
+    async fn new_topic(
         &self,
         request: tonic::Request<clientcoosvc::AddTopicReq>,
     ) -> std::result::Result<tonic::Response<clientcoosvc::AddTopicResp>, tonic::Status> {
@@ -460,6 +503,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                 yield resp;
             }
 
+
             while let Some(event) = event_rx.recv().await {
                 match event {
                     PartitionEvent::NewTopic { topic, partitions } => {
@@ -472,7 +516,9 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                 }
             }
 
-           bus.unsubscribe(&sub_id);
+            bus.unsubscribe(&sub_id);
+
+            // yeild tonic::Status::new(tonic::Code::Unknown,"11");
         };
 
         Ok(tonic::Response::new(Box::pin(stream)))
@@ -482,34 +528,13 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
 // 转换函数示例
 fn convert_to_pull_resp(topic: String, ps: Arc<Vec<PartitionInfo>>) -> commonsvc::TopicList {
     commonsvc::TopicList {
-        tit: 0,
-        topics: Vec::new(),
+        list: Some(topic_list::List::Init(TopicListInit { topics: Vec::new() })),
     }
 }
 
 // 转换函数示例
 fn convert_to_added_resp(topic: String, ps: Arc<Vec<PartitionInfo>>) -> commonsvc::TopicList {
     commonsvc::TopicList {
-        tit: 0,
-        topics: Vec::new(),
-    }
-}
-
-async fn start_coo_service(coo: Coordinator) {
-    let brokercoo_svc = BrokerCooServiceServer::new(coo.clone());
-    let clientcoo_svc = ClientCooServiceServer::new(coo.clone());
-    let addr = coo.coo_addr.parse().unwrap();
-
-    info!("Coordinator listen: {}", addr);
-    match Server::builder()
-        .add_service(brokercoo_svc)
-        .add_service(clientcoo_svc)
-        .serve(addr)
-        .await
-    {
-        Ok(_) => {
-            info!("Coordinator server started at {}", addr);
-        }
-        Err(e) => panic!("Coordinator listen : {}, err: {:?}", addr, e),
+        list: Some(topic_list::List::Add(TopicListAdd { topics: Vec::new() })),
     }
 }

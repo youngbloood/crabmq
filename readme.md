@@ -4,32 +4,30 @@ A distribution Message Queue written by Rust.
 
 ## Usage
 
-### Step 1
-
-Start a `crabmqd` server.
+### Build
 
 ```shell
-cd crabmqd && cargo run
+cargo clean && cd ./cmd/crabmqd && cargo build
 ```
 
-### Step 2
+### Start CrabMQ Cluster
 
-Build a Client.
+Start First LogicNode
 
 ```shell
-cargo build --bin client
+RUST_LOG=info ./target/debug/crabmqd --id 1 -c 127.0.0.1:15001  --coo-raft 127.0.0.1:16001
 ```
 
-Open a TCP connection in another terminal.
+Start Second LogicNode and Join the First LogicNode
 
 ```shell
-./target/debug/client 127.0.0.1:3890
+RUST_LOG=info ./target/debug/crabmqd --id 2 -c 127.0.0.1:15002  --coo-raft 127.0.0.1:16002 --coo-leader 127.0.0.1:16001
 ```
 
-Then we enter the interactive terminal. And we build the message to send to `crabmqd`.
+Start Third LogicNode and Join the First LogicNode To Become Cluster
 
 ```shell
-head --action pub
-msg --body aaaa --persist --ack
-send
+RUST_LOG=info ./target/debug/crabmqd --id 3 -c 127.0.0.1:15003  --coo-raft 127.0.0.1:16003 --coo-leader 127.0.0.1:16001
 ```
+
+...

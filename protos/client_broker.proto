@@ -1,21 +1,66 @@
-// client 与 broker 交互协议
 syntax = "proto3";
-
 package clientbrokersvc;
 
-service ClientBrokerService{
-    rpc Publish (stream PublishReq) returns (stream PublishResp);
-    rpc Subscribe (SubscribeReq) returns (stream SubscribeResp);
+service ClientBrokerService {
+  // 生产消息（客户端流式）
+  rpc Publish(stream PublishReq) returns (stream PublishResp);
+  
+  // 消费消息（双向流式）
+  rpc Subscribe(stream SubscribeReq) returns (stream Message);
 }
 
+// ========== 生产消息协议 ==========
 message PublishReq {
-
+  string topic = 1;
+  uint32 partition = 2;      // 更合理的数值范围
+  bytes payload = 3;
+  optional string message_id = 4;  // 可选客户端生成ID
 }
 
 message PublishResp {
-
+  string message_id = 1;    // Broker生成的唯一ID
+  Status status = 2;        // 统一状态返回
 }
 
-message SubscribeReq {}
+// ========== 消费消息协议 ==========
+message SubscribeReq {
+  oneof request {
+    Subscription sub = 1;   // 初始化订阅
+    Ack ack = 2;            // 消息确认
+    FlowControl flow = 3;   // 流控
+  }
+}
 
-message SubscribeResp {}
+message Subscription {
+  string topic = 1;
+  uint32 partition = 2;
+  uint64 offset = 3;         // 起始消费位移（-1表示最新）
+  int32 window_size = 4; // 初始客户端接受窗口大小
+}
+
+message Ack {
+  string message_id = 1;
+  bool commit = 2;          // true=确认消费，false=拒绝
+}
+
+message FlowControl {
+  int32 window_size = 1;    // 客户端接收窗口大小
+}
+
+
+// ========== 通用结构 ==========
+message Message {
+  string message_id = 1;
+  string topic = 2;
+  uint32 partition = 3;
+  int64 offset = 4;         // Broker维护的位移
+  bytes payload = 5;
+  map<string,string> metadata = 6;  // 扩展元数据
+}
+
+enum Status {
+  SUCCESS = 0;
+  INVALID_PARTITION = 1;    // 分区不属于当前节点
+  STORAGE_ERROR = 2;
+  RATE_LIMITED = 3;
+}

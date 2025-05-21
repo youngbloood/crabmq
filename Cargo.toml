@@ -1,7 +1,6 @@
 
 [workspace]
 members = [
-    # "crabmqd",
     "common",
     "core",
     "cmd/client",
