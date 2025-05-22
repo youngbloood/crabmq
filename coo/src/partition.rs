@@ -103,6 +103,10 @@ impl PartitionManager {
         Arc::new(new_partitions)
     }
 
+    pub fn has_topic(&self, topic: &str) -> bool {
+        self.assignments.contains_key(topic)
+    }
+
     // 选择可用broker（基于负载）
     fn select_available_brokers(
         brokers: Arc<DashMap<u32, BrokerNode>>,

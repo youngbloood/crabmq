@@ -11,8 +11,10 @@ message RaftResponse {
   string error = 2;
 }
 
-message IDResp {
+message MetaResp {
   uint32 id = 1;
+  string raft_addr = 2;
+  string coo_addr = 3;
 }
 
 message Empty {}
@@ -42,7 +44,7 @@ message SnapshotResp {
 
 service RaftService {
   // 获取目标节点的 ID
-  rpc GetID(Empty) returns (IDResp);
+  rpc GetMeta(Empty) returns (MetaResp);
   // 提交数据
   rpc ProposeData (ProposeDataReq) returns (ProposeDataResp);
   // 提交 ConfChange

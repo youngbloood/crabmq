@@ -2,9 +2,10 @@ use anyhow::{Result, anyhow};
 use broker::Broker;
 use coo::coo::Coordinator;
 use logic_node::{LogicNode, Slave};
-use std::{env::join_paths, net::SocketAddr, path::Path};
+use std::{env::join_paths, net::SocketAddr, path::Path, sync::Arc};
 use storagev2::mem;
 use structopt::StructOpt;
+use tokio::sync::Mutex;
 
 #[derive(StructOpt)]
 struct Args {
@@ -12,33 +13,40 @@ struct Args {
     #[structopt(long, short = "id")]
     id: u32,
 
-    /// Coordinator listen grpc address
+    /// Coordinator 模块自身监听的 grpc 地址
     #[structopt(short = "c", long = "coo", default_value = "")]
     coo: String,
 
-    /// Coordinator raft interact the message
+    /// Coordinator-raft 模块自身监听的 grpc 地址
     #[structopt(long = "coo-raft", default_value = "")]
     coo_raft: String,
 
-    /// Indicate the database path of the coordinator raft module
+    /// 指定 raft 数据存储路径
     #[structopt(long = "db-path", default_value = "./data")]
     db_path: String,
 
-    /// Broker listen grpc address
+    /// Indicate the Coordinator Raft Leader gprc address
+    #[structopt(long = "raft-leader", default_value = "")]
+    raft_leader: String,
+
+    /// Broker 模块自身监听的 grpc 地址
     #[structopt(short = "b", default_value = "")]
     broker: String,
 
-    /// Slave listen grpc address
-    #[structopt(short = "s", default_value = "")]
-    slave: String,
-
-    /// Indicate the Coordinator Raft Leader gprc address
+    /// 目标 Coo 地址，提供给本 Broker 模块获取自身信息，为空时默认为 .coo 值
     #[structopt(long = "coo-leader", default_value = "")]
     coo_leader: String,
+
+    /// Slave 模块自身监听的 grpc 地址
+    #[structopt(short = "s", default_value = "")]
+    slave: String,
 }
 
+#[derive(StructOpt)]
+struct CooArgs {}
+
 impl Args {
-    fn validate(&self) -> Result<()> {
+    fn validate(&mut self) -> Result<()> {
         // 规则1: slave不为空时，broker和coo必须为空
         if !self.slave.is_empty() && (!self.broker.is_empty() || !self.coo.is_empty()) {
             return Err(anyhow!(
@@ -60,7 +68,15 @@ impl Args {
             ));
         }
 
-        // 规则3: IP:PORT格式验证
+        // 规则4: 有 broker 模块，但是其 coo_leader 为空，默认为 .coo 值
+        if !self.broker.is_empty() && self.coo_leader.is_empty() {
+            self.coo_leader = self.coo.clone();
+            if self.coo_leader.is_empty() {
+                return Err(anyhow!("must specify the coo-leader address"));
+            }
+        }
+
+        // 规则5: IP:PORT格式验证
         let validate_addr = |name: &str, addr: &str| -> Result<()> {
             if !addr.is_empty() {
                 addr.parse::<SocketAddr>().map_err(|_| {
@@ -74,11 +90,12 @@ impl Args {
             Ok(())
         };
 
-        validate_addr("broker", &self.broker)?;
         validate_addr("coo", &self.coo)?;
         validate_addr("coo_raft", &self.coo_raft)?;
-        validate_addr("slave", &self.slave)?;
+        validate_addr("raft_leader", &self.raft_leader)?;
+        validate_addr("broker", &self.broker)?;
         validate_addr("coo_leader", &self.coo_leader)?;
+        validate_addr("slave", &self.slave)?;
 
         Ok(())
     }
@@ -86,7 +103,7 @@ impl Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::from_args();
+    let mut args = Args::from_args();
     args.validate()?;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -99,7 +116,7 @@ async fn main() -> Result<()> {
             db_path.as_os_str(),
             args.coo,
             args.coo_raft,
-            args.coo_leader.clone(),
+            args.raft_leader.clone(),
         );
         builder = builder.coo(coo);
     }
@@ -111,6 +128,9 @@ async fn main() -> Result<()> {
     if !args.slave.is_empty() {
         builder = builder.slave(Slave);
     }
-    builder.build().run(args.coo_leader).await?;
+    builder
+        .build()
+        .run(Arc::new(Mutex::new(args.coo_leader)))
+        .await?;
     Ok(())
 }

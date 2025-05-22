@@ -8,7 +8,7 @@ import "common.proto";
 
 service BrokerCooService {
     rpc Auth (AuthReq) returns (AuthResp);
-    rpc List (commonsvc.CooListReq) returns (commonsvc.CooListResp);
+    rpc List (commonsvc.CooListReq) returns (stream commonsvc.CooListResp);
     rpc Report (stream BrokerState) returns (stream BrokerStateResp);
     rpc Pull (PullReq) returns (stream commonsvc.TopicList);
 }

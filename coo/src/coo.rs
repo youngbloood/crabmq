@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
 use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
 use grpcx::commonsvc;
+use grpcx::commonsvc::CooListResp;
 use grpcx::commonsvc::TopicListAdd;
 use grpcx::commonsvc::TopicListInit;
 use grpcx::commonsvc::topic_list;
@@ -17,21 +18,24 @@ use log::error;
 use log::info;
 use partition::PartitionManager;
 use raftx::{MessageType as AllMessageType, RaftNode};
-use std::ffi::OsStr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::interval;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 use tonic::transport::Server;
 
 #[derive(Clone)]
 pub struct Coordinator {
-    id: u32,
+    pub id: u32,
     // coordinator 节点监听的 grpc 地址
-    coo_addr: String,
+    pub coo_addr: String,
     // coordinator 节点间的 raft 通信模块监听的 grpc 地址
-    raft_addr: String,
+    pub raft_addr: String,
     // coordinator 节点指向的 raft leader 节点地址 （raft-leader 监听的地址）
     raft_leader_addr: String,
 
@@ -62,9 +66,12 @@ impl Coordinator {
         raft_addr: String,
         raft_leader_addr: String,
     ) -> Self {
-        let (raft_node, raft_node_sender) = RaftNode::new(id as u64, db_path, raft_addr.clone());
+        let (raft_node, raft_node_sender) =
+            RaftNode::new(id, db_path, raft_addr.clone(), coo_addr.clone());
         let raft_node = Arc::new(raft_node);
-        let coo = Self {
+
+        println!("coo_addr = {}, raft_addr ={}", coo_addr, raft_addr);
+        Self {
             id,
             coo_addr,
             raft_addr,
@@ -76,34 +83,19 @@ impl Coordinator {
             partition_mgr: PartitionManager::new(PartitionPolicy::default()),
             broker_event_bus: EventBus::new(),
             client_event_bus: EventBus::new(),
-        };
-        // tokio::spawn(start_coo_service(coo.clone()));
-        // tokio::spawn(async move {
-        //     if !raft_leader_addr.is_empty() {
-        //         let _ = raft_node.join(raft_leader_addr).await;
-        //     }
-        //     raft_node.run().await
-        // });
-        coo
+        }
     }
-
-    // pub async fn start_server(self: Arc<Self>) -> Result<()> {
-    //     let brokercoo_svc = BrokerCooServiceServer::new(self);
-    //     let clientcoo_svc = ClientCooServiceServer::new(self);
-
-    //     match Server::builder()
-    //         .add_service(brokercoo_svc)
-    //         .add_service(clientcoo_svc)
-    //         .serve(self.coo_addr)
-    //         .await
-    //     {
-    //         Ok(_) => todo!(),
-    //         Err(_) => todo!(),
-    //     }
-    // }
 
     pub async fn is_leader(&self) -> bool {
         self.raft_node.is_leader().await
+    }
+
+    pub async fn get_raft_leader_addr(&self) -> Option<String> {
+        self.raft_node.get_raft_leader_addr().await
+    }
+
+    pub async fn get_coo_leader_addr(&self) -> Option<String> {
+        self.raft_node.get_coo_leader_addr().await
     }
 
     /// broker_pull
@@ -120,14 +112,22 @@ impl Coordinator {
             .or_insert_with(|| BrokerNode { state });
     }
 
+    /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
+        // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
+        self.start_leader_checker();
+
+        // 启动 raft-node: 加入目标节点，并启动 raft 通信的 grpc 服务
         let raft_node = self.raft_node.clone();
         let raft_leader_addr = self.raft_leader_addr.clone();
         tokio::spawn(async move {
+            let raft_node_clone = raft_node.clone();
+            tokio::spawn(async move {
+                raft_node_clone.run().await;
+            });
             if !raft_leader_addr.is_empty() {
                 let _ = raft_node.join(raft_leader_addr).await;
             }
-            raft_node.run().await;
         });
 
         let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
@@ -149,32 +149,106 @@ impl Coordinator {
         Ok(())
     }
 
+    // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
+    fn start_leader_checker(&self) {
+        let raft_node = self.raft_node.clone();
+        let broker_event_bus = self.broker_event_bus.clone();
+        let client_event_bus = self.client_event_bus.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(2));
+            let mut become_leader = false;
+            loop {
+                ticker.tick().await;
+                if raft_node.is_leader().await {
+                    become_leader = true;
+                } else if become_leader {
+                    broker_event_bus
+                        .broadcast(PartitionEvent::NotLeader {
+                            new_leader_id: raft_node.get_id(),
+                            new_coo_leader_addr: raft_node
+                                .get_coo_leader_addr()
+                                .await
+                                .unwrap_or_default(),
+                            new_raft_leader_addr: raft_node
+                                .get_raft_leader_addr()
+                                .await
+                                .unwrap_or_default(),
+                        })
+                        .await;
+
+                    client_event_bus
+                        .broadcast(PartitionEvent::NotLeader {
+                            new_leader_id: raft_node.get_id(),
+                            new_coo_leader_addr: raft_node
+                                .get_coo_leader_addr()
+                                .await
+                                .unwrap_or_default(),
+                            new_raft_leader_addr: raft_node
+                                .get_raft_leader_addr()
+                                .await
+                                .unwrap_or_default(),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
     /// broker_pull
     ///
     /// 用于本地的 `broker` 获取 coo 中的 TopicList 最新数据
     pub fn broker_pull(
         &self,
         broker_id: u32,
-    ) -> Result<mpsc::UnboundedReceiver<commonsvc::TopicList>> {
-        let id = String::from("broker_pull_local");
-        let mut recver = self.broker_event_bus.subscribe(id)?;
+    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicList, Status>>> {
+        let id = format!("local_broker_{}", broker_id);
+        let mut recver = self.broker_event_bus.subscribe(id.clone())?;
+        let bus = self.broker_event_bus.clone();
 
         let (tx, rx) = mpsc::unbounded_channel();
         let init = self.get_all_topics("", &[broker_id], &[]);
         for v in init {
-            let _ = tx.send(v);
+            let _ = tx.send(Ok(v));
         }
+
+        let raft_node = self.raft_node.clone();
         tokio::spawn(async move {
             while let Some(part) = recver.recv().await {
                 match part {
+                    PartitionEvent::NotLeader {
+                        new_leader_id,
+                        new_coo_leader_addr,
+                        new_raft_leader_addr,
+                    } => {
+                        let coo_leader_addr = raft_node
+                            .get_coo_leader_addr()
+                            .await
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        let mut status = tonic::Status::new(
+                            tonic::Code::PermissionDenied,
+                            format!(
+                                "Leader changed to [{}:{}:{}]",
+                                new_leader_id, new_coo_leader_addr, new_raft_leader_addr
+                            ),
+                        );
+
+                        // 添加 leader 地址到 metadata
+                        status
+                            .metadata_mut()
+                            .insert("x-raft-leader", coo_leader_addr.parse().unwrap());
+                        let _ = tx.send(Err(status));
+                        break;
+                    }
                     PartitionEvent::NewTopic { topic, partitions } => {
-                        let _ = tx.send(convert_to_pull_resp(topic, partitions));
+                        let _ = tx.send(Ok(convert_to_pull_resp(topic, partitions)));
                     }
                     PartitionEvent::AddPartitions { topic, added } => {
-                        let _ = tx.send(convert_to_added_resp(topic, added));
+                        let _ = tx.send(Ok(convert_to_added_resp(topic, added)));
                     }
                 }
             }
+            bus.unsubscribe(&id);
         });
 
         Ok(rx)
@@ -220,18 +294,15 @@ impl Coordinator {
         }
         Ok(())
     }
-
-    async fn get_leader_addr(&self) -> Option<String> {
-        self.raft_node.get_leader_addr().await
-    }
 }
 
 #[derive(Debug, Clone)]
 pub enum PartitionEvent {
-    // NotLeader {
-    //     NewLeaderID: u32,
-    //     NewLeaderAddr: String,
-    // },
+    NotLeader {
+        new_leader_id: u32,
+        new_coo_leader_addr: String,
+        new_raft_leader_addr: String,
+    },
     NewTopic {
         topic: String,
         partitions: Arc<Vec<PartitionInfo>>,
@@ -244,20 +315,9 @@ pub enum PartitionEvent {
 
 #[tonic::async_trait]
 impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
-    type ReportStream = Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<
-                    Item = Result<brokercoosvc::BrokerStateResp, tonic::Status>,
-                > + Send,
-        >,
-    >;
-    type PullStream = Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<
-                    Item = Result<commonsvc::TopicList, tonic::Status>,
-                > + Send,
-        >,
-    >;
+    type ReportStream = tonic::codegen::BoxStream<brokercoosvc::BrokerStateResp>;
+    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicList>;
+    type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
 
     async fn auth(
         &self,
@@ -290,15 +350,31 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
     async fn list(
         &self,
         request: tonic::Request<commonsvc::CooListReq>,
-    ) -> std::result::Result<tonic::Response<commonsvc::CooListResp>, tonic::Status> {
-        if !self.is_leader().await {
-            if let Some(leader_addr) = self.get_leader_addr().await {
-                return Err(tonic::Status::permission_denied(leader_addr));
-            }
-            return Err(tonic::Status::permission_denied("no leader"));
-        }
+    ) -> std::result::Result<tonic::Response<Self::ListStream>, tonic::Status> {
+        let peer = self.raft_node.get_peer();
+        let mut list = vec![];
+        let leader_id = self.raft_node.get_leader_id().await;
+        peer.iter().for_each(|v| {
+            let id = v.id as u32;
+            list.push(commonsvc::CooInfo {
+                act: commonsvc::CooInfoAction::Add.into(),
+                id,
+                coo_addr: v.coo_addr.clone(),
+                raft_addr: v.raft_addr.clone(),
+                role: if id == leader_id {
+                    commonsvc::CooRole::Leader.into()
+                } else {
+                    commonsvc::CooRole::Follower.into()
+                },
+            });
+        });
+        let (tx, rx) = mpsc::channel(128);
+        // TODO: 修改成流式
+        tokio::spawn(async move {
+            tx.send(Ok(CooListResp { list })).await;
+        });
 
-        todo!()
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     // /// Server streaming response type for the report method.
@@ -308,11 +384,13 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
     ) -> std::result::Result<tonic::Response<Self::ReportStream>, tonic::Status> {
         let mut strm = request.into_inner();
 
+        let coo_id = self.id;
         let brokers = self.brokers.clone();
 
         let output_stream = async_stream::try_stream! {
             while let Ok(Some(state)) = strm.message().await {
                 let id = state.id;
+                info!("Coo[{}] handle Broker[{}] BrokerState",coo_id,id);
 
                 brokers.entry(id).and_modify(|entry| {
                     // 修改值
@@ -337,9 +415,27 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
         &self,
         request: tonic::Request<brokercoosvc::PullReq>,
     ) -> std::result::Result<tonic::Response<Self::PullStream>, tonic::Status> {
+        if !self.raft_node.is_leader().await {
+            let coo_leader_addr = self
+                .raft_node
+                .get_coo_leader_addr()
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let mut status =
+                tonic::Status::new(tonic::Code::PermissionDenied, "Not Leader".to_string());
+
+            // 添加 leader 地址到 metadata
+            status
+                .metadata_mut()
+                .insert("x-raft-leader", coo_leader_addr.parse().unwrap());
+            return Err(status);
+        }
+
+        let remote_addr = request.remote_addr().unwrap();
         let req = request.into_inner();
         let broker_id = req.id;
-        let sub_id = format!("broker_{}", broker_id);
+        let sub_id = format!("broker_{}_{}", broker_id, remote_addr);
         // 获取事件流
         let mut event_rx = match self.broker_event_bus.subscribe(sub_id.clone()) {
             Ok(event_rx) => event_rx,
@@ -348,43 +444,62 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                 return Err(tonic::Status::already_exists(broker_id.to_string()));
             }
         };
-
         let bus = self.broker_event_bus.clone();
-
         let init_data = self.get_broker_assignments(broker_id);
-
-        let strm = async_stream::try_stream! {
+        let (resp_tx, resp_rx) = mpsc::channel(128);
+        tokio::spawn(async move {
             // 发送初始数据
             for resp in init_data {
-                yield resp;
+                let _ = resp_tx.send(Ok(resp)).await;
             }
 
             // 监听事件
             while let Some(event) = event_rx.recv().await {
                 match event {
+                    PartitionEvent::NotLeader {
+                        new_leader_id,
+                        new_coo_leader_addr,
+                        new_raft_leader_addr,
+                    } => {
+                        let mut status = tonic::Status::new(
+                            tonic::Code::PermissionDenied,
+                            format!(
+                                "Leader changed to [{}:{}:{}]",
+                                new_leader_id, new_coo_leader_addr, new_raft_leader_addr
+                            ),
+                        );
+
+                        // 添加新的 leader 地址到 metadata
+                        status
+                            .metadata_mut()
+                            .insert("x-raft-leader", new_coo_leader_addr.parse().unwrap());
+
+                        // 发送错误并终止流
+                        let _ = resp_tx.send(Err(status)).await;
+                        break;
+                    }
                     PartitionEvent::NewTopic { topic, partitions } => {
-                        yield convert_to_pull_resp(topic,partitions);
+                        let _ = resp_tx
+                            .send(Ok(convert_to_pull_resp(topic, partitions)))
+                            .await;
                     }
                     // 处理其他事件类型...
-                    _ => {}
+                    PartitionEvent::AddPartitions { topic, added } => {
+                        let _ = resp_tx.send(Ok(convert_to_added_resp(topic, added))).await;
+                    }
                 }
             }
             // 连接结束时取消订阅
             bus.unsubscribe(&sub_id);
-        };
-        Ok(tonic::Response::new(Box::pin(strm)))
+        });
+        Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
     }
 }
 
 #[tonic::async_trait]
 impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
-    type PullStream = Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<
-                    Item = Result<commonsvc::TopicList, tonic::Status>,
-                > + Send,
-        >,
-    >;
+    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicList>;
+    type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
 
     async fn auth(
         &self,
@@ -399,7 +514,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
     async fn list(
         &self,
         request: tonic::Request<commonsvc::CooListReq>,
-    ) -> std::result::Result<tonic::Response<commonsvc::CooListResp>, tonic::Status> {
+    ) -> std::result::Result<tonic::Response<Self::ListStream>, tonic::Status> {
         todo!()
     }
 
@@ -454,8 +569,19 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         &self,
         request: tonic::Request<clientcoosvc::AddPartitionsReq>,
     ) -> std::result::Result<tonic::Response<clientcoosvc::AddPartitionsResp>, tonic::Status> {
-        // TODO: 检查该topic是否存在，检查partition>0
         let req = request.into_inner();
+        if !self.partition_mgr.has_topic(&req.topic) {
+            return Err(tonic::Status::new(
+                tonic::Code::InvalidArgument,
+                format!("Not has topic: {}", &req.token),
+            ));
+        }
+        if req.partition == 0 {
+            return Err(tonic::Status::new(
+                tonic::Code::InvalidArgument,
+                "partition must be greater than zero",
+            ));
+        }
         let added =
             self.partition_mgr
                 .add_partitions(&req.topic, req.partition, self.brokers.clone());
@@ -488,6 +614,23 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         &self,
         request: tonic::Request<clientcoosvc::PullReq>,
     ) -> std::result::Result<tonic::Response<Self::PullStream>, tonic::Status> {
+        if !self.raft_node.is_leader().await {
+            let coo_leader_addr = self
+                .raft_node
+                .get_coo_leader_addr()
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let mut status =
+                tonic::Status::new(tonic::Code::PermissionDenied, "Not Leader".to_string());
+
+            // 添加 leader 地址到 metadata
+            status
+                .metadata_mut()
+                .insert("x-raft-leader", coo_leader_addr.parse().unwrap());
+
+            return Err(status);
+        }
         let remote_addr = request.remote_addr().unwrap().to_string();
         let req = request.into_inner();
         let sub_id = format!("client_{}", remote_addr);
@@ -495,33 +638,55 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
             Ok(rx) => rx,
             Err(_) => return Err(tonic::Status::already_exists(remote_addr)),
         };
+
         let init_data = self.get_all_topics(&req.topic, &req.broker_ids, &req.partitions);
         let bus: EventBus<PartitionEvent> = self.client_event_bus.clone();
+        let (resp_tx, resp_rx) = mpsc::channel(128);
 
-        let stream = async_stream::try_stream! {
+        tokio::spawn(async move {
             for resp in init_data {
-                yield resp;
+                resp_tx.send(Ok(resp)).await;
             }
-
 
             while let Some(event) = event_rx.recv().await {
                 match event {
+                    PartitionEvent::NotLeader {
+                        new_leader_id,
+                        new_coo_leader_addr,
+                        new_raft_leader_addr,
+                    } => {
+                        let mut status = tonic::Status::new(
+                            tonic::Code::PermissionDenied,
+                            format!(
+                                "Leader changed to [{}:{}:{}]",
+                                new_leader_id, new_coo_leader_addr, new_raft_leader_addr
+                            ),
+                        );
+
+                        // 添加新的 leader 地址到 metadata
+                        status
+                            .metadata_mut()
+                            .insert("x-raft-leader", new_coo_leader_addr.parse().unwrap());
+
+                        // 发送错误并终止流
+                        resp_tx.send(Err(status)).await;
+                        break;
+                    }
                     PartitionEvent::NewTopic { topic, partitions } => {
-                        yield convert_to_pull_resp(topic, partitions);
+                        resp_tx
+                            .send(Ok(convert_to_pull_resp(topic, partitions)))
+                            .await;
                     }
                     // 处理其他事件...
                     PartitionEvent::AddPartitions { topic, added } => {
-                        yield convert_to_added_resp(topic, added);
+                        resp_tx.send(Ok(convert_to_added_resp(topic, added))).await;
                     }
                 }
             }
-
             bus.unsubscribe(&sub_id);
+        });
 
-            // yeild tonic::Status::new(tonic::Code::Unknown,"11");
-        };
-
-        Ok(tonic::Response::new(Box::pin(stream)))
+        Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
     }
 }
 

@@ -37,5 +37,26 @@ message CooListReq {
 }
 
 message CooListResp {
+    repeated CooInfo list = 1;
+}
 
+message CooInfo {
+    CooInfoAction act = 1;
+    uint32 id = 2;
+    string coo_addr = 3;
+    string raft_addr = 4;
+    CooRole role = 5;
+}
+
+enum CooInfoAction {
+    Add = 0;
+    Remove = 1;
+    NewLeader = 2;
+}
+
+enum CooRole {
+    Leader = 0;
+    Candidate = 1;
+    Follower = 2;
+    Learner = 3;
 }

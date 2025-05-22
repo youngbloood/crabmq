@@ -17,6 +17,7 @@ impl<T: Clone + Send + 'static> EventBus<T> {
     }
 
     pub fn subscribe(&self, id: String) -> Result<mpsc::UnboundedReceiver<T>> {
+        // 需要考虑重复问题吗？
         if self.subscriptions.contains_key(&id) {
             return Err(anyhow!(format!(
                 "EventBus Key[{}] has been subscribed",

@@ -10,15 +10,15 @@ use grpcx::{
     },
     commonsvc::TopicList,
 };
-use log::{error, info};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use log::{debug, error, info};
+use std::{sync::Arc, time::Duration};
 use storagev2::Storage;
 use tokio::{sync::mpsc, time::interval};
 use tonic::{Request, Response, Status, async_trait, transport::Server};
 
 use crate::{
     consumer_group::{ConsumerGroup, SubSession},
-    message_bus::{self, MessageBus},
+    message_bus::MessageBus,
     partition::PartitionManager,
 };
 
@@ -40,7 +40,7 @@ impl<T: Storage> Broker<T> {
             id,
             broker_addr,
             storage,
-            partitions: PartitionManager::new(id, coo_addr),
+            partitions: PartitionManager::new(id),
             consumers: ConsumerGroup::new(),
             message_bus: MessageBus::new(),
             state_bus: Arc::new(DashMap::new()),
@@ -108,8 +108,14 @@ impl<T: Storage> Broker<T> {
     pub fn get_state_reciever(&self, module: String) -> mpsc::Receiver<BrokerState> {
         let (tx, rx) = mpsc::channel(1);
         self.state_bus.insert(module, tx);
-
         rx
+    }
+
+    /// 释放 module 模块的发送器，该模块的 rx 会收到错误
+    pub fn unleash_state_reciever(&self, module: &str) {
+        if let Some((m, _tx)) = self.state_bus.remove(module) {
+            debug!("unleash state reciever: {}", m);
+        }
     }
 
     pub fn get_state(&self) -> BrokerState {
@@ -121,10 +127,8 @@ impl<T: Storage> Broker<T> {
     }
 
     pub async fn run(&self) -> Result<()> {
-        let svc = ClientBrokerServiceServer::new(self.clone());
-        let server = Server::builder().add_service(svc);
-
         let broker = self.clone();
+        // 定时发送 BrokerState 至 state_bus
         let broker_state_handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(5));
             let timeout = Duration::from_millis(100);
@@ -139,8 +143,13 @@ impl<T: Storage> Broker<T> {
             }
         });
 
+        let broker = self.clone();
+        // 启动 grpc service
         let broker_socket = self.broker_addr.parse().expect("need correct socket addr");
         let server_handle = tokio::spawn(async move {
+            let svc = ClientBrokerServiceServer::new(broker);
+            let server = Server::builder().add_service(svc);
+            info!("Broker listen: {}", broker_socket);
             match server.serve(broker_socket).await {
                 Ok(_) => {
                     info!("Broker service listen at: {}", broker_socket);

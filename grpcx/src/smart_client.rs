@@ -1,26 +1,30 @@
 use std::{
-    clone,
+    collections::HashSet,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
 
-use futures::Stream;
-use tokio::sync::{Mutex, mpsc};
+use futures::{Stream, StreamExt};
+use log::debug;
+use tokio::{
+    sync::{Mutex, RwLock},
+    time,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Code, IntoStreamingRequest, Request, Response, Status, Streaming,
     transport::{Channel, Endpoint},
 };
 
-// 核心客户端结构
-#[derive(Clone)]
-pub struct SmartClient {
-    endpoints: Arc<Vec<String>>,
-    current_leader: Arc<Mutex<String>>,
-    channels: Arc<Mutex<Vec<(Channel, String)>>>,
-    retry_policy: RetryPolicy,
+use crate::commonsvc;
+
+#[derive(Debug, Clone)]
+struct NodeState {
+    addr: String,
+    last_healthy: Option<time::Instant>,
+    is_leader: bool,
 }
 
 #[derive(Clone)]
@@ -40,18 +44,30 @@ impl Default for RetryPolicy {
     }
 }
 
+#[derive(Clone)]
+pub struct SmartClient {
+    node_states: Arc<RwLock<Vec<NodeState>>>,
+    channels: Arc<Mutex<Vec<(Channel, String)>>>,
+    retry_policy: RetryPolicy,
+    health_check_interval: Duration,
+}
+
 impl SmartClient {
-    pub fn new(endpoints: Vec<String>) -> Self {
-        let initial_leader = endpoints
-            .first()
-            .expect("Not allow empty endpoints")
-            .clone();
+    pub fn new(initial_endpoints: Vec<String>) -> Self {
+        let node_states = initial_endpoints
+            .into_iter()
+            .map(|addr| NodeState {
+                addr,
+                last_healthy: None,
+                is_leader: false,
+            })
+            .collect();
 
         Self {
-            endpoints: Arc::new(endpoints),
-            current_leader: Arc::new(Mutex::new(initial_leader)),
+            node_states: Arc::new(RwLock::new(node_states)),
             channels: Arc::new(Mutex::new(Vec::new())),
             retry_policy: RetryPolicy::default(),
+            health_check_interval: Duration::from_secs(30),
         }
     }
 
@@ -140,13 +156,17 @@ impl SmartClient {
         loop {
             let channel = self.get_channel().await?;
             match operation(channel).await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    debug!("SmartClient: operation success");
+                    return Ok(result);
+                }
                 Err(status) => {
+                    debug!("SmartClient: Status: {:?}", status);
                     if retries >= self.retry_policy.max_retries {
                         return Err(status.clone());
                     }
 
-                    self.handle_error(&status).await;
+                    self.handle_refresh_error(status).await;
                     retries += 1;
                     tokio::time::sleep(backoff).await;
                     backoff *= self.retry_policy.backoff_factor;
@@ -155,47 +175,188 @@ impl SmartClient {
         }
     }
 
+    /// 核心连接获取逻辑
     async fn get_channel(&self) -> Result<Channel, Status> {
-        let leader = self.current_leader.lock().await.clone();
-        if let Some((channel, _)) = self.find_channel(&leader).await {
-            return Ok(channel);
+        let nodes = self.node_states.read().await;
+
+        // 优先尝试最近健康的Leader
+        if let Some(leader) = nodes
+            .iter()
+            .find(|n| n.is_leader && n.last_healthy.is_some())
+        {
+            if let Some(chan) = self.try_get_existing_channel(&leader.addr).await {
+                return Ok(chan);
+            }
         }
 
-        // 新建连接
-        let endpoint = Endpoint::from_shared(leader.clone())
-            .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+        // 降级尝试其他健康节点
+        for node in nodes.iter().filter(|n| n.last_healthy.is_some()) {
+            if let Some(chan) = self.try_get_existing_channel(&node.addr).await {
+                return Ok(chan);
+            }
+        }
+
+        // 最后尝试所有节点
+        for node in nodes.iter() {
+            match self.create_channel(&node.addr).await {
+                Ok(chan) => return Ok(chan),
+                Err(_) => continue,
+            }
+        }
+
+        Err(Status::new(Code::Unavailable, "No available nodes"))
+    }
+
+    async fn try_get_existing_channel(&self, addr: &str) -> Option<Channel> {
+        let channels = self.channels.lock().await;
+        channels
+            .iter()
+            .find(|(_, a)| a == addr)
+            .map(|(c, _)| c.clone())
+    }
+
+    async fn create_channel(&self, addr: &str) -> Result<Channel, Status> {
+        let addr = if !(addr.starts_with("http") || addr.starts_with("https")) {
+            format!("http://{}", addr)
+        } else {
+            addr.to_string()
+        };
+        let endpoint = Endpoint::from_shared(addr.clone())
+            .map_err(|e| Status::new(Code::Internal, e.to_string()))?
+            .connect_timeout(Duration::from_secs(3));
 
         let channel = endpoint
             .connect()
             .await
             .map_err(|e| Status::new(Code::Unavailable, e.to_string()))?;
 
-        self.channels.lock().await.push((channel.clone(), leader));
+        self.channels.lock().await.push((channel.clone(), addr));
         Ok(channel)
     }
 
-    async fn find_channel(&self, address: &str) -> Option<(Channel, String)> {
-        self.channels
-            .lock()
-            .await
-            .iter()
-            .find(|(c, addr)| addr == address)
-            .cloned()
-    }
+    /// 动态刷新节点状态
+    pub async fn refresh_coo_endpoints<F, Fut>(&self, r: F)
+    where
+        F: Fn(Channel) -> Fut,
+        Fut: std::future::Future<
+                Output = Result<Response<Streaming<commonsvc::CooListResp>>, Status>,
+            >,
+    {
+        let mut backoff = self.retry_policy.backoff_base;
 
-    async fn handle_error(&self, status: &Status) {
-        if let Some(new_leader) = extract_leader_address(status) {
-            let mut current_leader = self.current_leader.lock().await;
-            *current_leader = new_leader.clone();
-            self.cleanup_channels().await;
+        loop {
+            match self.get_channel().await {
+                Ok(chan) => match r(chan).await {
+                    Ok(response) => {
+                        let mut stream = response.into_inner();
+                        while let Some(Ok(resp)) = stream.next().await {
+                            self.process_coo_response(resp).await;
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        self.handle_refresh_error(e).await;
+                    }
+                },
+                Err(e) => {
+                    self.handle_refresh_error(e).await;
+                }
+            }
+
+            time::sleep(backoff).await;
+            backoff = std::cmp::min(
+                backoff * self.retry_policy.backoff_factor,
+                Duration::from_secs(5),
+            );
         }
     }
 
-    async fn cleanup_channels(&self) {
-        let mut channels = self.channels.lock().await;
-        let current_leader = self.current_leader.lock().await;
-        channels.retain(|(c, addr)| addr.eq(&*current_leader));
+    async fn process_coo_response(&self, resp: commonsvc::CooListResp) {
+        let mut nodes = self.node_states.write().await;
+
+        // 更新节点列表
+        let mut new_addrs = HashSet::new();
+        for info in resp.list {
+            let addr = info.coo_addr;
+            new_addrs.insert(addr.clone());
+
+            if let Some(existing) = nodes.iter_mut().find(|n| n.addr == addr) {
+                existing.is_leader = info.role == commonsvc::CooRole::Leader.into();
+                existing.last_healthy = Some(time::Instant::now());
+            } else {
+                nodes.push(NodeState {
+                    addr,
+                    is_leader: info.role == commonsvc::CooRole::Leader.into(),
+                    last_healthy: Some(time::Instant::now()),
+                });
+            }
+        }
+
+        // 清理失效节点
+        nodes.retain(|n| new_addrs.contains(&n.addr));
     }
+
+    async fn handle_refresh_error(&self, status: Status) {
+        if let Some(addr) = extract_leader_address(&status) {
+            if addr.is_empty() || addr == "unknown" {
+                return;
+            }
+            self.mark_node_unhealthy(&addr).await;
+        }
+    }
+
+    async fn mark_node_unhealthy(&self, addr: &str) {
+        let mut nodes = self.node_states.write().await;
+        if let Some(node) = nodes.iter_mut().find(|n| n.addr == addr) {
+            node.last_healthy = None;
+            node.is_leader = false;
+        }
+
+        // 清理失效连接
+        let mut channels = self.channels.lock().await;
+        channels.retain(|(_, a)| a != addr);
+    }
+
+    /// 后台健康检查任务
+    pub fn start_health_check(&self) {
+        let client = self.clone();
+        tokio::spawn(async move {
+            loop {
+                client.check_nodes_health().await;
+                time::sleep(client.health_check_interval).await;
+            }
+        });
+    }
+
+    async fn check_nodes_health(&self) {
+        let nodes = self.node_states.read().await.clone();
+
+        for node in nodes.iter() {
+            match self.create_channel(&node.addr).await {
+                Ok(_) => {
+                    self.mark_node_healthy(&node.addr).await;
+                }
+                Err(_) => {
+                    self.mark_node_unhealthy(&node.addr).await;
+                }
+            }
+        }
+    }
+
+    async fn mark_node_healthy(&self, addr: &str) {
+        let mut nodes = self.node_states.write().await;
+        if let Some(node) = nodes.iter_mut().find(|n| n.addr == addr) {
+            node.last_healthy = Some(time::Instant::now());
+        }
+    }
+}
+
+fn extract_leader_address(status: &Status) -> Option<String> {
+    status
+        .metadata()
+        .get("x-raft-leader")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
 }
 
 // 智能流包装器
@@ -220,9 +381,10 @@ impl<T> Stream for SmartStream<T> {
                 if let Some(new_leader) = extract_leader_address(&status) {
                     let client = self.client.clone();
                     tokio::spawn(async move {
-                        let mut current_leader = client.current_leader.lock().await;
-                        *current_leader = new_leader;
-                        client.cleanup_channels().await;
+                        client.handle_refresh_error(status).await;
+                        // let mut current_leader = client.current_leader.lock().await;
+                        // *current_leader = new_leader;
+                        // client.cleanup_channels().await;
                     });
                     return Poll::Ready(Some(Err(Status::new(
                         Code::Unavailable,
@@ -236,17 +398,6 @@ impl<T> Stream for SmartStream<T> {
         }
     }
 }
-
-// 工具函数
-fn extract_leader_address(status: &Status) -> Option<String> {
-    status
-        .metadata()
-        .get("x-raft-leader")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
-// 智能流包装器
 
 /// 流包装器改进
 pub struct SmartReqStream<T>
@@ -278,88 +429,3 @@ where
         Request::new(self.inner)
     }
 }
-
-//// 实例
-//// Unary调用（键值存储服务）
-// mod kv_store {
-//     tonic::include_proto!("kv_store");
-// }
-
-// #[tokio::main]
-// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let client = SmartClient::new(vec![
-//         "http://node1:50051".to_string(),
-//         "http://node2:50051".to_string(),
-//     ]).await?;
-
-//     // 设置值
-//     let set_response = client
-//         .execute_unary(
-//             kv_store::SetRequest {
-//                 key: "foo".into(),
-//                 value: "bar".into(),
-//             },
-//             |chan, req| kv_store::KvClient::new(chan).set(req),
-//         )
-//         .await?;
-
-//     // 获取值
-//     let get_response = client
-//         .execute_unary(
-//             kv_store::GetRequest { key: "foo".into() },
-//             |chan, req| kv_store::KvClient::new(chan).get(req),
-//         )
-//         .await?;
-
-//     println!("Value: {:?}", get_response.into_inner().value);
-//     Ok(())
-// }
-
-//// 使用实例
-//// 双向流（聊天服务）
-// mod chat {
-//     tonic::include_proto!("chat");
-// }
-
-// #[tokio::main]
-// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let client = SmartClient::new(vec![
-//         "http://node1:50052".to_string(),
-//         "http://node2:50052".to_string(),
-//     ]).await?;
-
-//     // 打开聊天流
-//     let mut stream = client
-//         .open_stream(
-//             chat::ConnectRequest {
-//                 user: "Alice".into(),
-//             },
-//             |chan, req| chat::ChatClient::new(chan).join_chat(req),
-//         )
-//         .await?;
-
-//     // 接收消息
-//     let recv_task = tokio::spawn(async move {
-//         while let Some(msg) = stream.next().await {
-//             match msg {
-//                 Ok(msg) => println!("Received: {}", msg.text),
-//                 Err(e) => eprintln!("Stream error: {}", e),
-//             }
-//         }
-//     });
-
-//     // 发送消息
-//     let sender = client.clone();
-//     let send_task = tokio::spawn(async move {
-//         let message = chat::ChatMessage {
-//             text: "Hello world!".into(),
-//         };
-//         sender
-//             .execute_unary(message, |chan, req| chat::ChatClient::new(chan).send(req))
-//             .await
-//             .unwrap();
-//     });
-
-//     tokio::try_join!(recv_task, send_task)?;
-//     Ok(())
-// }

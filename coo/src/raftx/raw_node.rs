@@ -1,40 +1,47 @@
 use super::mailbox_message_type::MessageType as AllMessageType;
 use super::storage::SledStorage;
 use super::{
-    grpc_service::{RaftServiceImpl, start_grpc_server},
+    // grpc_service::{RaftServiceImpl, start_grpc_server},
     peer::PeerState,
 };
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
+use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
 use grpcx::cooraftsvc::{self, ConfChangeReq, RaftMessage, raft_service_client::RaftServiceClient};
 use log::{debug, error, info, trace, warn};
 use protobuf::Message as PbMessage;
 use raft::{Config, StateRole, prelude::*, raw_node::RawNode};
 use sled::Db;
-use std::ffi::OsStr;
 use std::{num::NonZero, sync::Arc, time::Instant};
 use tokio::{
     select,
     sync::{Mutex, mpsc, oneshot},
     time::{self, Duration, interval},
 };
+use tonic::Response;
+use tonic::transport::Server;
 use tonic::{Request, transport::Channel};
 
 #[derive(Clone)]
 pub struct RaftNode {
-    id: u64,
+    id: u32,
     // raft nodo
     raw_node: Arc<Mutex<RawNode<SledStorage>>>,
+
+    _my_mailbox_sender: mpsc::Sender<AllMessageType>,
     // 本节点收到的 信息
     my_mailbox: Arc<Mutex<mpsc::Receiver<AllMessageType>>>,
     // 将消息分发到所有的 mailboxes 中
     mailboxes: Arc<DashMap<u64, mpsc::Sender<RaftMessage>>>,
-    // 集群中其他节点的信息
+    // 集群中其他节点的信息(包含自身)
     peer: Arc<DashMap<u64, Arc<PeerState>>>,
 
     db: Db, // Key-value stor
 
-    grpc_addr: String,
+    // 该 raft 节点监听地址
+    raft_grpc_addr: String,
+    // 该 coo 节点监听地址
+    coo_grpc_addr: String,
 }
 
 unsafe impl Send for RaftNode {}
@@ -42,13 +49,14 @@ unsafe impl Sync for RaftNode {}
 
 impl RaftNode {
     pub fn new<T: AsRef<std::path::Path>>(
-        id: u64,
+        id: u32,
         db_path: T,
-        grpc_addr: String,
+        raft_grpc_addr: String,
+        coo_grpc_addr: String,
     ) -> (Self, mpsc::Sender<AllMessageType>) {
         let db = sled::open(db_path).expect("Failed to open sled DB");
         let config = Config {
-            id,
+            id: id as u64,
             election_tick: 10,
             heartbeat_tick: 3,
             applied: 0,
@@ -87,33 +95,72 @@ impl RaftNode {
         //     ..Default::default()
         // };
 
-        let storage = SledStorage::new(id, db.clone());
+        let storage = SledStorage::new(id as u64, db.clone());
         let raw_node = Arc::new(Mutex::new(
             RawNode::with_default_logger(&config, storage).expect("Failed to create Raft node"),
         ));
 
         // Start Tonic gRPC server
-        let (tx_grpc, rx_grpc) = mpsc::channel(10);
-        let raft_service = RaftServiceImpl::new(id, raw_node.clone(), tx_grpc.clone());
+        let (tx_grpc, rx_grpc) = mpsc::channel(128);
 
+        // let raft_service = RaftServiceImpl::new(id, raw_node.clone(), tx_grpc.clone());
         // 转换为 String
-        tokio::spawn(start_grpc_server(grpc_addr.clone(), raft_service));
+        // tokio::spawn(start_grpc_server(grpc_addr.clone(), raft_service));
 
-        (
-            RaftNode {
-                id,
-                raw_node,
-                my_mailbox: Arc::new(Mutex::new(rx_grpc)),
-                mailboxes: Arc::new(DashMap::new()),
-                peer: Arc::new(DashMap::new()),
-                db,
-                grpc_addr,
-            },
-            tx_grpc,
-        )
+        let rn = RaftNode {
+            id,
+            raw_node,
+            _my_mailbox_sender: tx_grpc.clone(),
+            my_mailbox: Arc::new(Mutex::new(rx_grpc)),
+            mailboxes: Arc::new(DashMap::new()),
+            peer: Arc::new(DashMap::new()),
+            db,
+            raft_grpc_addr: raft_grpc_addr.clone(),
+            coo_grpc_addr: coo_grpc_addr.clone(),
+        };
+        rn.peer.insert(
+            id.into(),
+            Arc::new(PeerState::new(id.into(), raft_grpc_addr, coo_grpc_addr)),
+        );
+
+        (rn, tx_grpc)
+    }
+
+    async fn start_grpc_service(&self) {
+        let addr = self.raft_grpc_addr.parse().unwrap();
+        let svc = RaftServiceServer::new(self.clone());
+        info!("Coordinator-Raft listen: {}", addr);
+        match Server::builder().add_service(svc).serve(addr).await {
+            Ok(_) => {
+                info!("Coordinator-Raft server started at {}", addr);
+            }
+            Err(e) => panic!("Coordinator-Raft listen : {}, err: {:?}", addr, e),
+        }
+    }
+
+    pub fn get_id(&self) -> u32 {
+        self.id
+    }
+
+    pub async fn get_leader_id(&self) -> u32 {
+        self.raw_node.lock().await.raft.leader_id as u32
+    }
+
+    pub fn get_peer(&self) -> Vec<Arc<PeerState>> {
+        let mut list = vec![];
+        self.peer.iter().for_each(|v| {
+            list.push(v.value().clone());
+        });
+        list
     }
 
     pub async fn run(&self) {
+        // 开启 grpc 服务
+        let node = self.clone();
+        tokio::spawn(async move {
+            node.start_grpc_service().await;
+        });
+
         let mut interval = time::interval(Duration::from_millis(100));
         let mut print_interval = Instant::now();
         let mut is_initial_conf_committed = false;
@@ -149,13 +196,20 @@ impl RaftNode {
                                 continue;
                             }
 
-                            let remote_addr =
-                                String::from_utf8(cc.context.to_vec()).unwrap();
+                            let context_str = String::from_utf8(cc.context.to_vec()).unwrap();
+                            let remote_grpc_addr: Vec<_> =context_str
+                                .splitn(2, ",")
+                                .collect();
                             info!(
-                                "Node[{}] 收到：{} 的ConfChange = {:?}",
-                                self.id, remote_addr, &cc
+                                "Node[{}] 收到：{}:{} 的ConfChange = {:?}",
+                                self.id, remote_grpc_addr[0],remote_grpc_addr[1], &cc
                             );
-                            self.add_endpoint(cc.node_id, remote_addr.clone(), false, false)
+                            self.add_endpoint(
+                                cc.node_id,
+                                remote_grpc_addr[0].to_string(),
+                                remote_grpc_addr[1].to_string(),
+                                false,
+                                false)
                                 .await
                                 .unwrap();
 
@@ -179,14 +233,21 @@ impl RaftNode {
                                 continue;
                             }
 
-                            let remote_addr =
-                                String::from_utf8(cc.context.to_vec()).unwrap();
+                            let context_str = String::from_utf8(cc.context.to_vec()).unwrap();
+                            let remote_grpc_addr: Vec<_> = context_str
+                                .splitn(2, ",")
+                                .collect();
                             for cc in &cc.changes {
                                 info!(
-                                    "Node[{}] 收到：{} 的ConfChangeV2",
-                                    self.id, remote_addr
+                                    "Node[{}] 收到：[raft{}:coo{}] 的ConfChangeV2",
+                                    self.id, remote_grpc_addr[0], remote_grpc_addr[1]
                                 );
-                                self.add_endpoint(cc.node_id, remote_addr.clone(),false,false)
+                                self.add_endpoint(
+                                    cc.node_id,
+                                    remote_grpc_addr[0].to_string(),
+                                    remote_grpc_addr[1].to_string(),
+                                    false,
+                                    false)
                                     .await
                                     .unwrap();
                             }
@@ -216,10 +277,11 @@ impl RaftNode {
                         raw_node.tick();
                         if print_interval.elapsed() > Duration::from_secs(5) {
                             info!(
-                                "Node[{}] role = {:?}, peers.conf = {:?}",
+                                "Node[{}] role = {:?}, raft.pr().conf() = {:?}, peer = {:?}",
                                 self.id,
                                 raw_node.raft.state,
                                 raw_node.raft.prs().conf(),
+                                self.peer,
                             );
                             print_interval = Instant::now();
                         }
@@ -353,10 +415,17 @@ impl RaftNode {
                     cc.merge_from_bytes(&entry.data).unwrap();
 
                     // 确保 follower 收到该类型消息时增加 endpoint
-                    let remote_grpc_addr = String::from_utf8(cc.context.to_vec()).unwrap();
-                    self.add_endpoint(cc.node_id, remote_grpc_addr, false, false)
-                        .await
-                        .unwrap();
+                    let context_str = String::from_utf8(cc.context.to_vec()).unwrap();
+                    let remote_grpc_addr: Vec<_> = context_str.splitn(2, ",").collect();
+                    self.add_endpoint(
+                        cc.node_id,
+                        remote_grpc_addr[0].to_string(),
+                        remote_grpc_addr[1].to_string(),
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap();
 
                     let mut raw_node = self.raw_node.lock().await;
                     let cs = raw_node.apply_conf_change(&cc).unwrap();
@@ -371,10 +440,17 @@ impl RaftNode {
 
                     // 确保 follower 收到该类型消息时增加 endpoint
                     for cc in &ccv2.changes {
-                        let remote_grpc_addr = String::from_utf8(ccv2.context.to_vec()).unwrap();
-                        self.add_endpoint(cc.node_id, remote_grpc_addr, false, false)
-                            .await
-                            .unwrap();
+                        let context_str = String::from_utf8(ccv2.context.to_vec()).unwrap();
+                        let remote_grpc_addr: Vec<_> = context_str.splitn(2, ",").collect();
+                        self.add_endpoint(
+                            cc.node_id,
+                            remote_grpc_addr[0].to_string(),
+                            remote_grpc_addr[1].to_string(),
+                            false,
+                            false,
+                        )
+                        .await
+                        .unwrap();
                     }
 
                     let mut raw_node = self.raw_node.lock().await;
@@ -387,10 +463,12 @@ impl RaftNode {
     }
 
     async fn commit_self_conf_change(&self) {
+        let context = format!("{},{}", self.raft_grpc_addr, self.coo_grpc_addr);
         let cc = ConfChange {
             change_type: ConfChangeType::AddNode,
-            node_id: self.id,
-            context: self.grpc_addr.as_bytes().to_vec().into(),
+            node_id: self.id as u64,
+            context: context.as_bytes().to_vec().into(),
+            id: self.id as u64,
             ..Default::default()
         };
 
@@ -400,18 +478,21 @@ impl RaftNode {
     }
 
     pub async fn join(&self, remote_addr: String) -> Result<()> {
-        self.add_endpoint(0, remote_addr, true, true).await
+        self.add_endpoint(0, remote_addr, "".to_string(), true, true)
+            .await
     }
 
     async fn add_endpoint(
         &self,
         node_id: u64,
-        remote_addr: String,
+        remote_raft_addr: String,
+        remote_coo_addr: String,
         commit_self_conf_change: bool,
         sync: bool,
     ) -> Result<()> {
         let src_id = self.id;
-        let local_addr = self.grpc_addr.clone();
+        let raft_grpc_addr = self.raft_grpc_addr.clone();
+        let coo_grpc_addr = self.coo_grpc_addr.clone();
         let mailboxes = Arc::clone(&self.mailboxes);
         let peer = Arc::clone(&self.peer);
 
@@ -422,80 +503,79 @@ impl RaftNode {
                 // 连接到 Leader 的 gRPC 服务
                 match cooraftsvc::raft_service_client::RaftServiceClient::connect(format!(
                     "http://{}",
-                    remote_addr
+                    remote_raft_addr
                 ))
                 .await
                 {
                     Ok(mut client) => {
-                        let dst_id = if node_id != 0 {
-                            node_id
-                        } else {
-                            let resp = match client.get_id(Request::new(cooraftsvc::Empty {})).await
-                            {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    error!("Failed to get remote id: {:?}", e);
-                                    continue; // 继续重试
-                                }
+                        if let Ok(resp) = client.get_meta(Request::new(cooraftsvc::Empty {})).await
+                        {
+                            let resp = resp.into_inner();
+                            let dst_id = if node_id != 0 {
+                                node_id
+                            } else {
+                                resp.id as u64
                             };
+                            if dst_id == src_id as u64 {
+                                if sync {
+                                    let _ = tx_sync.send(None);
+                                }
+                                break;
+                            }
 
-                            let node_id = resp.into_inner().id as u64;
-                            debug!("node[{}] 获取目标id = {}", src_id, node_id);
-                            node_id
-                        };
-                        if dst_id == src_id {
-                            if sync {
+                            if mailboxes.contains_key(&dst_id) {
                                 let _ = tx_sync.send(None);
+                                break;
+                            }
+
+                            if commit_self_conf_change {
+                                let context = format!("{},{}", raft_grpc_addr, coo_grpc_addr);
+                                let cc = ConfChange {
+                                    change_type: ConfChangeType::AddNode,
+                                    node_id: src_id as u64,
+                                    context: context.into_bytes().into(),
+                                    id: 0,
+                                    ..Default::default()
+                                };
+
+                                let _ = client
+                                    .propose_conf_change(Request::new(ConfChangeReq {
+                                        version: 1,
+                                        message: cc.write_to_bytes().unwrap(),
+                                    }))
+                                    .await;
+                            }
+
+                            info!(
+                                "链接目标端成功: Node[{}]->Node[{}:{}], sync={}",
+                                src_id, dst_id, remote_raft_addr, sync
+                            );
+
+                            let (tx_msg, rx_msg) = mpsc::channel(1);
+                            let peer_state =
+                                Arc::new(PeerState::new(dst_id, resp.raft_addr, resp.coo_addr));
+                            let mut mb = Mailbox::new(
+                                src_id,
+                                dst_id as u32,
+                                NonZero::new(5_u64).unwrap(),
+                                client,
+                                rx_msg,
+                                peer_state.clone(),
+                            );
+                            mailboxes.insert(dst_id, tx_msg);
+                            peer.insert(dst_id, peer_state);
+                            let handle = tokio::spawn(async move { mb.start_serve().await });
+                            if sync {
+                                let _ = tx_sync.send(Some(handle));
                             }
                             break;
                         }
-
-                        if mailboxes.contains_key(&dst_id) {
-                            let _ = tx_sync.send(None);
-                            break;
-                        }
-                        debug!(
-                            "链接目标端成功: {}:{}:{}:{}",
-                            src_id, dst_id, remote_addr, sync
-                        );
-
-                        if commit_self_conf_change {
-                            let cc = ConfChange {
-                                change_type: ConfChangeType::AddNode,
-                                node_id: src_id,
-                                context: local_addr.into_bytes().into(),
-                                id: 0,
-                                ..Default::default()
-                            };
-
-                            let _ = client
-                                .propose_conf_change(Request::new(ConfChangeReq {
-                                    version: 1,
-                                    message: cc.write_to_bytes().unwrap(),
-                                }))
-                                .await;
-                        }
-
-                        let (tx_msg, rx_msg) = mpsc::channel(1);
-                        let peer_state = Arc::new(PeerState::new(dst_id, remote_addr));
-                        let mb = Mailbox::new(
-                            src_id,
-                            dst_id,
-                            NonZero::new(5_u64).unwrap(),
-                            client,
-                            rx_msg,
-                            peer_state.clone(),
-                        );
-                        mailboxes.insert(dst_id, tx_msg);
-                        peer.insert(dst_id, peer_state);
-                        let handle = tokio::spawn(start_mailbox(mb));
-                        if sync {
-                            let _ = tx_sync.send(Some(handle));
-                        }
-                        break;
                     }
                     Err(e) => {
-                        error!("Node[{}] 增加链接至 {} 失败: {:?}", src_id, remote_addr, e);
+                        error!(
+                            "Node[{}] 增加链接至 {} 失败: {:?}",
+                            src_id, remote_raft_addr, e
+                        );
                     }
                 };
                 // 等待下次链接
@@ -532,17 +612,131 @@ impl RaftNode {
             .map(|v| String::from_utf8(v.to_vec()).unwrap())
     }
 
-    pub async fn get_leader_addr(&self) -> Option<String> {
+    pub async fn get_raft_leader_addr(&self) -> Option<String> {
         let raw_node = self.raw_node.lock().await;
         self.peer
             .get(&raw_node.raft.leader_id)
-            .map(|v| v.get_addr().to_string())
+            .map(|v| v.get_raft_addr().to_string())
+    }
+
+    pub async fn get_coo_leader_addr(&self) -> Option<String> {
+        let raw_node = self.raw_node.lock().await;
+        self.peer
+            .get(&raw_node.raft.leader_id)
+            .map(|v| v.get_coo_addr().to_string())
+    }
+}
+
+#[tonic::async_trait]
+impl cooraftsvc::raft_service_server::RaftService for RaftNode {
+    async fn send_raft_message(
+        &self,
+        request: Request<cooraftsvc::RaftMessage>,
+    ) -> Result<Response<cooraftsvc::RaftResponse>, tonic::Status> {
+        match Message::parse_from_bytes(&request.into_inner().message) {
+            Ok(msg) => {
+                let _ = self
+                    ._my_mailbox_sender
+                    .send(AllMessageType::RaftMessage(msg))
+                    .await;
+                Ok(Response::new(cooraftsvc::RaftResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => {
+                return Ok(Response::new(cooraftsvc::RaftResponse {
+                    success: false,
+                    error: e.to_string(),
+                }));
+            }
+        }
+    }
+
+    async fn get_meta(
+        &self,
+        _request: tonic::Request<cooraftsvc::Empty>,
+    ) -> Result<Response<cooraftsvc::MetaResp>, tonic::Status> {
+        Ok(Response::new(cooraftsvc::MetaResp {
+            id: self.id,
+            raft_addr: String::new(),
+            coo_addr: "".to_string(),
+        }))
+    }
+
+    async fn propose_data(
+        &self,
+        _request: tonic::Request<cooraftsvc::ProposeDataReq>,
+    ) -> std::result::Result<tonic::Response<cooraftsvc::ProposeDataResp>, tonic::Status> {
+        let _ = self
+            ._my_mailbox_sender
+            .send(AllMessageType::RaftPropose((vec![], vec![])))
+            .await;
+        Ok(Response::new(cooraftsvc::ProposeDataResp {}))
+    }
+
+    async fn propose_conf_change(
+        &self,
+        request: tonic::Request<cooraftsvc::ConfChangeReq>,
+    ) -> std::result::Result<tonic::Response<cooraftsvc::ConfChangeResp>, tonic::Status> {
+        let req = request.into_inner();
+        let reason = match req.version {
+            1 => match ConfChange::parse_from_bytes(&req.message) {
+                Ok(cc) => {
+                    let _ = self
+                        ._my_mailbox_sender
+                        .send(AllMessageType::RaftConfChange(cc))
+                        .await;
+                    ""
+                }
+                Err(e) => &e.to_string(),
+            },
+
+            2 => match ConfChangeV2::parse_from_bytes(&req.message) {
+                Ok(cc) => {
+                    let _ = self
+                        ._my_mailbox_sender
+                        .send(AllMessageType::RaftConfChangeV2(cc))
+                        .await;
+                    ""
+                }
+                Err(e) => &e.to_string(),
+            },
+            _ => "unsupportted version",
+        };
+
+        if reason.is_empty() {
+            return Ok(Response::new(cooraftsvc::ConfChangeResp {
+                success: true,
+                error: String::new(),
+            }));
+        }
+
+        Ok(Response::new(cooraftsvc::ConfChangeResp {
+            success: false,
+            error: reason.to_string(),
+        }))
+    }
+
+    /// 获取 snapshot
+    async fn get_snapshot(
+        &self,
+        _request: tonic::Request<cooraftsvc::SnapshotReq>,
+    ) -> std::result::Result<tonic::Response<cooraftsvc::SnapshotResp>, tonic::Status> {
+        let raw_node = self.raw_node.lock().await;
+        if let Some(snap) = raw_node.raft.snap() {
+            match snap.write_to_bytes() {
+                Ok(data) => return Ok(Response::new(cooraftsvc::SnapshotResp { data })),
+                Err(_e) => return Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] })),
+            };
+        }
+        Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] }))
     }
 }
 
 struct Mailbox {
-    src_id: u64,
-    dst_id: u64,
+    src_id: u32,
+    dst_id: u32,
     send_timeout: NonZero<u64>,
     client: RaftServiceClient<Channel>,
     rx_msg: mpsc::Receiver<RaftMessage>,
@@ -551,8 +745,8 @@ struct Mailbox {
 
 impl Mailbox {
     fn new(
-        src_id: u64,
-        dst_id: u64,
+        src_id: u32,
+        dst_id: u32,
         send_timeout: NonZero<u64>,
         client: RaftServiceClient<Channel>,
         rx_msg: mpsc::Receiver<RaftMessage>,
@@ -567,36 +761,36 @@ impl Mailbox {
             status,
         }
     }
-}
 
-async fn start_mailbox(mut mb: Mailbox) {
-    let mut failed_times = 0;
-    loop {
-        if mb.rx_msg.is_closed() {
-            warn!("Mailbox[{}->{}] has been closed", mb.src_id, mb.dst_id);
-            break;
-        }
-        select! {
-            msg = mb.rx_msg.recv() => {
-                if msg.is_none() {
-                    continue;
-                }
-                let msg = msg.unwrap();
-                let mut req = Request::new(msg);
-                trace!("Node[{}] -> Node[{}]: timeout: {}s",mb.src_id,mb.dst_id,mb.send_timeout);
-                req.set_timeout(Duration::from_secs(mb.send_timeout.get()));
-                match mb.client.send_raft_message(req).await {
-                    Ok(_) => {
-                        mb.status.rotate_upgrade().await;
-                        debug!("Node[{}]->Node[{}] Mailbox sent message successfully", mb.src_id, mb.dst_id);
-                    },
-                    Err(e) => {
-                        mb.status.rotate_downgrade().await;
-                        if failed_times % 50 == 0 {
-                            error!("Node[{}]->Node[{}] Mailbox send error: {:?}", mb.src_id, mb.dst_id, e);
-                        }
-                        failed_times += 1;
-                    },
+    async fn start_serve(&mut self) {
+        let mut failed_times = 0;
+        loop {
+            if self.rx_msg.is_closed() {
+                warn!("Mailbox[{}->{}] has been closed", self.src_id, self.dst_id);
+                break;
+            }
+            select! {
+                msg = self.rx_msg.recv() => {
+                    if msg.is_none() {
+                        continue;
+                    }
+                    let msg = msg.unwrap();
+                    let mut req = Request::new(msg);
+                    trace!("Node[{}] -> Node[{}]: timeout: {}s",self.src_id,self.dst_id,self.send_timeout);
+                    req.set_timeout(Duration::from_secs(self.send_timeout.get()));
+                    match self.client.send_raft_message(req).await {
+                        Ok(_) => {
+                            self.status.rotate_upgrade().await;
+                            debug!("Node[{}]->Node[{}] Mailbox sent message successfully", self.src_id, self.dst_id);
+                        },
+                        Err(e) => {
+                            self.status.rotate_downgrade().await;
+                            if failed_times % 50 == 0 {
+                                error!("Node[{}]->Node[{}] Mailbox send error: {:?}", self.src_id, self.dst_id, e);
+                            }
+                            failed_times += 1;
+                        },
+                    }
                 }
             }
         }

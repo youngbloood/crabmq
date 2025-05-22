@@ -1,11 +1,5 @@
 use dashmap::DashMap;
-use futures::StreamExt;
-// use futures_util::stream::stream::StreamExt;
-use grpcx::{
-    brokercoosvc::{self, broker_coo_service_client::BrokerCooServiceClient},
-    commonsvc::{TopicList, topic_list},
-    smart_client::SmartClient,
-};
+use grpcx::commonsvc::{TopicList, topic_list};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -13,29 +7,15 @@ pub struct PartitionManager {
     broker_id: u32,
     // 当前节点负责的分区 (topic, partition) -> bool
     my_partitions: Arc<DashMap<(String, u32), bool>>,
-    // 协调器客户端
-    client: Option<SmartClient>,
+    // // 协调器客户端
+    // client: Option<SmartClient>,
 }
 
 impl PartitionManager {
-    pub fn new(broker_id: u32, coo_addr: String) -> Self {
-        if coo_addr.is_empty() {
-            PartitionManager {
-                broker_id,
-                my_partitions: Arc::default(),
-                client: None,
-            }
-        } else {
-            let pm = PartitionManager {
-                broker_id,
-                my_partitions: Arc::default(),
-                client: Some(SmartClient::new(vec![coo_addr])),
-            };
-            let pm_clone = pm.clone();
-            tokio::spawn(async move {
-                pm_clone.refresh_partition().await;
-            });
-            pm
+    pub fn new(broker_id: u32) -> Self {
+        PartitionManager {
+            broker_id,
+            my_partitions: Arc::default(),
         }
     }
 
@@ -60,28 +40,6 @@ impl PartitionManager {
                         self.my_partitions
                             .insert((info.topic.clone(), part.id), true);
                     }
-                }
-            }
-        }
-    }
-
-    async fn refresh_partition(&self) {
-        let req = brokercoosvc::PullReq { id: self.broker_id };
-
-        loop {
-            if let Some(client) = self.client.as_ref() {
-                match client
-                    .open_sstream(req, |chan, request| async move {
-                        BrokerCooServiceClient::new(chan).pull(request).await
-                    })
-                    .await
-                {
-                    Ok(mut strm) => {
-                        while let Some(Ok(tl)) = strm.next().await {
-                            self.apply_topic_infos(tl);
-                        }
-                    }
-                    Err(_) => todo!(),
                 }
             }
         }

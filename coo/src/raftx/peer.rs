@@ -3,13 +3,15 @@ use std::sync::Arc;
 use log::debug;
 use tokio::sync::Mutex;
 
+#[derive(Debug)]
 pub struct PeerState {
-    id: u64,
-    addr: String,
+    pub id: u64,
+    pub raft_addr: String,
+    pub coo_addr: String,
     status: Arc<Mutex<PeerStatus>>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum PeerStatus {
     Normal,
     HalfClose,
@@ -17,16 +19,21 @@ enum PeerStatus {
 }
 
 impl PeerState {
-    pub fn new(id: u64, addr: String) -> Self {
+    pub fn new(id: u64, raft_addr: String, coo_addr: String) -> Self {
         Self {
             id,
-            addr,
+            raft_addr,
+            coo_addr,
             status: Arc::new(Mutex::new(PeerStatus::Normal)),
         }
     }
 
-    pub fn get_addr(&self) -> &str {
-        &self.addr
+    pub fn get_raft_addr(&self) -> &str {
+        &self.raft_addr
+    }
+
+    pub fn get_coo_addr(&self) -> &str {
+        &self.coo_addr
     }
 
     // 降级
