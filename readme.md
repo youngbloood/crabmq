@@ -1,6 +1,6 @@
 # CrabMQ
 
-A distribution Message Queue written by Rust.
+A Distribution Message Queue written by Rust.
 
 ## Usage
 

@@ -1,31 +1,26 @@
+use crate::commonsvc::{self, CooInfo};
+use dashmap::{
+    DashMap,
+    mapref::multiple::{RefMulti, RefMutMulti},
+};
+use futures::{Stream, StreamExt};
+use log::{debug, error, info, warn};
 use std::{
-    collections::HashSet,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
-
-use futures::{Stream, StreamExt};
-use log::debug;
-use tokio::{
-    sync::{Mutex, RwLock},
-    time,
-};
+use tokio::time;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Code, IntoStreamingRequest, Request, Response, Status, Streaming,
     transport::{Channel, Endpoint},
 };
-
-use crate::commonsvc;
-
-#[derive(Debug, Clone)]
-struct NodeState {
-    addr: String,
-    last_healthy: Option<time::Instant>,
-    is_leader: bool,
-}
+use tower::ServiceExt;
 
 #[derive(Clone)]
 pub struct RetryPolicy {
@@ -45,32 +40,225 @@ impl Default for RetryPolicy {
 }
 
 #[derive(Clone)]
+struct CooEndpoints {
+    // term
+    term: Arc<AtomicU64>,
+    // 循环次数，保证endpoints下的每个endpoint都有相同几率被轮训到
+    cycle_times: Arc<AtomicU64>,
+    endpoints: Arc<DashMap<u32, CooEndpoint>>,
+}
+
+impl Default for CooEndpoints {
+    fn default() -> Self {
+        Self {
+            term: Default::default(),
+            cycle_times: Arc::new(AtomicU64::new(1)),
+            endpoints: Default::default(),
+        }
+    }
+}
+
+impl CooEndpoints {
+    fn apply(&self, resp: commonsvc::CooListResp) {
+        if resp.cluster_term <= self.term.load(Ordering::Relaxed) {
+            return;
+        }
+        info!("[SmartClient]: refresh the coo endpoints to local...");
+        self.term.store(resp.cluster_term, Ordering::Release);
+        for v in resp.list {
+            self.endpoints
+                .entry(v.id)
+                .and_modify(|entry| {
+                    entry.apply(&v);
+                })
+                .or_insert(CooEndpoint::from_coo_info(
+                    &v,
+                    self.cycle_times.load(Ordering::Relaxed),
+                ));
+        }
+        debug!("[SmartClient]: apply the CooListResp: {:?}", self.endpoints);
+    }
+
+    fn erase_role(&self) {
+        self.endpoints
+            .iter_mut()
+            .for_each(|mut v| v.role = commonsvc::CooRole::Follower);
+    }
+
+    /// 擦除原来的 leader 角色，并重新设置新的 Leader 角色
+    fn set_leader(&self, addr: &str) {
+        if let Some(mut res) = self.endpoints.iter_mut().find(|v| v.coo_addr == addr) {
+            self.erase_role();
+            res.role = commonsvc::CooRole::Leader;
+        }
+    }
+
+    fn rorate_cycle_times(&self) {
+        self.cycle_times.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn find_leader(&self) -> Option<RefMulti<'_, u32, CooEndpoint>> {
+        debug!(
+            "[SmartClient]: find_leader CooEndpoints: {:?}",
+            self.endpoints
+        );
+        self.endpoints
+            .iter()
+            .find(|n| n.role == commonsvc::CooRole::Leader)
+    }
+
+    fn find_not_leader(&self) -> Vec<RefMutMulti<'_, u32, CooEndpoint>> {
+        // 优先获取 Role != Leader
+        let cycle_times = self.cycle_times.load(Ordering::Relaxed);
+        let nodes_list: Vec<_> = self
+            .endpoints
+            .iter_mut()
+            .filter(|n| n.role != commonsvc::CooRole::Leader && n.cycle_times < cycle_times)
+            .collect();
+        nodes_list
+    }
+}
+
+#[derive(Debug)]
+struct CooEndpoint {
+    id: u32,
+    coo_addr: String,
+    raft_addr: String,
+    role: commonsvc::CooRole,
+    cycle_times: u64,
+}
+
+impl CooEndpoint {
+    fn from_coo_info(coo_info: &CooInfo, cycle_times: u64) -> Self {
+        Self {
+            id: coo_info.id,
+            coo_addr: coo_info.coo_addr.clone(),
+            raft_addr: coo_info.raft_addr.clone(),
+            role: commonsvc::CooRole::from_i32(coo_info.role).unwrap(),
+            cycle_times: cycle_times - 1,
+        }
+    }
+
+    fn apply(&mut self, coo_info: &CooInfo) -> bool {
+        if self.id != coo_info.id {
+            return false;
+        }
+        self.coo_addr = coo_info.coo_addr.clone();
+        self.raft_addr = coo_info.raft_addr.clone();
+        self.role = commonsvc::CooRole::from_i32(coo_info.role).unwrap();
+
+        true
+    }
+
+    fn rorate_cycle_times(&mut self) {
+        self.cycle_times += 1;
+    }
+}
+
+#[derive(Clone)]
 pub struct SmartClient {
-    node_states: Arc<RwLock<Vec<NodeState>>>,
-    channels: Arc<Mutex<Vec<(Channel, String)>>>,
+    initial_endpoints: Vec<String>,
+    endpoints: CooEndpoints,
+    channels: Arc<DashMap<String, Channel>>,
     retry_policy: RetryPolicy,
-    health_check_interval: Duration,
 }
 
 impl SmartClient {
     pub fn new(initial_endpoints: Vec<String>) -> Self {
-        let node_states = initial_endpoints
-            .into_iter()
-            .map(|addr| NodeState {
-                addr,
-                last_healthy: None,
-                is_leader: false,
-            })
-            .collect();
-
         Self {
-            node_states: Arc::new(RwLock::new(node_states)),
-            channels: Arc::new(Mutex::new(Vec::new())),
+            initial_endpoints,
+            endpoints: CooEndpoints::default(),
+            channels: Arc::new(DashMap::new()),
             retry_policy: RetryPolicy::default(),
-            health_check_interval: Duration::from_secs(30),
         }
     }
 
+    /// 根据 R 动态获取目标集群节点列表
+    pub async fn refresh_coo_endpoints<R, Fut>(&self, r: R)
+    where
+        R: Fn(Channel) -> Fut,
+        Fut: std::future::Future<
+                Output = Result<Response<Streaming<commonsvc::CooListResp>>, Status>,
+            >,
+    {
+        let mut backoff = self.retry_policy.backoff_base;
+        loop {
+            // 步骤1：获取初始连接
+            let (chan, addr) = match self.get_channel().await {
+                Ok((chan, addr)) => (chan, addr),
+                Err(e) => {
+                    self.handle_refresh_error(e).await;
+                    time::sleep(backoff).await;
+                    backoff = std::cmp::min(
+                        backoff * self.retry_policy.backoff_factor,
+                        Duration::from_secs(5),
+                    );
+                    continue;
+                }
+            };
+
+            // 步骤2：建立流式连接并持久监听
+            match r(chan).await {
+                Ok(response) => {
+                    let mut strm = response.into_inner();
+                    let mut heartbeat_timeout = time::interval(Duration::from_secs(30));
+
+                    // 持久监听循环
+                    loop {
+                        tokio::select! {
+                            // 监听服务端数据
+                            msg = strm.next() => {
+                                match msg {
+                                    Some(Ok(resp)) => {
+                                        // 成功收到数据：重置退避时间
+                                        backoff = self.retry_policy.backoff_base;
+                                        // 处理响应（若返回 false 表示需要重连）
+                                        if !self.process_coo_response(resp, addr.clone()).await {
+                                            warn!("[SmartClient]->[{}]: target is not leader, switch to leader...", addr);
+                                            // self.erase_role_and_channel(&addr);
+                                            break; // 退出内层循环触发重连
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        // 流错误：记录并重连
+                                        error!("[SmartClient]->[{}]: strm error: {:?}", addr, e);
+                                        self.erase_role();
+                                        self.handle_refresh_error(e).await;
+                                        break;
+                                    }
+                                    None => {
+                                        error!("[SmartClient]->[{}]: strm has been closed by server", addr);
+                                        self.erase_role();
+                                        // 流正常关闭：主动重连
+                                        break;
+                                    }
+                                }
+                            }
+                            // 心跳超时检测
+                            _ = heartbeat_timeout.tick() => {
+                                warn!("[SmartClient]->[{}]: Stream heartbeat timeout, monitor CooListResp continue...", addr);
+                                // break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[SmartClient]->[{}]: invoke closure r error: {:?}", addr, e);
+                    self.erase_channel(&addr);
+                    self.handle_refresh_error(e).await;
+                }
+            }
+
+            // 步骤3：连接中断后等待退避时间
+            time::sleep(backoff).await;
+            backoff = std::cmp::min(
+                backoff * self.retry_policy.backoff_factor,
+                Duration::from_secs(5),
+            );
+        }
+    }
+
+    /// 单次调用
     pub async fn execute_unary<Req, Res, F, Fut>(
         &self,
         request: Req,
@@ -78,11 +266,11 @@ impl SmartClient {
     ) -> Result<Response<Res>, Status>
     where
         Req: Send + Clone,
-        F: Fn(Channel, Request<Req>) -> Fut,
+        F: Fn(Channel, Request<Req>, String) -> Fut,
         Fut: std::future::Future<Output = Result<Response<Res>, Status>>,
     {
         let req = request.clone();
-        self.retry_operation(|channel| call(channel, Request::new(req.clone())))
+        self.retry_operation(|channel, addr| call(channel, Request::new(req.clone()), addr))
             .await
     }
 
@@ -94,12 +282,12 @@ impl SmartClient {
     ) -> Result<SmartStream<Res>, Status>
     where
         Req: Send + Clone,
-        C: Fn(Channel, Request<Req>) -> Fut,
+        C: Fn(Channel, Request<Req>, String) -> Fut,
         Fut: std::future::Future<Output = Result<Response<Streaming<Res>>, Status>>,
     {
         let req = request.clone();
         let stream = self
-            .retry_operation(|channel| call(channel, Request::new(req.clone())))
+            .retry_operation(|channel, addr| call(channel, Request::new(req.clone()), addr))
             .await?;
         Ok(SmartStream::new(stream.into_inner(), self.clone()))
     }
@@ -113,12 +301,12 @@ impl SmartClient {
     where
         S: Stream<Item = Req> + Send + 'static,
         Req: Send + Clone + 'static,
-        F: Fn(Channel, SmartReqStream<Req>) -> Fut,
+        F: Fn(Channel, SmartReqStream<Req>, String) -> Fut,
         Fut: std::future::Future<Output = Result<Response<Res>, Status>>,
     {
-        self.retry_operation(|channel| {
+        self.retry_operation(|channel, addr| {
             let stream = stream_factory();
-            call(channel, SmartReqStream::new(Box::pin(stream)))
+            call(channel, SmartReqStream::new(Box::pin(stream)), addr)
         })
         .await
     }
@@ -132,13 +320,13 @@ impl SmartClient {
     where
         // S: ReceiverStream<Req>,
         Req: Send + Clone + 'static,
-        C: Fn(Channel, SmartReqStream<Req>) -> Fut,
+        C: Fn(Channel, SmartReqStream<Req>, String) -> Fut,
         Fut: std::future::Future<Output = Result<Response<Streaming<Res>>, Status>>,
     {
         let strm = self
-            .retry_operation(|channel| {
+            .retry_operation(|channel, addr| {
                 let stream = stream_factory();
-                call(channel, SmartReqStream::new(Box::pin(stream)))
+                call(channel, SmartReqStream::new(Box::pin(stream)), addr)
             })
             .await?;
 
@@ -147,26 +335,33 @@ impl SmartClient {
 
     async fn retry_operation<T, F, Fut>(&self, mut operation: F) -> Result<T, Status>
     where
-        F: FnMut(Channel) -> Fut,
+        F: FnMut(Channel, String) -> Fut,
         Fut: std::future::Future<Output = Result<T, Status>>,
     {
         let mut retries = 0;
         let mut backoff = self.retry_policy.backoff_base;
 
         loop {
-            let channel = self.get_channel().await?;
-            match operation(channel).await {
-                Ok(result) => {
-                    debug!("SmartClient: operation success");
-                    return Ok(result);
-                }
-                Err(status) => {
-                    debug!("SmartClient: Status: {:?}", status);
-                    if retries >= self.retry_policy.max_retries {
-                        return Err(status.clone());
+            match self.must_leader_channel().await {
+                Ok((chan, addr)) => match operation(chan, addr).await {
+                    Ok(result) => {
+                        info!("[SmartClient]: connect to Leader and operation success");
+                        return Ok(result);
                     }
+                    Err(e) => {
+                        error!("[SmartClient]: failed connect to Leader, status: {:?}", e);
+                        if retries >= self.retry_policy.max_retries {
+                            return Err(e.clone());
+                        }
 
-                    self.handle_refresh_error(status).await;
+                        self.handle_refresh_error(e).await;
+                        retries += 1;
+                        tokio::time::sleep(backoff).await;
+                        backoff *= self.retry_policy.backoff_factor;
+                    }
+                },
+                Err(e) => {
+                    warn!("[SmartClient]: get_leader_channel failed: {:?}", e);
                     retries += 1;
                     tokio::time::sleep(backoff).await;
                     backoff *= self.retry_policy.backoff_factor;
@@ -175,125 +370,123 @@ impl SmartClient {
         }
     }
 
+    async fn must_leader_channel(&self) -> Result<(Channel, String), Status> {
+        // 优先获取 Role = Leader
+        if let Some(leader) = self.endpoints.find_leader() {
+            if let Some(chan) = self.try_get_existing_channel(&leader.coo_addr).await {
+                return Ok((chan, leader.coo_addr.clone()));
+            } else {
+                return self.create_channel(&leader.coo_addr).await;
+            }
+        }
+
+        Err(Status::aborted("Not Leader"))
+    }
+
     /// 核心连接获取逻辑
-    async fn get_channel(&self) -> Result<Channel, Status> {
-        let nodes = self.node_states.read().await;
-
-        // 优先尝试最近健康的Leader
-        if let Some(leader) = nodes
-            .iter()
-            .find(|n| n.is_leader && n.last_healthy.is_some())
-        {
-            if let Some(chan) = self.try_get_existing_channel(&leader.addr).await {
-                return Ok(chan);
+    async fn get_channel(&self) -> Result<(Channel, String), Status> {
+        if self.endpoints.endpoints.is_empty() {
+            return self.get_channel_from_endpoints().await;
+        }
+        // 优先获取 Role = Leader
+        if let Some(leader) = self.endpoints.find_leader() {
+            if let Some(chan) = self.try_get_existing_channel(&leader.coo_addr).await {
+                return Ok((chan, leader.coo_addr.clone()));
+            } else {
+                return self.create_channel(&leader.coo_addr).await;
             }
         }
 
-        // 降级尝试其他健康节点
-        for node in nodes.iter().filter(|n| n.last_healthy.is_some()) {
-            if let Some(chan) = self.try_get_existing_channel(&node.addr).await {
-                return Ok(chan);
-            }
+        // 公平调用：获取未被轮训过的非 Leader 节点
+        let mut nodes = self.endpoints.find_not_leader();
+        if nodes.is_empty() {
+            self.endpoints.rorate_cycle_times();
+            nodes = self.endpoints.find_not_leader();
         }
 
-        // 最后尝试所有节点
-        for node in nodes.iter() {
-            match self.create_channel(&node.addr).await {
-                Ok(chan) => return Ok(chan),
-                Err(_) => continue,
+        // 降级尝试其他节点
+        // 遍历所有非 Leader 节点，尝试获取或创建通道
+        for mut node in nodes {
+            // 尝试获取现有通道
+            if let Some(chan) = self.try_get_existing_channel(&node.coo_addr).await {
+                node.rorate_cycle_times();
+                return Ok((chan, node.coo_addr.clone()));
+            }
+            // 尝试创建新通道，成功则返回，否则继续下一个节点
+            match self.create_channel(&node.coo_addr).await {
+                Ok(res) => {
+                    node.rorate_cycle_times();
+                    return Ok(res);
+                }
+                Err(e) => {
+                    error!(
+                        "[SmartClient]: create coo endpoint[{}] channel failed: {:?}",
+                        &node.coo_addr, e
+                    );
+                    // 及时该节点创建失败，也标记一次调用，下次轮到下一个创建
+                    node.rorate_cycle_times();
+                    continue;
+                }
             }
         }
 
         Err(Status::new(Code::Unavailable, "No available nodes"))
     }
 
-    async fn try_get_existing_channel(&self, addr: &str) -> Option<Channel> {
-        let channels = self.channels.lock().await;
-        channels
-            .iter()
-            .find(|(_, a)| a == addr)
-            .map(|(c, _)| c.clone())
+    async fn get_channel_from_endpoints(&self) -> Result<(Channel, String), Status> {
+        for v in &self.initial_endpoints {
+            if let Ok(res) = self.create_channel(v).await {
+                return Ok(res);
+            }
+        }
+
+        Err(Status::invalid_argument("all endpoints is unavailable"))
     }
 
-    async fn create_channel(&self, addr: &str) -> Result<Channel, Status> {
-        let addr = if !(addr.starts_with("http") || addr.starts_with("https")) {
-            format!("http://{}", addr)
-        } else {
-            addr.to_string()
-        };
+    async fn try_get_existing_channel(&self, addr: &str) -> Option<Channel> {
+        let addr = repair_addr_with_http(addr.to_string());
+        if let Some(mut chan) = self.channels.get_mut(&addr) {
+            // 检查通道是否处于可用状态
+            if chan.ready().await.is_ok() {
+                return Some(chan.value().clone());
+            } else {
+                // 自动清理无效连接
+                self.channels.remove(&addr);
+                return None;
+            }
+        }
+        None
+    }
+
+    async fn create_channel(&self, addr: &str) -> Result<(Channel, String), Status> {
+        let addr = repair_addr_with_http(addr.to_string());
         let endpoint = Endpoint::from_shared(addr.clone())
             .map_err(|e| Status::new(Code::Internal, e.to_string()))?
-            .connect_timeout(Duration::from_secs(3));
+            .connect_timeout(Duration::from_secs(3))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(60))
+            .tcp_keepalive(Some(Duration::from_secs(60)));
 
-        let channel = endpoint
+        let chan = endpoint
             .connect()
             .await
             .map_err(|e| Status::new(Code::Unavailable, e.to_string()))?;
 
-        self.channels.lock().await.push((channel.clone(), addr));
-        Ok(channel)
+        self.channels.insert(addr.to_string(), chan.clone());
+        Ok((chan, addr))
     }
 
-    /// 动态刷新节点状态
-    pub async fn refresh_coo_endpoints<F, Fut>(&self, r: F)
-    where
-        F: Fn(Channel) -> Fut,
-        Fut: std::future::Future<
-                Output = Result<Response<Streaming<commonsvc::CooListResp>>, Status>,
-            >,
-    {
-        let mut backoff = self.retry_policy.backoff_base;
-
-        loop {
-            match self.get_channel().await {
-                Ok(chan) => match r(chan).await {
-                    Ok(response) => {
-                        let mut stream = response.into_inner();
-                        while let Some(Ok(resp)) = stream.next().await {
-                            self.process_coo_response(resp).await;
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        self.handle_refresh_error(e).await;
-                    }
-                },
-                Err(e) => {
-                    self.handle_refresh_error(e).await;
-                }
-            }
-
-            time::sleep(backoff).await;
-            backoff = std::cmp::min(
-                backoff * self.retry_policy.backoff_factor,
-                Duration::from_secs(5),
-            );
+    async fn process_coo_response(&self, resp: commonsvc::CooListResp, addr: String) -> bool {
+        if !has_leader(&resp) {
+            // NOTE: 返回当中有 Leader 时才应用。
+            // 网络分区场景：abcde组成集群，先abc形成一个分区，de形成一个分区
+            // abc中返回的会有 Leader, 而de中返回无 Leader。但是de不断选举，导致term会比abc中的大。
+            // 此处可能是 de 节点返回的信息，无 leader 直接忽略掉，继续进行下一个节点的链接
+            return false;
         }
-    }
-
-    async fn process_coo_response(&self, resp: commonsvc::CooListResp) {
-        let mut nodes = self.node_states.write().await;
-
-        // 更新节点列表
-        let mut new_addrs = HashSet::new();
-        for info in resp.list {
-            let addr = info.coo_addr;
-            new_addrs.insert(addr.clone());
-
-            if let Some(existing) = nodes.iter_mut().find(|n| n.addr == addr) {
-                existing.is_leader = info.role == commonsvc::CooRole::Leader.into();
-                existing.last_healthy = Some(time::Instant::now());
-            } else {
-                nodes.push(NodeState {
-                    addr,
-                    is_leader: info.role == commonsvc::CooRole::Leader.into(),
-                    last_healthy: Some(time::Instant::now()),
-                });
-            }
-        }
-
-        // 清理失效节点
-        nodes.retain(|n| new_addrs.contains(&n.addr));
+        let is_leader = now_endpoint_is_leader(&resp, &addr);
+        self.endpoints.apply(resp);
+        is_leader
     }
 
     async fn handle_refresh_error(&self, status: Status) {
@@ -301,53 +494,16 @@ impl SmartClient {
             if addr.is_empty() || addr == "unknown" {
                 return;
             }
-            self.mark_node_unhealthy(&addr).await;
+            self.endpoints.set_leader(&addr);
         }
     }
 
-    async fn mark_node_unhealthy(&self, addr: &str) {
-        let mut nodes = self.node_states.write().await;
-        if let Some(node) = nodes.iter_mut().find(|n| n.addr == addr) {
-            node.last_healthy = None;
-            node.is_leader = false;
-        }
-
-        // 清理失效连接
-        let mut channels = self.channels.lock().await;
-        channels.retain(|(_, a)| a != addr);
+    fn erase_role(&self) {
+        self.endpoints.erase_role()
     }
 
-    /// 后台健康检查任务
-    pub fn start_health_check(&self) {
-        let client = self.clone();
-        tokio::spawn(async move {
-            loop {
-                client.check_nodes_health().await;
-                time::sleep(client.health_check_interval).await;
-            }
-        });
-    }
-
-    async fn check_nodes_health(&self) {
-        let nodes = self.node_states.read().await.clone();
-
-        for node in nodes.iter() {
-            match self.create_channel(&node.addr).await {
-                Ok(_) => {
-                    self.mark_node_healthy(&node.addr).await;
-                }
-                Err(_) => {
-                    self.mark_node_unhealthy(&node.addr).await;
-                }
-            }
-        }
-    }
-
-    async fn mark_node_healthy(&self, addr: &str) {
-        let mut nodes = self.node_states.write().await;
-        if let Some(node) = nodes.iter_mut().find(|n| n.addr == addr) {
-            node.last_healthy = Some(time::Instant::now());
-        }
+    fn erase_channel(&self, addr: &str) {
+        self.channels.remove(addr);
     }
 }
 
@@ -382,9 +538,6 @@ impl<T> Stream for SmartStream<T> {
                     let client = self.client.clone();
                     tokio::spawn(async move {
                         client.handle_refresh_error(status).await;
-                        // let mut current_leader = client.current_leader.lock().await;
-                        // *current_leader = new_leader;
-                        // client.cleanup_channels().await;
                     });
                     return Poll::Ready(Some(Err(Status::new(
                         Code::Unavailable,
@@ -428,4 +581,24 @@ where
     fn into_streaming_request(self) -> Request<Self::Stream> {
         Request::new(self.inner)
     }
+}
+
+fn has_leader(resp: &commonsvc::CooListResp) -> bool {
+    resp.list
+        .iter()
+        .any(|ci| ci.role == commonsvc::CooRole::Leader.into())
+}
+
+fn now_endpoint_is_leader(resp: &commonsvc::CooListResp, addr: &str) -> bool {
+    resp.list.iter().any(|ci| {
+        ci.role == commonsvc::CooRole::Leader.into()
+            && ci.coo_addr == repair_addr_with_http(addr.to_string())
+    })
+}
+
+pub fn repair_addr_with_http(addr: String) -> String {
+    if !(addr.starts_with("http") || addr.starts_with("https")) {
+        return format!("http://{}", addr);
+    }
+    addr
 }

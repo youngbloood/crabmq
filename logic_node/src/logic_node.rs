@@ -7,7 +7,13 @@ use grpcx::{
     smart_client::SmartClient,
 };
 use log::{error, info, warn};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use storagev2::Storage;
 use tokio::{
     select,
@@ -90,6 +96,7 @@ where
             slave: self.salve,
             coo_leader_client: None,
             coo_addrs: Arc::default(),
+            start_smart_client: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -115,6 +122,8 @@ where
     coo_leader_client: Option<SmartClient>,
     // coo_client: Option<Arc<Mutex<BrokerCooServiceClient<Channel>>>>,
     coo_addrs: Arc<DashMap<u64, String>>,
+
+    start_smart_client: Arc<AtomicBool>,
 }
 
 impl<T> LogicNode<T>
@@ -287,25 +296,34 @@ where
 
         // 如果当前 ln 中的 coo 不是leader，需要先获取 coo:leader 节点并链接，然后汇报状态
         // 使用 grpc 链接 coo:leader, 并进行交互
-        let coo_client = SmartClient::new(vec![coo_leader.lock().await.clone()]);
-        let refresh_coo_client = coo_client.clone();
-        tokio::spawn(async move {
-            refresh_coo_client.start_health_check();
-            refresh_coo_client
-                .refresh_coo_endpoints(|chan| async {
-                    BrokerCooServiceClient::new(chan)
-                        .list(Request::new(grpcx::commonsvc::CooListReq {
-                            token: "".to_string(),
-                        }))
-                        .await
-                })
-                .await;
-        });
-        self.coo_leader_client = Some(coo_client.clone());
+        if self.coo_leader_client.is_none() {
+            let coo_client = SmartClient::new(vec![coo_leader.lock().await.clone()]);
+            self.coo_leader_client = Some(coo_client.clone());
+        }
+        let refresh_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
+
+        if self
+            .start_smart_client
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            tokio::spawn(async move {
+                refresh_coo_client
+                    .refresh_coo_endpoints(|chan| async {
+                        BrokerCooServiceClient::new(chan)
+                            .list(Request::new(grpcx::commonsvc::CooListReq {
+                                token: "".to_string(),
+                                id: broker_id,
+                            }))
+                            .await
+                    })
+                    .await;
+            });
+        }
 
         // Report  BrokerState
         let report_broker = broker.clone();
-        let report_coo_client = coo_client.clone();
+        let report_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
         let _coo_leader = coo_leader.clone();
         let mut _watcher = watcher.clone();
         let report_handle = tokio::spawn(async move {
@@ -316,12 +334,8 @@ where
                             report_broker.get_state_reciever("logic_node".to_string());
                         ReceiverStream::new(report_recver)
                     },
-                    |chan, request| async {
-                        info!(
-                            "Broker[{}]->External-Coo[{}]: Report BrokerState",
-                            broker_id,
-                            _coo_leader.lock().await
-                        );
+                    |chan, request, addr| async {
+                        *_coo_leader.lock().await = addr;
                         BrokerCooServiceClient::new(chan).report(request).await
                     },
                 )
@@ -337,7 +351,7 @@ where
                                 }
                                 match resp.unwrap() {
                                     Ok(resp) => {
-                                        info!("Broker[{}]->External-Coo[{}]: Pull TopicList",broker_id, _coo_leader.lock().await);
+                                        info!("Broker[{}]->External-Coo[{}]: Report BrokerState", broker_id, _coo_leader.lock().await);
                                         let _ = resp;
                                         // TODO:
                                     }
@@ -366,7 +380,7 @@ where
 
         // Pull  Broker Partition
         let pull_broker = broker.clone();
-        let pull_coo_client = coo_client.clone();
+        let pull_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
         let _coo_leader = coo_leader.clone();
         let mut _watcher = watcher.clone();
         let pull_handle = tokio::spawn(async move {
@@ -374,9 +388,14 @@ where
             let pull_resp_strm = pull_coo_client
                 .open_sstream(
                     brokercoosvc::PullReq { id: broker_id },
-                    |chan, request| async { BrokerCooServiceClient::new(chan).pull(request).await },
+                    |chan, request, addr| async {
+                        *_coo_leader.lock().await = addr;
+                        BrokerCooServiceClient::new(chan).pull(request).await
+                    },
                 )
                 .await;
+
+            let mut ticker = interval(Duration::from_secs(5));
             match pull_resp_strm {
                 Ok(mut strm) => loop {
                     select! {
@@ -398,6 +417,10 @@ where
                                 warn!("Coo-Leader has been change to Local(Pull Handle)");
                                 break;
                             }
+                        }
+
+                        _ = ticker.tick() => {
+                            info!("Broker[{}]->External-Coo[{}]: Pull Topic-Partition", broker_id, _coo_leader.lock().await);
                         }
                     }
                 },

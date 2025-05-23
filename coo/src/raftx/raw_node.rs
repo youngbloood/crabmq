@@ -44,8 +44,8 @@ pub struct RaftNode {
     coo_grpc_addr: String,
 }
 
-unsafe impl Send for RaftNode {}
-unsafe impl Sync for RaftNode {}
+// unsafe impl Send for RaftNode {}
+// unsafe impl Sync for RaftNode {}
 
 impl RaftNode {
     pub fn new<T: AsRef<std::path::Path>>(
@@ -62,7 +62,7 @@ impl RaftNode {
             applied: 0,
             max_size_per_msg: 4096,
             max_inflight_msgs: 256,
-            pre_vote: true,
+            // pre_vote: true,
             ..Default::default()
         };
         // let conf_state = if join {
@@ -152,6 +152,11 @@ impl RaftNode {
             list.push(v.value().clone());
         });
         list
+    }
+
+    pub async fn get_term(&self) -> u64 {
+        let raw_node = self.raw_node.lock().await;
+        raw_node.raft.term
     }
 
     pub async fn run(&self) {
@@ -277,8 +282,10 @@ impl RaftNode {
                         raw_node.tick();
                         if print_interval.elapsed() > Duration::from_secs(5) {
                             info!(
-                                "Node[{}] role = {:?}, raft.pr().conf() = {:?}, peer = {:?}",
+                                "Node[{}] term = {}, leader_id = {}, role = {:?}, raft.pr().conf() = {:?}, peer = {:?}",
                                 self.id,
+                                raw_node.raft.term,
+                                raw_node.raft.leader_id,
                                 raw_node.raft.state,
                                 raw_node.raft.prs().conf(),
                                 self.peer,
@@ -501,10 +508,9 @@ impl RaftNode {
             let mut inter = interval(Duration::from_secs(10));
             loop {
                 // 连接到 Leader 的 gRPC 服务
-                match cooraftsvc::raft_service_client::RaftServiceClient::connect(format!(
-                    "http://{}",
-                    remote_raft_addr
-                ))
+                match cooraftsvc::raft_service_client::RaftServiceClient::connect(
+                    repair_addr_with_http(remote_raft_addr.clone()),
+                )
                 .await
                 {
                     Ok(mut client) => {
@@ -659,8 +665,8 @@ impl cooraftsvc::raft_service_server::RaftService for RaftNode {
     ) -> Result<Response<cooraftsvc::MetaResp>, tonic::Status> {
         Ok(Response::new(cooraftsvc::MetaResp {
             id: self.id,
-            raft_addr: String::new(),
-            coo_addr: "".to_string(),
+            raft_addr: repair_addr_with_http(self.raft_grpc_addr.clone()),
+            coo_addr: repair_addr_with_http(self.coo_grpc_addr.clone()),
         }))
     }
 
@@ -795,4 +801,11 @@ impl Mailbox {
             }
         }
     }
+}
+
+pub fn repair_addr_with_http(addr: String) -> String {
+    if !(addr.starts_with("http") || addr.starts_with("https")) {
+        return format!("http://{}", addr);
+    }
+    addr
 }

@@ -2,9 +2,10 @@ syntax = "proto3";
 package commonsvc;
 
 message TopicList {
+    uint64 term = 1;  // 新增Term标识
     oneof list {
-        TopicListInit init = 1;
-        TopicListAdd add = 2;
+        TopicListInit init = 2;
+        TopicListAdd add = 3;
     }
 }
 
@@ -34,10 +35,12 @@ message PartitionInfos{
 
 message CooListReq {
     string token = 1;
+    uint32 id = 2;
 }
 
 message CooListResp {
-    repeated CooInfo list = 1;
+    uint64 cluster_term = 1;        // 新增集群全局Term
+    repeated CooInfo list = 2;
 }
 
 message CooInfo {
@@ -59,4 +62,5 @@ enum CooRole {
     Candidate = 1;
     Follower = 2;
     Learner = 3;
+    Unknown = 4;
 }

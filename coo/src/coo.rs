@@ -3,12 +3,14 @@ use super::raftx;
 use crate::event_bus::EventBus;
 use crate::partition::PartitionInfo;
 use crate::partition::PartitionPolicy;
+use crate::raftx::repair_addr_with_http;
 use crate::{BrokerNode, ClientNode};
 use anyhow::Result;
 use dashmap::DashMap;
 use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
 use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
 use grpcx::commonsvc;
+use grpcx::commonsvc::CooInfo;
 use grpcx::commonsvc::CooListResp;
 use grpcx::commonsvc::TopicListAdd;
 use grpcx::commonsvc::TopicListInit;
@@ -50,9 +52,12 @@ pub struct Coordinator {
     // 链接 coo 的客户端
     clients: Arc<DashMap<String, ClientNode>>,
 
-    // 事件总线
+    // (Leadder)集群的 Topic-Partition 变更事件总线
     broker_event_bus: EventBus<PartitionEvent>,
     client_event_bus: EventBus<PartitionEvent>,
+
+    //（Leader）集群节点变更事件总线
+    peer_change_bus: EventBus<Result<CooListResp, Status>>,
 
     // 分区管理
     partition_mgr: PartitionManager,
@@ -80,9 +85,10 @@ impl Coordinator {
             raft_node_sender,
             brokers: Arc::new(DashMap::new()),
             clients: Arc::new(DashMap::new()),
-            partition_mgr: PartitionManager::new(PartitionPolicy::default()),
             broker_event_bus: EventBus::new(),
             client_event_bus: EventBus::new(),
+            peer_change_bus: EventBus::new(),
+            partition_mgr: PartitionManager::new(PartitionPolicy::default()),
         }
     }
 
@@ -115,7 +121,7 @@ impl Coordinator {
     /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
         // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
-        self.start_leader_checker();
+        self.start_checker_loop();
 
         // 启动 raft-node: 加入目标节点，并启动 raft 通信的 grpc 服务
         let raft_node = self.raft_node.clone();
@@ -150,7 +156,7 @@ impl Coordinator {
     }
 
     // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
-    fn start_leader_checker(&self) {
+    fn start_checker_loop(&self) {
         let raft_node = self.raft_node.clone();
         let broker_event_bus = self.broker_event_bus.clone();
         let client_event_bus = self.client_event_bus.clone();
@@ -202,7 +208,7 @@ impl Coordinator {
         broker_id: u32,
     ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicList, Status>>> {
         let id = format!("local_broker_{}", broker_id);
-        let mut recver = self.broker_event_bus.subscribe(id.clone())?;
+        let (_, mut recver) = self.broker_event_bus.subscribe(id.clone())?;
         let bus = self.broker_event_bus.clone();
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -241,10 +247,18 @@ impl Coordinator {
                         break;
                     }
                     PartitionEvent::NewTopic { topic, partitions } => {
-                        let _ = tx.send(Ok(convert_to_pull_resp(topic, partitions)));
+                        let _ = tx.send(Ok(convert_to_pull_resp(
+                            topic,
+                            partitions,
+                            raft_node.get_term().await,
+                        )));
                     }
                     PartitionEvent::AddPartitions { topic, added } => {
-                        let _ = tx.send(Ok(convert_to_added_resp(topic, added)));
+                        let _ = tx.send(Ok(convert_to_added_resp(
+                            topic,
+                            added,
+                            raft_node.get_term().await,
+                        )));
                     }
                 }
             }
@@ -293,6 +307,10 @@ impl Coordinator {
             }
         }
         Ok(())
+    }
+
+    async fn get_term(&self) -> u64 {
+        self.raft_node.get_term().await
     }
 }
 
@@ -351,6 +369,8 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
         &self,
         request: tonic::Request<commonsvc::CooListReq>,
     ) -> std::result::Result<tonic::Response<Self::ListStream>, tonic::Status> {
+        let remote_addr = request.remote_addr().unwrap();
+        let broker_id = request.into_inner().id;
         let peer = self.raft_node.get_peer();
         let mut list = vec![];
         let leader_id = self.raft_node.get_leader_id().await;
@@ -359,8 +379,8 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
             list.push(commonsvc::CooInfo {
                 act: commonsvc::CooInfoAction::Add.into(),
                 id,
-                coo_addr: v.coo_addr.clone(),
-                raft_addr: v.raft_addr.clone(),
+                coo_addr: repair_addr_with_http(v.coo_addr.clone()),
+                raft_addr: repair_addr_with_http(v.raft_addr.clone()),
                 role: if id == leader_id {
                     commonsvc::CooRole::Leader.into()
                 } else {
@@ -368,10 +388,18 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                 },
             });
         });
-        let (tx, rx) = mpsc::channel(128);
-        // TODO: 修改成流式
+
+        let sub_id = format!("broker_{}_{}", broker_id, remote_addr);
+        let (tx, rx) = self.peer_change_bus.subscribe(sub_id).unwrap();
+
+        let raft_node = self.raft_node.clone();
         tokio::spawn(async move {
-            tx.send(Ok(CooListResp { list })).await;
+            let _ = tx
+                .send(Ok(CooListResp {
+                    cluster_term: raft_node.get_term().await,
+                    list,
+                }))
+                .await;
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
@@ -438,7 +466,7 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
         let sub_id = format!("broker_{}_{}", broker_id, remote_addr);
         // 获取事件流
         let mut event_rx = match self.broker_event_bus.subscribe(sub_id.clone()) {
-            Ok(event_rx) => event_rx,
+            Ok((_, event_rx)) => event_rx,
             Err(e) => {
                 error!("BrokerCooService.pull err: {:?}", e);
                 return Err(tonic::Status::already_exists(broker_id.to_string()));
@@ -447,6 +475,8 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
         let bus = self.broker_event_bus.clone();
         let init_data = self.get_broker_assignments(broker_id);
         let (resp_tx, resp_rx) = mpsc::channel(128);
+        let raft_node = self.raft_node.clone();
+
         tokio::spawn(async move {
             // 发送初始数据
             for resp in init_data {
@@ -480,12 +510,22 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                     }
                     PartitionEvent::NewTopic { topic, partitions } => {
                         let _ = resp_tx
-                            .send(Ok(convert_to_pull_resp(topic, partitions)))
+                            .send(Ok(convert_to_pull_resp(
+                                topic,
+                                partitions,
+                                raft_node.get_term().await,
+                            )))
                             .await;
                     }
                     // 处理其他事件类型...
                     PartitionEvent::AddPartitions { topic, added } => {
-                        let _ = resp_tx.send(Ok(convert_to_added_resp(topic, added))).await;
+                        let _ = resp_tx
+                            .send(Ok(convert_to_added_resp(
+                                topic,
+                                added,
+                                raft_node.get_term().await,
+                            )))
+                            .await;
                     }
                 }
             }
@@ -635,14 +675,14 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         let req = request.into_inner();
         let sub_id = format!("client_{}", remote_addr);
         let mut event_rx = match self.client_event_bus.subscribe(sub_id.clone()) {
-            Ok(rx) => rx,
+            Ok((_, rx)) => rx,
             Err(_) => return Err(tonic::Status::already_exists(remote_addr)),
         };
 
         let init_data = self.get_all_topics(&req.topic, &req.broker_ids, &req.partitions);
         let bus: EventBus<PartitionEvent> = self.client_event_bus.clone();
         let (resp_tx, resp_rx) = mpsc::channel(128);
-
+        let raft_node = self.raft_node.clone();
         tokio::spawn(async move {
             for resp in init_data {
                 resp_tx.send(Ok(resp)).await;
@@ -674,12 +714,22 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                     }
                     PartitionEvent::NewTopic { topic, partitions } => {
                         resp_tx
-                            .send(Ok(convert_to_pull_resp(topic, partitions)))
+                            .send(Ok(convert_to_pull_resp(
+                                topic,
+                                partitions,
+                                raft_node.get_term().await,
+                            )))
                             .await;
                     }
                     // 处理其他事件...
                     PartitionEvent::AddPartitions { topic, added } => {
-                        resp_tx.send(Ok(convert_to_added_resp(topic, added))).await;
+                        resp_tx
+                            .send(Ok(convert_to_added_resp(
+                                topic,
+                                added,
+                                raft_node.get_term().await,
+                            )))
+                            .await;
                     }
                 }
             }
@@ -691,15 +741,25 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
 }
 
 // 转换函数示例
-fn convert_to_pull_resp(topic: String, ps: Arc<Vec<PartitionInfo>>) -> commonsvc::TopicList {
+fn convert_to_pull_resp(
+    topic: String,
+    ps: Arc<Vec<PartitionInfo>>,
+    term: u64,
+) -> commonsvc::TopicList {
     commonsvc::TopicList {
+        term,
         list: Some(topic_list::List::Init(TopicListInit { topics: Vec::new() })),
     }
 }
 
 // 转换函数示例
-fn convert_to_added_resp(topic: String, ps: Arc<Vec<PartitionInfo>>) -> commonsvc::TopicList {
+fn convert_to_added_resp(
+    topic: String,
+    ps: Arc<Vec<PartitionInfo>>,
+    term: u64,
+) -> commonsvc::TopicList {
     commonsvc::TopicList {
+        term,
         list: Some(topic_list::List::Add(TopicListAdd { topics: Vec::new() })),
     }
 }
