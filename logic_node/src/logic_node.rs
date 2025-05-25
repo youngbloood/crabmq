@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
 use broker::Broker;
 use coo::coo::Coordinator;
-use dashmap::DashMap;
 use grpcx::{
     brokercoosvc::{self, broker_coo_service_client::BrokerCooServiceClient},
     smart_client::SmartClient,
@@ -95,7 +94,6 @@ where
             broker: self.broker,
             slave: self.salve,
             coo_leader_client: None,
-            coo_addrs: Arc::default(),
             start_smart_client: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -120,9 +118,6 @@ where
     slave: Option<Slave>,
 
     coo_leader_client: Option<SmartClient>,
-    // coo_client: Option<Arc<Mutex<BrokerCooServiceClient<Channel>>>>,
-    coo_addrs: Arc<DashMap<u64, String>>,
-
     start_smart_client: Arc<AtomicBool>,
 }
 

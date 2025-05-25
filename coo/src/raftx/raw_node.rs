@@ -6,7 +6,6 @@ use super::{
 };
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
-use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
 use grpcx::cooraftsvc::{self, ConfChangeReq, RaftMessage, raft_service_client::RaftServiceClient};
 use log::{debug, error, info, trace, warn};
 use protobuf::Message as PbMessage;
@@ -18,17 +17,18 @@ use tokio::{
     sync::{Mutex, mpsc, oneshot},
     time::{self, Duration, interval},
 };
-use tonic::Response;
-use tonic::transport::Server;
 use tonic::{Request, transport::Channel};
 
 #[derive(Clone)]
 pub struct RaftNode {
-    id: u32,
-    // raft nodo
-    raw_node: Arc<Mutex<RawNode<SledStorage>>>,
+    pub id: u32,
+    // 该 raft 节点监听地址
+    pub raft_grpc_addr: String,
+    // 该 coo 节点监听地址
+    pub coo_grpc_addr: String,
+    // raft node
+    pub raw_node: Arc<Mutex<RawNode<SledStorage>>>,
 
-    _my_mailbox_sender: mpsc::Sender<AllMessageType>,
     // 本节点收到的 信息
     my_mailbox: Arc<Mutex<mpsc::Receiver<AllMessageType>>>,
     // 将消息分发到所有的 mailboxes 中
@@ -37,11 +37,6 @@ pub struct RaftNode {
     peer: Arc<DashMap<u64, Arc<PeerState>>>,
 
     db: Db, // Key-value stor
-
-    // 该 raft 节点监听地址
-    raft_grpc_addr: String,
-    // 该 coo 节点监听地址
-    coo_grpc_addr: String,
 }
 
 // unsafe impl Send for RaftNode {}
@@ -110,7 +105,6 @@ impl RaftNode {
         let rn = RaftNode {
             id,
             raw_node,
-            _my_mailbox_sender: tx_grpc.clone(),
             my_mailbox: Arc::new(Mutex::new(rx_grpc)),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
@@ -124,18 +118,6 @@ impl RaftNode {
         );
 
         (rn, tx_grpc)
-    }
-
-    async fn start_grpc_service(&self) {
-        let addr = self.raft_grpc_addr.parse().unwrap();
-        let svc = RaftServiceServer::new(self.clone());
-        info!("Coordinator-Raft listen: {}", addr);
-        match Server::builder().add_service(svc).serve(addr).await {
-            Ok(_) => {
-                info!("Coordinator-Raft server started at {}", addr);
-            }
-            Err(e) => panic!("Coordinator-Raft listen : {}, err: {:?}", addr, e),
-        }
     }
 
     pub fn get_id(&self) -> u32 {
@@ -160,12 +142,6 @@ impl RaftNode {
     }
 
     pub async fn run(&self) {
-        // 开启 grpc 服务
-        let node = self.clone();
-        tokio::spawn(async move {
-            node.start_grpc_service().await;
-        });
-
         let mut interval = time::interval(Duration::from_millis(100));
         let mut print_interval = Instant::now();
         let mut is_initial_conf_committed = false;
@@ -630,113 +606,6 @@ impl RaftNode {
         self.peer
             .get(&raw_node.raft.leader_id)
             .map(|v| v.get_coo_addr().to_string())
-    }
-}
-
-#[tonic::async_trait]
-impl cooraftsvc::raft_service_server::RaftService for RaftNode {
-    async fn send_raft_message(
-        &self,
-        request: Request<cooraftsvc::RaftMessage>,
-    ) -> Result<Response<cooraftsvc::RaftResponse>, tonic::Status> {
-        match Message::parse_from_bytes(&request.into_inner().message) {
-            Ok(msg) => {
-                let _ = self
-                    ._my_mailbox_sender
-                    .send(AllMessageType::RaftMessage(msg))
-                    .await;
-                Ok(Response::new(cooraftsvc::RaftResponse {
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            Err(e) => {
-                return Ok(Response::new(cooraftsvc::RaftResponse {
-                    success: false,
-                    error: e.to_string(),
-                }));
-            }
-        }
-    }
-
-    async fn get_meta(
-        &self,
-        _request: tonic::Request<cooraftsvc::Empty>,
-    ) -> Result<Response<cooraftsvc::MetaResp>, tonic::Status> {
-        Ok(Response::new(cooraftsvc::MetaResp {
-            id: self.id,
-            raft_addr: repair_addr_with_http(self.raft_grpc_addr.clone()),
-            coo_addr: repair_addr_with_http(self.coo_grpc_addr.clone()),
-        }))
-    }
-
-    async fn propose_data(
-        &self,
-        _request: tonic::Request<cooraftsvc::ProposeDataReq>,
-    ) -> std::result::Result<tonic::Response<cooraftsvc::ProposeDataResp>, tonic::Status> {
-        let _ = self
-            ._my_mailbox_sender
-            .send(AllMessageType::RaftPropose((vec![], vec![])))
-            .await;
-        Ok(Response::new(cooraftsvc::ProposeDataResp {}))
-    }
-
-    async fn propose_conf_change(
-        &self,
-        request: tonic::Request<cooraftsvc::ConfChangeReq>,
-    ) -> std::result::Result<tonic::Response<cooraftsvc::ConfChangeResp>, tonic::Status> {
-        let req = request.into_inner();
-        let reason = match req.version {
-            1 => match ConfChange::parse_from_bytes(&req.message) {
-                Ok(cc) => {
-                    let _ = self
-                        ._my_mailbox_sender
-                        .send(AllMessageType::RaftConfChange(cc))
-                        .await;
-                    ""
-                }
-                Err(e) => &e.to_string(),
-            },
-
-            2 => match ConfChangeV2::parse_from_bytes(&req.message) {
-                Ok(cc) => {
-                    let _ = self
-                        ._my_mailbox_sender
-                        .send(AllMessageType::RaftConfChangeV2(cc))
-                        .await;
-                    ""
-                }
-                Err(e) => &e.to_string(),
-            },
-            _ => "unsupportted version",
-        };
-
-        if reason.is_empty() {
-            return Ok(Response::new(cooraftsvc::ConfChangeResp {
-                success: true,
-                error: String::new(),
-            }));
-        }
-
-        Ok(Response::new(cooraftsvc::ConfChangeResp {
-            success: false,
-            error: reason.to_string(),
-        }))
-    }
-
-    /// 获取 snapshot
-    async fn get_snapshot(
-        &self,
-        _request: tonic::Request<cooraftsvc::SnapshotReq>,
-    ) -> std::result::Result<tonic::Response<cooraftsvc::SnapshotResp>, tonic::Status> {
-        let raw_node = self.raw_node.lock().await;
-        if let Some(snap) = raw_node.raft.snap() {
-            match snap.write_to_bytes() {
-                Ok(data) => return Ok(Response::new(cooraftsvc::SnapshotResp { data })),
-                Err(_e) => return Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] })),
-            };
-        }
-        Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] }))
     }
 }
 

@@ -6,30 +6,31 @@ use crate::partition::PartitionPolicy;
 use crate::raftx::repair_addr_with_http;
 use crate::{BrokerNode, ClientNode};
 use anyhow::Result;
+use anyhow::anyhow;
 use dashmap::DashMap;
 use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
 use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
 use grpcx::commonsvc;
-use grpcx::commonsvc::CooInfo;
 use grpcx::commonsvc::CooListResp;
 use grpcx::commonsvc::TopicListAdd;
 use grpcx::commonsvc::TopicListInit;
 use grpcx::commonsvc::topic_list;
+use grpcx::cooraftsvc;
+use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
 use grpcx::{brokercoosvc, clientcoosvc};
 use log::error;
 use log::info;
 use partition::PartitionManager;
+use protobuf::Message as _;
+use raft::prelude::*;
 use raftx::{MessageType as AllMessageType, RaftNode};
-use std::pin::Pin;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::Request;
-use tonic::Response;
-use tonic::Status;
-use tonic::transport::Server;
+use tonic::{Request, Response, Status, transport::Server};
 
 #[derive(Clone)]
 pub struct Coordinator {
@@ -63,13 +64,21 @@ pub struct Coordinator {
     partition_mgr: PartitionManager,
 }
 
+impl Deref for Coordinator {
+    type Target = Arc<RaftNode>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raft_node
+    }
+}
+
 impl Coordinator {
     pub fn new<T: AsRef<std::path::Path>>(
         id: u32,
         db_path: T,
         coo_addr: String,
         raft_addr: String,
-        raft_leader_addr: String,
+        raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中 */
     ) -> Self {
         let (raft_node, raft_node_sender) =
             RaftNode::new(id, db_path, raft_addr.clone(), coo_addr.clone());
@@ -120,38 +129,73 @@ impl Coordinator {
 
     /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
+        if self.coo_addr.is_empty() || self.coo_grpc_addr.is_empty() {
+            return Err(anyhow!("must both have coo_addr and coo_grpc_addr"));
+        }
         // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
         self.start_checker_loop();
 
-        // 启动 raft-node: 加入目标节点，并启动 raft 通信的 grpc 服务
-        let raft_node = self.raft_node.clone();
-        let raft_leader_addr = self.raft_leader_addr.clone();
-        tokio::spawn(async move {
-            let raft_node_clone = raft_node.clone();
+        let raft_svc = RaftServiceServer::new(self.clone());
+        let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
+        let clientcoo_svc = ClientCooServiceServer::new(self.clone());
+
+        let mut svc_builer = Server::builder()
+            .add_service(brokercoo_svc)
+            .add_service(clientcoo_svc);
+
+        let coo_addr = self.coo_addr.parse().unwrap();
+        if !self.coo_addr.eq(&self.coo_grpc_addr) {
+            let raft_node = self.raft_node.clone();
+            let raft_grpc_addr = self.coo_grpc_addr.parse().unwrap();
+
             tokio::spawn(async move {
-                raft_node_clone.run().await;
+                tokio::spawn(async move {
+                    info!("Coordinator-Raft listen: {}", raft_grpc_addr);
+                    match Server::builder()
+                        .add_service(raft_svc)
+                        .serve(raft_grpc_addr)
+                        .await
+                    {
+                        Ok(_) => {
+                            info!("Coordinator-Raft server started at {}", raft_grpc_addr);
+                        }
+                        Err(e) => {
+                            panic!("Coordinator-Raft listen : {}, err: {:?}", raft_grpc_addr, e)
+                        }
+                    }
+                });
             });
-            if !raft_leader_addr.is_empty() {
-                let _ = raft_node.join(raft_leader_addr).await;
+        } else {
+            svc_builer = svc_builer.add_service(raft_svc);
+            info!("Coordinator-Raft listen: {}", coo_addr);
+        }
+
+        let raft_node = self.raft_node.clone();
+        let raft_handle = tokio::spawn(async move {
+            raft_node.run().await;
+        });
+
+        let grpc_handle = tokio::spawn(async move {
+            info!("Coordinator listen: {}", coo_addr);
+            match svc_builer.serve(coo_addr).await {
+                Ok(_) => {
+                    info!("Coordinator server started at {}", coo_addr);
+                }
+                Err(e) => panic!("Coordinator listen : {}, err: {:?}", coo_addr, e),
             }
         });
 
-        let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
-        let clientcoo_svc = ClientCooServiceServer::new(self.clone());
-        let addr = self.coo_addr.parse().unwrap();
+        let join_handle = if !self.raft_leader_addr.is_empty() {
+            let raft_node = self.raft_node.clone();
+            let raft_leader_addr = self.raft_leader_addr.clone();
+            tokio::spawn(async move {
+                let _ = raft_node.join(raft_leader_addr).await;
+            })
+        } else {
+            tokio::spawn(async {})
+        };
 
-        info!("Coordinator listen: {}", addr);
-        match Server::builder()
-            .add_service(brokercoo_svc)
-            .add_service(clientcoo_svc)
-            .serve(addr)
-            .await
-        {
-            Ok(_) => {
-                info!("Coordinator server started at {}", addr);
-            }
-            Err(e) => panic!("Coordinator listen : {}, err: {:?}", addr, e),
-        }
+        tokio::try_join!(raft_handle, grpc_handle, join_handle)?;
         Ok(())
     }
 
@@ -737,6 +781,113 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         });
 
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
+    }
+}
+
+#[tonic::async_trait]
+impl cooraftsvc::raft_service_server::RaftService for Coordinator {
+    async fn send_raft_message(
+        &self,
+        request: Request<cooraftsvc::RaftMessage>,
+    ) -> Result<Response<cooraftsvc::RaftResponse>, tonic::Status> {
+        match Message::parse_from_bytes(&request.into_inner().message) {
+            Ok(msg) => {
+                let _ = self
+                    .raft_node_sender
+                    .send(AllMessageType::RaftMessage(msg))
+                    .await;
+                Ok(Response::new(cooraftsvc::RaftResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => {
+                return Ok(Response::new(cooraftsvc::RaftResponse {
+                    success: false,
+                    error: e.to_string(),
+                }));
+            }
+        }
+    }
+
+    async fn get_meta(
+        &self,
+        _request: tonic::Request<cooraftsvc::Empty>,
+    ) -> Result<Response<cooraftsvc::MetaResp>, tonic::Status> {
+        Ok(Response::new(cooraftsvc::MetaResp {
+            id: self.id,
+            raft_addr: repair_addr_with_http(self.raft_node.raft_grpc_addr.clone()),
+            coo_addr: repair_addr_with_http(self.raft_node.coo_grpc_addr.clone()),
+        }))
+    }
+
+    async fn propose_data(
+        &self,
+        _request: tonic::Request<cooraftsvc::ProposeDataReq>,
+    ) -> std::result::Result<tonic::Response<cooraftsvc::ProposeDataResp>, tonic::Status> {
+        let _ = self
+            .raft_node_sender
+            .send(AllMessageType::RaftPropose((vec![], vec![])))
+            .await;
+        Ok(Response::new(cooraftsvc::ProposeDataResp {}))
+    }
+
+    async fn propose_conf_change(
+        &self,
+        request: tonic::Request<cooraftsvc::ConfChangeReq>,
+    ) -> std::result::Result<tonic::Response<cooraftsvc::ConfChangeResp>, tonic::Status> {
+        let req = request.into_inner();
+        let reason = match req.version {
+            1 => match ConfChange::parse_from_bytes(&req.message) {
+                Ok(cc) => {
+                    let _ = self
+                        .raft_node_sender
+                        .send(AllMessageType::RaftConfChange(cc))
+                        .await;
+                    ""
+                }
+                Err(e) => &e.to_string(),
+            },
+
+            2 => match ConfChangeV2::parse_from_bytes(&req.message) {
+                Ok(cc) => {
+                    let _ = self
+                        .raft_node_sender
+                        .send(AllMessageType::RaftConfChangeV2(cc))
+                        .await;
+                    ""
+                }
+                Err(e) => &e.to_string(),
+            },
+            _ => "unsupportted version",
+        };
+
+        if reason.is_empty() {
+            return Ok(Response::new(cooraftsvc::ConfChangeResp {
+                success: true,
+                error: String::new(),
+            }));
+        }
+
+        Ok(Response::new(cooraftsvc::ConfChangeResp {
+            success: false,
+            error: reason.to_string(),
+        }))
+    }
+
+    /// 获取 snapshot
+    async fn get_snapshot(
+        &self,
+        _request: tonic::Request<cooraftsvc::SnapshotReq>,
+    ) -> std::result::Result<tonic::Response<cooraftsvc::SnapshotResp>, tonic::Status> {
+        let raw_node = self.raw_node.lock().await;
+        if let Some(snap) = raw_node.raft.snap() {
+            match snap.write_to_bytes() {
+                Ok(data) => return Ok(Response::new(cooraftsvc::SnapshotResp { data })),
+                Err(_e) => return Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] })),
+            };
+        }
+        Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] }))
     }
 }
 

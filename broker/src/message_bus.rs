@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 type MessageBusKey = (String, u32);
@@ -8,6 +8,7 @@ type MessageBusValue = Arc<DashMap<String, mpsc::Sender<Bytes>>>;
 
 #[derive(Debug, Clone)]
 pub struct MessageBus {
+    timeout: Duration,
     // 生产者总线：topic-partition  -> ModuleName -> sender
     producers: Arc<DashMap<MessageBusKey, MessageBusValue>>,
     // 消费者总线：topic-partition ->  ModuleName -> sender
@@ -17,6 +18,7 @@ pub struct MessageBus {
 impl MessageBus {
     pub fn new() -> Self {
         Self {
+            timeout: Duration::from_millis(10),
             producers: Arc::new(DashMap::new()),
             consumers: Arc::new(DashMap::new()),
         }
@@ -53,7 +55,9 @@ impl MessageBus {
         if let Some(entry) = entry {
             let list: Vec<_> = entry.iter().enumerate().collect();
             for v in list {
-                v.1.value().send(payload.clone()).await;
+                v.1.value()
+                    .send_timeout(payload.clone(), self.timeout)
+                    .await;
             }
         }
     }
@@ -89,7 +93,9 @@ impl MessageBus {
         if let Some(entry) = entry {
             let list: Vec<_> = entry.iter().enumerate().collect();
             for v in list {
-                v.1.value().send(payload.clone()).await;
+                v.1.value()
+                    .send_timeout(payload.clone(), self.timeout)
+                    .await;
             }
         }
     }

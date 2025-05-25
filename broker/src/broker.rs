@@ -35,7 +35,7 @@ pub struct Broker<T: Storage> {
 }
 
 impl<T: Storage> Broker<T> {
-    pub fn new(id: u32, broker_addr: String, coo_addr: String, storage: T) -> Self {
+    pub fn new(id: u32, broker_addr: String, storage: T) -> Self {
         Self {
             id,
             broker_addr,
