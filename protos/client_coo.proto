@@ -30,8 +30,7 @@ message AddTopicReq {
     // topic 
     string topic = 1;
     // 该 topic 的分区数量
-    uint32 partition = 2;
-    string token = 3;
+    uint32 partitio_num = 2;
 }
 
 message AddTopicResp {
@@ -43,8 +42,8 @@ message AddPartitionsReq {
     // topic 
     string topic = 1;
     // 该 topic 的增加的分区数量
-    uint32 partition = 2; 
-    string token = 3;
+    uint32 partitio_num = 2; 
+    string key = 3;
 }
 
 message AddPartitionsResp {
@@ -54,7 +53,8 @@ message AddPartitionsResp {
 
 message PullReq {
     // 过滤条件
-    string topic = 1;
-    repeated uint32 partitions = 2;
+    repeated string topics = 1;
+    repeated uint32 partition_ids = 2;
     repeated uint32 broker_ids = 3;
+    repeated string keys = 4;
 }

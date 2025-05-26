@@ -62,6 +62,8 @@ message TopicInfos {
 }
 
 message PullReq {
-    // broker 唯一标识
-    uint32 id = 1;
+    // 过滤条件
+    uint32 broker_id = 1;
+    repeated string topics = 2;
+    repeated uint32 partition_ids = 3;
 }

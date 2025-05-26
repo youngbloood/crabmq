@@ -10,5 +10,7 @@ struct BrokerNode {
 
 struct ClientNode {}
 
+pub trait Filter {}
+
 #[cfg(test)]
 mod test {}

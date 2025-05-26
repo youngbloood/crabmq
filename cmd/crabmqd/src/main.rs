@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use broker::Broker;
 use coo::coo::Coordinator;
-use logic_node::{LogicNode, Slave};
-use std::{env::join_paths, net::SocketAddr, path::Path, sync::Arc};
+use logic_node::Slave;
+use std::{net::SocketAddr, path::Path, sync::Arc};
 use storagev2::mem;
 use structopt::StructOpt;
 use tokio::sync::Mutex;
@@ -27,11 +27,11 @@ struct Args {
 struct CooArgs {
     /// Coordinator listen grpc address
     #[structopt(short = "c", long = "coo")]
-    coo: String,
+    coo: Option<String>,
 
     /// Coordinator raft listen grpc address, if it empty, will be equal to {.coo}
     #[structopt(long = "coo-raft")]
-    coo_raft: String,
+    coo_raft: Option<String>,
 
     /// Indicate the raft data storage path
     #[structopt(long = "db-path", default_value = "./data")]
@@ -42,29 +42,29 @@ struct CooArgs {
 struct BrokerArgs {
     /// Broker listen grpc address
     #[structopt(short = "b")]
-    broker: String,
+    broker: Option<String>,
 
     /// Indicate the Coordinator Raft Leader gprc address
     #[structopt(long = "raft-leader")]
-    raft_leader: String,
+    raft_leader: Option<String>,
 
     /// Indicate the coo-address to broker report state
     #[structopt(long = "coo-leader")]
-    coo_leader: String,
+    coo_leader: Option<String>,
 }
 
 #[derive(StructOpt, Debug)]
 struct SlaveArgs {
     /// Slave listen grpc address
     #[structopt(short = "s")]
-    slave: String,
+    slave: Option<String>,
 }
 
 impl Args {
     fn validate(&mut self) -> Result<()> {
         // 规则1: slave不为空时，broker和coo必须为空
-        if !self.slave_args.slave.is_empty()
-            && (!self.broker_args.broker.is_empty() || !self.coo_args.coo.is_empty())
+        if !self.slave_args.slave.is_none()
+            && (!self.broker_args.broker.is_none() || !self.coo_args.coo.is_none())
         {
             return Err(anyhow!(
                 "When slave is specified, broker and coo must be empty"
@@ -72,9 +72,9 @@ impl Args {
         }
 
         // 规则2: slave为空时，broker和coo至少一个非空
-        if self.slave_args.slave.is_empty()
-            && self.broker_args.broker.is_empty()
-            && self.coo_args.coo.is_empty()
+        if self.slave_args.slave.is_none()
+            && self.broker_args.broker.is_none()
+            && self.coo_args.coo.is_none()
         {
             return Err(anyhow!(
                 "Either broker or coo must be specified when slave is empty"
@@ -82,50 +82,54 @@ impl Args {
         }
 
         // 规则3: .coo 和 .coo_raft 互补
-        if self.coo_args.coo_raft.is_empty() && !self.coo_args.coo.is_empty() {
+        if self.coo_args.coo_raft.is_none() && !self.coo_args.coo.is_none() {
             self.coo_args.coo_raft = self.coo_args.coo.clone();
-        } else if !self.coo_args.coo_raft.is_empty() && self.coo_args.coo.is_empty() {
+        } else if !self.coo_args.coo_raft.is_none() && self.coo_args.coo.is_none() {
             self.coo_args.coo = self.coo_args.coo_raft.clone();
         }
-        if self.coo_args.coo.is_empty() != self.coo_args.coo_raft.is_empty() {
+        if self.coo_args.coo.is_none() != self.coo_args.coo_raft.is_none() {
             return Err(anyhow!(
                 "coo and coo_raft must both have values or both be empty"
             ));
         }
 
         // 规则4: 有 broker 模块, .coo_leader 和 .raft_leader 互补
-        if self.broker_args.coo_leader.is_empty() && !self.broker_args.raft_leader.is_empty() {
+        if self.broker_args.coo_leader.is_none() && self.broker_args.raft_leader.is_some() {
             self.broker_args.coo_leader = self.broker_args.raft_leader.clone();
-        } else if !self.broker_args.coo_leader.is_empty() && self.broker_args.raft_leader.is_empty()
-        {
+        } else if self.broker_args.coo_leader.is_some() && self.broker_args.raft_leader.is_none() {
             self.broker_args.raft_leader = self.broker_args.coo_leader.clone();
-        } else if self.broker_args.coo_leader.is_empty() && self.broker_args.raft_leader.is_empty()
-        {
+        } else if self.broker_args.coo_leader.is_none() && self.broker_args.raft_leader.is_none() {
             // 若两者均为空，则取其 .coo_args.coo地址
             self.broker_args.raft_leader = self.coo_args.coo.clone();
             self.broker_args.coo_leader = self.coo_args.coo.clone();
         }
 
         // 规则5: IP:PORT格式验证
-        let validate_addr = |name: &str, addr: &str| -> Result<()> {
-            if !addr.is_empty() {
-                addr.parse::<SocketAddr>().map_err(|_| {
+        let validate_addr = |name: &str, addr: Option<&str>| -> Result<()> {
+            if addr.is_some() && !addr.as_ref().unwrap().is_empty() {
+                addr.unwrap().parse::<SocketAddr>().map_err(|_| {
                     anyhow!(
                         "Invalid {} address format: {}, expected ip:port",
                         name,
-                        addr
+                        addr.unwrap()
                     )
                 })?;
             }
             Ok(())
         };
 
-        validate_addr(".coo_args.coo", &self.coo_args.coo)?;
-        validate_addr(".coo_args.coo_raft", &self.coo_args.coo_raft)?;
-        validate_addr(".broker_args.broker", &self.broker_args.broker)?;
-        validate_addr(".broker_args.raft_leader", &self.broker_args.raft_leader)?;
-        validate_addr(".broker_args.coo_leader", &self.broker_args.coo_leader)?;
-        validate_addr(".slave_args.slave", &self.slave_args.slave)?;
+        validate_addr(".coo_args.coo", self.coo_args.coo.as_deref())?;
+        validate_addr(".coo_args.coo_raft", self.coo_args.coo_raft.as_deref())?;
+        validate_addr(".broker_args.broker", self.broker_args.broker.as_deref())?;
+        validate_addr(
+            ".broker_args.raft_leader",
+            self.broker_args.raft_leader.as_deref(),
+        )?;
+        validate_addr(
+            ".broker_args.coo_leader",
+            self.broker_args.coo_leader.as_deref(),
+        )?;
+        validate_addr(".slave_args.slave", self.slave_args.slave.as_deref())?;
 
         Ok(())
     }
@@ -139,30 +143,29 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut builder = logic_node::Builder::new();
-    if !args.coo_args.coo.is_empty() {
+    if !args.coo_args.coo.is_none() {
         let db_path = Path::new(&args.coo_args.db_path).join(format!("coo{}", args.id));
         let coo = Coordinator::new(
             args.id,
             db_path.as_os_str(),
-            args.coo_args.coo.clone(),
-            args.coo_args.coo_raft.clone(),
-            args.broker_args.raft_leader.clone(),
+            args.coo_args.coo.unwrap(),
+            args.coo_args.coo_raft.unwrap(),
+            args.broker_args.raft_leader.unwrap(),
         );
         builder = builder.coo(coo);
     }
-    if !args.broker_args.broker.is_empty() {
+    if !args.broker_args.broker.is_none() {
         let store = mem::MemStorage::new();
-        let broker = Broker::new(args.id, args.broker_args.broker.clone(), store);
+        let broker = Broker::new(args.id, args.broker_args.broker.unwrap(), store);
         builder = builder.broker(broker);
     }
-    if !args.slave_args.slave.is_empty() {
+    if !args.slave_args.slave.is_none() {
         builder = builder.slave(Slave);
     }
 
-    println!("args ======= {:?}", args);
     builder
         .build()
-        .run(Arc::new(Mutex::new(args.broker_args.coo_leader)))
+        .run(Arc::new(Mutex::new(args.broker_args.coo_leader.unwrap())))
         .await?;
     Ok(())
 }

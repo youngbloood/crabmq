@@ -1,10 +1,13 @@
+use super::PartitionApply;
 use super::mailbox_message_type::MessageType as AllMessageType;
 use super::storage::SledStorage;
 use super::{
     // grpc_service::{RaftServiceImpl, start_grpc_server},
     peer::PeerState,
 };
+use crate::partition::SinglePartition;
 use anyhow::{Result, anyhow};
+use bincode::config;
 use dashmap::DashMap;
 use grpcx::cooraftsvc::{self, ConfChangeReq, RaftMessage, raft_service_client::RaftServiceClient};
 use log::{debug, error, info, trace, warn};
@@ -20,7 +23,7 @@ use tokio::{
 use tonic::{Request, transport::Channel};
 
 #[derive(Clone)]
-pub struct RaftNode {
+pub struct RaftNode<P: PartitionApply> {
     pub id: u32,
     // 该 raft 节点监听地址
     pub raft_grpc_addr: String,
@@ -36,20 +39,26 @@ pub struct RaftNode {
     // 集群中其他节点的信息(包含自身)
     peer: Arc<DashMap<u64, Arc<PeerState>>>,
 
-    db: Db, // Key-value stor
+    db: P, // Key-value stor
+
+    callbacks: Arc<DashMap<String, Callback>>,
 }
+
+pub type Callback = mpsc::Sender<Result<String>>;
 
 // unsafe impl Send for RaftNode {}
 // unsafe impl Sync for RaftNode {}
 
-impl RaftNode {
-    pub fn new<T: AsRef<std::path::Path>>(
+impl<P> RaftNode<P>
+where
+    P: PartitionApply,
+{
+    pub fn new(
         id: u32,
-        db_path: T,
         raft_grpc_addr: String,
         coo_grpc_addr: String,
+        p: P,
     ) -> (Self, mpsc::Sender<AllMessageType>) {
-        let db = sled::open(db_path).expect("Failed to open sled DB");
         let config = Config {
             id: id as u64,
             election_tick: 10,
@@ -90,7 +99,7 @@ impl RaftNode {
         //     ..Default::default()
         // };
 
-        let storage = SledStorage::new(id as u64, db.clone());
+        let storage = SledStorage::new(id as u64, p.get_db());
         let raw_node = Arc::new(Mutex::new(
             RawNode::with_default_logger(&config, storage).expect("Failed to create Raft node"),
         ));
@@ -108,9 +117,10 @@ impl RaftNode {
             my_mailbox: Arc::new(Mutex::new(rx_grpc)),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
-            db,
+            db: p,
             raft_grpc_addr: raft_grpc_addr.clone(),
             coo_grpc_addr: coo_grpc_addr.clone(),
+            callbacks: Arc::new(DashMap::new()),
         };
         rn.peer.insert(
             id.into(),
@@ -139,6 +149,21 @@ impl RaftNode {
     pub async fn get_term(&self) -> u64 {
         let raw_node = self.raw_node.lock().await;
         raw_node.raft.term
+    }
+
+    pub async fn get_not_leader_err_status(&self, message: String) -> tonic::Status {
+        let coo_leader_addr = self
+            .get_coo_leader_addr()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut status = tonic::Status::new(tonic::Code::PermissionDenied, message);
+
+        // 添加 leader 地址到 metadata
+        status
+            .metadata_mut()
+            .insert("x-raft-leader", coo_leader_addr.parse().unwrap());
+        status
     }
 
     pub async fn run(&self) {
@@ -247,7 +272,7 @@ impl RaftNode {
                         }
 
                         AllMessageType::RaftPropose(pp) => {
-                            todo!("raft propose")
+                           let _ = self.propose(&pp.topic, pp.callback).await;
                         }
                     }
                 }
@@ -379,17 +404,16 @@ impl RaftNode {
             match entry.get_entry_type() {
                 EntryType::EntryNormal => {
                     let data = &entry.data;
-                    let kv: serde_json::Value = serde_json::from_slice(data).unwrap();
-                    let key = kv["key"].as_str().unwrap();
-                    let value = kv["value"].as_array().unwrap();
-                    let mut values = Vec::with_capacity(value.len());
-                    for v in value {
-                        values.push(v.as_u64().unwrap() as u32);
+
+                    let part: SinglePartition =
+                        bincode::serde::decode_from_slice(data, config::standard())
+                            .unwrap()
+                            .0;
+                    let unique_id = part.unique_id.clone();
+                    self.db.apply(part);
+                    if let Some((unique_id, cb)) = self.callbacks.remove(&unique_id) {
+                        let _ = cb.send(Ok(unique_id)).await;
                     }
-                    // TODO: 插入values
-                    todo!("self.db.insert(key, values).unwrap();")
-                    // self.db.insert(key, values).unwrap();
-                    // info!("Node[{}] applied: {} = {}", self.id, key, value);
                 }
 
                 EntryType::EntryConfChange => {
@@ -575,20 +599,32 @@ impl RaftNode {
         raw_node.raft.state == StateRole::Leader
     }
 
-    pub async fn propose(&self, key: &str, broker_ids: &Vec<u32>) -> Result<()> {
+    async fn propose(&self, part: &SinglePartition, cb: Option<Callback>) -> Result<()> {
+        let send = |e| async {
+            if let Some(cb) = &cb {
+                let _ = cb.send(e).await;
+            }
+        };
         let mut raw_node = self.raw_node.lock().await;
         if raw_node.raft.state != StateRole::Leader {
+            send(Err(anyhow!("Not Leader"))).await;
             return Err(anyhow!("Not leader"));
         }
-        let data = serde_json::json!({ "key": key, "value": broker_ids });
-        let data = serde_json::to_vec(&data).unwrap();
-        // TODO: propose data
-        raw_node.propose(vec![], data)?;
+        let unique_id = part.unique_id.clone();
+        let data = bincode::serde::encode_to_vec(part, bincode::config::standard())?;
+        if let Err(e) = raw_node.propose(vec![], data) {
+            send(Err(anyhow!(e.to_string()))).await;
+            return Err(anyhow!(e));
+        }
+        if let Some(cb) = cb {
+            self.callbacks.insert(unique_id, cb);
+        }
         Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
         self.db
+            .get_db()
             .get(key)
             .unwrap()
             .map(|v| String::from_utf8(v.to_vec()).unwrap())

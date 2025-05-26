@@ -3,7 +3,7 @@ use broker::Broker;
 use coo::coo::Coordinator;
 use grpcx::{
     brokercoosvc::{self, broker_coo_service_client::BrokerCooServiceClient},
-    smart_client::SmartClient,
+    smart_client::{SmartClient, extract_leader_address},
 };
 use log::{error, info, warn};
 use std::{
@@ -230,7 +230,7 @@ where
         );
         let broker = broker.clone();
         let mut state_recv = broker.get_state_reciever("logic_node".to_string());
-        let mut pull_recv = coo.broker_pull(broker.get_id()).unwrap();
+        let mut pull_recv = coo.broker_pull(broker.get_id()).await.unwrap();
         loop {
             select! {
                 state = state_recv.recv() => {
@@ -307,8 +307,7 @@ where
                     .refresh_coo_endpoints(|chan| async {
                         BrokerCooServiceClient::new(chan)
                             .list(Request::new(grpcx::commonsvc::CooListReq {
-                                token: "".to_string(),
-                                id: broker_id,
+                                id: broker_id.to_string(),
                             }))
                             .await
                     })
@@ -382,7 +381,11 @@ where
             // Pull Broker Partition
             let pull_resp_strm = pull_coo_client
                 .open_sstream(
-                    brokercoosvc::PullReq { id: broker_id },
+                    brokercoosvc::PullReq {
+                        topics: vec![],
+                        partition_ids: vec![],
+                        broker_id,
+                    },
                     |chan, request, addr| async {
                         *_coo_leader.lock().await = addr;
                         BrokerCooServiceClient::new(chan).pull(request).await
@@ -428,16 +431,10 @@ where
             error!("pull TopicList: 自动调用完成?");
         });
 
-        tokio::try_join!(report_handle, pull_handle);
+        if let Err(e) = tokio::try_join!(report_handle, pull_handle) {
+            error!("tokio try_join error: {:?}", e);
+        }
     }
-}
-
-fn extract_leader_address(status: &Status) -> Option<String> {
-    status
-        .metadata()
-        .get("x-raft-leader")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
 }
 
 async fn change_with_status(status: &Status, coo_leader_addr: Arc<Mutex<String>>) {

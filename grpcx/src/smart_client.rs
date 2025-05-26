@@ -507,7 +507,7 @@ impl SmartClient {
     }
 }
 
-fn extract_leader_address(status: &Status) -> Option<String> {
+pub fn extract_leader_address(status: &Status) -> Option<String> {
     status
         .metadata()
         .get("x-raft-leader")

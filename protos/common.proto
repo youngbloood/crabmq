@@ -34,8 +34,7 @@ message PartitionInfos{
 
 
 message CooListReq {
-    string token = 1;
-    uint32 id = 2;
+    string id = 1;
 }
 
 message CooListResp {
