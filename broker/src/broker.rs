@@ -57,12 +57,12 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
         &self,
         request: Request<tonic::Streaming<PublishReq>>,
     ) -> Result<Response<Self::PublishStream>, Status> {
-        let mut stream = request.into_inner();
+        let mut strm = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
         let broker = self.clone();
         tokio::spawn(async move {
-            while let Ok(Some(req)) = stream.message().await {
+            while let Ok(Some(req)) = strm.message().await {
                 let result = broker.process_publish(req).await;
                 let _ = tx.send(result.map_err(Into::into)).await;
             }
