@@ -1,6 +1,6 @@
 use super::index::{Index, IndexCache};
 use super::{FdCache, MessageRecord, RecordManagerStrategy};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 use chrono::{Datelike, FixedOffset, Local, Timelike};
 use common::util::{check_exist, dir_recursive};
@@ -568,7 +568,7 @@ impl TimePtr {
         match self.read() {
             Ok((over_line, val)) => {
                 if over_line {
-                    let mut filenames = dir_recursive(self.defer_dir.clone()).unwrap();
+                    let mut filenames = dir_recursive(self.defer_dir.clone(), &[]).unwrap();
                     filenames.sort();
                     for filename in filenames {
                         let mut record_wd = self
@@ -779,8 +779,8 @@ mod tests {
 
         for i in 0..1000 {
             let id_str = random_str(length as _);
-            assert!(rmst
-                .push(MessageRecord {
+            assert!(
+                rmst.push(MessageRecord {
                     factor: 0,
                     offset: 0,
                     length: 50,
@@ -792,7 +792,8 @@ mod tests {
                     record_length: 0
                 })
                 .await
-                .is_ok());
+                .is_ok()
+            );
             if i % 100 == 0 {
                 assert!(rmst.persist().await.is_ok());
             }

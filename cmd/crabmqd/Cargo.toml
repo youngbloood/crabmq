@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 broker = { version = "0.1.0", path = "../../broker" }
+bytes = "1.10.1"
 coo = { version = "0.1.0", path = "../../coo" }
 env_logger = "0.11.8"
 log = "0.4.27"

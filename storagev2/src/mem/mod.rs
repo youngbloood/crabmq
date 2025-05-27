@@ -5,23 +5,32 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::Storage;
-
-#[derive(Clone, Default)]
-pub struct MemStorage {
-    topics: Arc<DashMap<String, PartitionStorage>>,
-}
-
-struct PartitionStorage {
-    partitions: Arc<DashMap<u32, PartitionQueue>>,
-}
 
 struct PartitionQueue {
     messages: Arc<Mutex<VecDeque<Bytes>>>,
     read_pos: Arc<AtomicUsize>, // 当前读取位置
 }
 
+struct PartitionStorage {
+    partitions: Arc<DashMap<u32, PartitionQueue>>,
+}
+
+#[derive(Clone, Default)]
+pub struct MemStorage {
+    topics: Arc<DashMap<String, PartitionStorage>>,
+}
+
+impl MemStorage {
+    pub fn new() -> Self {
+        Self {
+            topics: Arc::new(DashMap::new()),
+        }
+    }
+}
 #[async_trait]
 impl Storage for MemStorage {
     /// 存储消息到指定 topic 和 partition
@@ -46,7 +55,12 @@ impl Storage for MemStorage {
     }
 
     /// 获取下一个消息并移动读取指针
-    async fn next(&self, topic: &str, partition: u32) -> Result<Bytes> {
+    async fn next(
+        &self,
+        topic: &str,
+        partition: u32,
+        stop_signal: CancellationToken,
+    ) -> Result<Bytes> {
         let topic_storage = self
             .topics
             .get(topic)

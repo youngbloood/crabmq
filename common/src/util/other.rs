@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Context as _, Result, anyhow};
 use futures::Future;
 use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-use std::ffi::OsStr;
+use rand::{Rng, thread_rng};
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::{
     env::var,
@@ -98,26 +98,81 @@ pub async fn interval(dur: Duration) -> Interval {
     ticker
 }
 
-pub fn dir_recursive(dir: PathBuf) -> Result<Vec<PathBuf>> {
-    if !check_exist(&dir) {
-        return Err(anyhow!("dir[{dir:?}] not exist"));
+// pub fn dir_recursive(dir: PathBuf, exts: &[OsString]) -> Result<Vec<PathBuf>> {
+//     if !check_exist(&dir) {
+//         return Err(anyhow!("dir[{dir:?}] not exist"));
+//     }
+
+//     let dirs: std::iter::Enumerate<fs::ReadDir> = fs::read_dir(&dir)
+//         .expect("read dir[{dir:?}] failed")
+//         .enumerate();
+
+//     let mut list = vec![];
+//     for (_, dr) in dirs {
+//         assert!(dr.is_ok());
+//         let entry = dr.unwrap();
+
+//         if entry.file_type().unwrap().is_dir() {
+//             let leaves = dir_recursive(dir.clone().join(entry.file_name()))?;
+//             list.extend(leaves);
+//             continue;
+//         }
+//         let filename = dir.join(entry.file_name());
+//         if !exts.is_empty() {
+//             if exts.contains(&filename.extension().unwrap_or_default()) {
+//                 list.push(filename);
+//             }
+//         } else {
+//             list.push(filename);
+//         }
+//     }
+
+//     Ok(list)
+// }
+
+/// 递归获取目录下指定后缀的文件列表
+pub fn dir_recursive(dir: PathBuf, exts: &[OsString]) -> Result<Vec<PathBuf>> {
+    // 检查目录是否存在
+    if !dir.exists() {
+        return Err(anyhow!("Directory [{:?}] does not exist", dir));
+    }
+    if !dir.is_dir() {
+        return Err(anyhow!("[{:?}] is not a directory", dir));
     }
 
-    let dirs = fs::read_dir(&dir)
-        .expect("read dir[{dir:?}] failed")
-        .enumerate();
+    let mut file_list = Vec::new();
 
-    let mut list = vec![];
-    for (_, dr) in dirs {
-        assert!(dr.is_ok());
-        let entry = dr.unwrap();
-        if entry.file_type().unwrap().is_dir() {
-            let leaves = dir_recursive(dir.clone().join(entry.file_name()))?;
-            list.extend(leaves);
+    // 读取目录条目
+    let entries =
+        fs::read_dir(&dir).with_context(|| format!("Failed to read directory: {:?}", dir))?;
+
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("Failed to read entry in directory: {:?}", dir))?;
+        let path = entry.path();
+
+        // 递归处理子目录
+        if path.is_dir() {
+            let sub_files = dir_recursive(path, exts)?;
+            file_list.extend(sub_files);
             continue;
         }
-        list.push(dir.join(entry.file_name()));
+
+        // 文件扩展名过滤逻辑
+        let should_include = match exts.is_empty() {
+            true => true, // 无后缀过滤条件
+            false => {
+                // 获取文件扩展名并进行匹配
+                path.extension()
+                    .map(|ext| exts.contains(&ext.to_os_string()))
+                    .unwrap_or(false) // 无后缀文件不匹配
+            }
+        };
+
+        if should_include {
+            file_list.push(path);
+        }
     }
 
-    Ok(list)
+    Ok(file_list)
 }
