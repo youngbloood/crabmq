@@ -1,5 +1,5 @@
 mod compress;
-mod config;
+pub mod config;
 mod fd_cache;
 mod flusher;
 mod meta;
@@ -10,15 +10,14 @@ use crate::Storage;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use common::check_exist;
-use config::DiskConfig;
+pub use config::*;
 use dashmap::DashMap;
 use fd_cache::FdCacheAync;
 use flusher::Flusher;
 use log::error;
-use meta::{PartitionMeta, PositionPtr, TopicMeta, WriterPositionPtr};
-use notify::{Config, EventHandler, FsEventWatcher, RecursiveMode};
+use meta::{META_NAME, PartitionMeta, PositionPtr, TopicMeta, gen_record_filename};
+use notify::{Config, FsEventWatcher, RecursiveMode};
 use notify::{Event, Watcher};
-use std::error::Error as StdError;
 use std::path::Path;
 use std::result::Result as StdResult;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -30,6 +29,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use writer::PartitionWriter;
+
+const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 
 #[derive(Clone)]
 struct PartitionDetail {
@@ -67,7 +68,7 @@ impl DiskStorage {
         let fd_cache = Arc::new(FdCacheAync::new(cfg.fd_cache_size as usize));
 
         // 启动刷盘守护任务
-        let flusher = Flusher::new(Duration::from_millis(cfg.persist_period));
+        let flusher = Flusher::new(Duration::from_millis(cfg.flusher_period));
         let mut _flusher = flusher.clone();
         let (flush_sender, flusher_signal) = mpsc::channel(1);
         tokio::spawn(async move { _flusher.run(flusher_signal).await });
@@ -97,7 +98,7 @@ impl DiskStorage {
         let dir = self.cfg.storage_dir.join(topic);
         tokio::fs::create_dir_all(&dir).await?;
 
-        let meta_path = dir.join("meta.bin");
+        let meta_path = dir.join(META_NAME);
         let topic_meta = if meta_path.exists() {
             TopicMeta::load(&meta_path).await?
         } else {
@@ -127,21 +128,11 @@ impl DiskStorage {
         let dir = ts.dir.join(format!("{}", partition));
         tokio::fs::create_dir_all(&dir).await?;
 
-        let meta_path = dir.join("meta.bin");
+        let meta_path = dir.join(META_NAME);
         let partition_meta = if meta_path.exists() {
             PartitionMeta::load(&meta_path).await?
         } else {
-            PartitionMeta {
-                read_ptr: Arc::new(RwLock::new(PositionPtr::new(
-                    dir.join(gen_record_filename(0)),
-                ))),
-                commit_ptr: Arc::new(RwLock::new(PositionPtr::new(
-                    dir.join(gen_record_filename(0)),
-                ))),
-                write_ptr: Arc::new(RwLock::new(WriterPositionPtr::new(
-                    dir.join(gen_record_filename(0)),
-                ))),
-            }
+            PartitionMeta::new(dir.join(gen_record_filename(0)))
         };
 
         let writer = Arc::new(
@@ -149,7 +140,7 @@ impl DiskStorage {
                 dir.clone(),
                 &self.cfg,
                 self.fd_cache.clone(),
-                partition_meta.write_ptr.clone(),
+                partition_meta.get_write_ptr(),
             )
             .await?,
         );
@@ -180,7 +171,7 @@ impl Storage for DiskStorage {
     async fn next(&self, topic: &str, partition: u32, stop: CancellationToken) -> Result<Bytes> {
         let pd: PartitionDetail = self.get_partition_writer(topic, partition).await?;
         let mut reader_session =
-            PartitionReaderSession::new(pd.dir, self.fd_cache.clone(), pd.meta.read_ptr.clone())?;
+            PartitionReaderSession::new(pd.dir, self.fd_cache.clone(), pd.meta.get_read_ptr())?;
         reader_session.next(stop).await
     }
 
@@ -192,18 +183,10 @@ impl Storage for DiskStorage {
         // meta.commit_ptr = pd.meta.read_ptr.clone();
 
         // // 持久化元数据
-        // let meta_path = pd.dir.join("meta.bin");
+        // let meta_path = pd.dir.join(META_NAME);
         // meta.save(&meta_path).await?;
         Ok(())
     }
-}
-
-pub fn gen_filename(factor: u64) -> String {
-    format!("{:0>20}", factor)
-}
-
-pub fn gen_record_filename(factor: u64) -> String {
-    format!("{}.record", gen_filename(factor))
 }
 
 struct PartitionReaderSession {
@@ -213,10 +196,10 @@ struct PartitionReaderSession {
 
     // 轮询
     ticker: Interval,
-    // file_change_recver: mpsc::Receiver<StdResult<Event, notify::Error>>,
-    // file_change_recver: std::sync::mpsc::Receiver<StdResult<Event, notify::Error>>,
-    file_change_recver: crossbeam_channel::Receiver<StdResult<Event, notify::Error>>,
+    // 文件变动监听
     watcher: FsEventWatcher,
+    // 文件变动 接收器
+    file_change_recver: mpsc::Receiver<StdResult<Event, notify::Error>>,
 }
 
 impl PartitionReaderSession {
@@ -225,18 +208,26 @@ impl PartitionReaderSession {
         reader: Arc<FdCacheAync>,
         reader_ptr: Arc<RwLock<PositionPtr>>,
     ) -> Result<Self> {
-        let ticker = interval(Duration::from_millis(200));
-        // let (tx, rx) = mpsc::channel(1);
-        let (tx1, rx1) = crossbeam_channel::bounded(1);
-        // let (tx2, rx2) = std::sync::mpsc::channel();
-        let watcher = FsEventWatcher::new(tx1, Config::default().with_compare_contents(true))?;
+        let ticker = interval(Duration::from_millis(READER_SESSION_INTERVAL));
+
+        let (tx, rx) = mpsc::channel(1);
+        let watcher = FsEventWatcher::new(
+            move |res: StdResult<Event, notify::Error>| {
+                if let Ok(ref e) = res {
+                    if !(e.paths.len() == 1 && e.paths[0].ends_with(META_NAME)) {
+                        let _ = tx.blocking_send(res);
+                    }
+                }
+            },
+            Config::default().with_compare_contents(true),
+        )?;
 
         Ok(Self {
             dir,
             fd_cache: reader,
             reader_ptr,
             ticker,
-            file_change_recver: rx1,
+            file_change_recver: rx,
             watcher,
         })
     }
@@ -301,15 +292,12 @@ impl PartitionReaderSession {
                     }
                     has_monitor_files = true;
                     select! {
-                        biased;
                         _ = stop.cancelled() => {
                             let _ = self.watcher.unwatch(&self.dir);
                             return Err(anyhow!("stopped"));
                         }
 
-                        _ = async {
-                            self.file_change_recver.recv()
-                        } => {
+                        _ = self.file_change_recver.recv() => {
                             continue;
                         }
 
@@ -372,12 +360,13 @@ mod test {
     fn new_disk_storage() -> DiskStorage {
         DiskStorage::new(DiskConfig {
             storage_dir: PathBuf::from("./data"),
-            persist_period: 50,
-            persist_factor: 0,
+            flusher_period: 50,
+            flusher_factor: 0,
             max_msg_num_per_file: 4000,
             max_size_per_file: 500,
             compress_type: 0,
             fd_cache_size: 20,
+            create_next_record_file_threshold: 80.0,
         })
     }
 

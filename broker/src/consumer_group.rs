@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use storagev2::Storage;
 use tokio::sync::Semaphore;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
 #[derive(Debug, Clone)]
@@ -103,7 +104,7 @@ pub struct SubSession<T: Storage> {
     offset: Arc<AtomicI64>,
     window: Arc<Semaphore>,
     storage: T,
-    closed: Arc<AtomicBool>,
+    stop_signal: CancellationToken,
 }
 
 impl<T: Storage> SubSession<T> {
@@ -115,12 +116,12 @@ impl<T: Storage> SubSession<T> {
             offset: Arc::new(AtomicI64::new(0)),
             window: Arc::new(Semaphore::new(10)),
             storage,
-            closed: Arc::new(AtomicBool::new(false)),
+            stop_signal: CancellationToken::new(),
         }
     }
 
     fn close(&self) {
-        self.closed.store(true, Ordering::Relaxed);
+        self.stop_signal.cancel();
     }
 
     pub fn handle_ack(&self, ack: Ack) {}
@@ -128,7 +129,7 @@ impl<T: Storage> SubSession<T> {
     pub fn handle_flow(&self, flow: FlowControl) {}
 
     pub async fn next(&self) -> Result<Message, Status> {
-        if self.closed.load(Ordering::Relaxed) {
+        if self.stop_signal.is_cancelled() {
             return Err(tonic::Status::new(
                 tonic::Code::DeadlineExceeded,
                 "Client timeout",
@@ -140,7 +141,7 @@ impl<T: Storage> SubSession<T> {
         let offset = self.offset.load(Ordering::SeqCst);
         let data = self
             .storage
-            .next(&self.topic, self.partition)
+            .next(&self.topic, self.partition, self.stop_signal.clone())
             .await
             .map_err(|_| super::BrokerError::StorageFailure)?;
 

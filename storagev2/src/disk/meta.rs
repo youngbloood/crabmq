@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tokio::{fs, sync::RwLock};
 
+pub const META_NAME: &str = "meta.bin";
+
 // 可序列化的中间表示结构
 #[derive(Debug, Serialize, Deserialize)]
 struct SerializableTopicMeta {
@@ -54,9 +56,31 @@ impl TopicMeta {
 // Partition 元数据
 #[derive(Debug, Clone)]
 pub struct PartitionMeta {
-    pub commit_ptr: Arc<RwLock<PositionPtr>>,
-    pub read_ptr: Arc<RwLock<PositionPtr>>,
-    pub write_ptr: Arc<RwLock<WriterPositionPtr>>,
+    commit_ptr: Arc<RwLock<PositionPtr>>,
+    read_ptr: Arc<RwLock<PositionPtr>>,
+    write_ptr: Arc<RwLock<WriterPositionPtr>>,
+}
+
+impl PartitionMeta {
+    pub fn new(init_filename: PathBuf) -> Self {
+        PartitionMeta {
+            read_ptr: Arc::new(RwLock::new(PositionPtr::new(init_filename.clone()))),
+            commit_ptr: Arc::new(RwLock::new(PositionPtr::new(init_filename.clone()))),
+            write_ptr: Arc::new(RwLock::new(WriterPositionPtr::new(init_filename))),
+        }
+    }
+
+    pub fn get_write_ptr(&self) -> Arc<RwLock<WriterPositionPtr>> {
+        self.write_ptr.clone()
+    }
+
+    pub fn get_read_ptr(&self) -> Arc<RwLock<PositionPtr>> {
+        self.read_ptr.clone()
+    }
+
+    pub fn get_commit_ptr(&self) -> Arc<RwLock<PositionPtr>> {
+        self.commit_ptr.clone()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -138,4 +162,12 @@ impl PartitionMeta {
 
         Ok(())
     }
+}
+
+pub fn gen_filename(factor: u64) -> String {
+    format!("{:0>20}", factor)
+}
+
+pub fn gen_record_filename(factor: u64) -> String {
+    format!("{}.record", gen_filename(factor))
 }

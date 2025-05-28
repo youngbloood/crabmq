@@ -1,19 +1,13 @@
-use super::{
-    FdCacheAync,
-    config::DiskConfig,
-    gen_record_filename,
-    meta::{PartitionMeta, PositionPtr, WriterPositionPtr},
-};
+use super::{FdCacheAync, config::DiskConfig, gen_record_filename, meta::WriterPositionPtr};
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use common::dir_recursive;
 use std::{
     ffi::OsString,
-    io::Read,
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -36,6 +30,9 @@ pub struct PartitionWriter {
 
     // 写相关的位置指针
     write_ptr: Arc<RwLock<WriterPositionPtr>>,
+
+    // 是否已经预创建了下一个 record 文件
+    has_create_next_record_file: Arc<AtomicBool>,
 }
 
 impl PartitionWriter {
@@ -69,6 +66,7 @@ impl PartitionWriter {
             config: config.clone(),
             buffer: Arc::new(RwLock::new(BytesMut::with_capacity(1000))),
             write_ptr,
+            has_create_next_record_file: Arc::default(),
         })
     }
 
@@ -81,6 +79,8 @@ impl PartitionWriter {
         writer_ptr_wl.offset = 0;
         writer_ptr_wl.current_count = 0;
         writer_ptr_wl.flush_offset = 0;
+        self.has_create_next_record_file
+            .store(false, Ordering::Relaxed);
     }
 
     #[inline]
@@ -93,7 +93,7 @@ impl PartitionWriter {
     // 写入到 buffer 中
     pub async fn write(&self, data: Bytes) -> Result<()> {
         // 检查是否需要滚动文件
-        let buffer_len = {
+        {
             let res = {
                 let writer_ptr_rl = self.write_ptr.read().await;
                 writer_ptr_rl.offset + data.len() as u64 + 8 > self.config.max_size_per_file
@@ -112,19 +112,23 @@ impl PartitionWriter {
 
             let buffer_rl = self.buffer.read().await;
             // 缓冲区超过4MB立即刷盘
-            if buffer_rl.len() > 4 * 1024 * 1024 {
+            if buffer_rl.len() as u64 > self.config.flusher_factor {
                 self.flush().await?;
             }
-            // 已包含8
-            buffer_rl.len() as u64
         };
 
         let mut writer_ptr_rl = self.write_ptr.write().await;
         writer_ptr_rl.current_count += 1;
         writer_ptr_rl.offset += data.len() as u64 + 8;
 
-        if (writer_ptr_rl.offset as f64 / self.config.max_size_per_file as f64) * 100.0 >= 80.0 {
-            // 当前文件的使用率已经达到 80，预创建下一个
+        // 当前文件的使用率已经达到设置阈值，预创建下一个
+        if (writer_ptr_rl.offset as f64 / self.config.max_size_per_file as f64) * 100.0
+            >= self.config.create_next_record_file_threshold
+            && self
+                .has_create_next_record_file
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
             let next_filename = self.get_next_filename().await;
             if self.fd_cache.get(&next_filename).is_none() {
                 let _fd_cache = self.fd_cache.clone();

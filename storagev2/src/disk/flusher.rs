@@ -5,11 +5,7 @@ use super::{
 use dashmap::DashMap;
 use log::error;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{
-    select,
-    sync::{RwLock, mpsc},
-    time,
-};
+use tokio::{select, sync::mpsc, time};
 
 #[derive(Clone)]
 pub struct Flusher {
