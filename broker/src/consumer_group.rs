@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use grpcx::clientbrokersvc::{Ack, FlowControl, Message};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 use storagev2::Storage;
 use tokio::sync::Semaphore;
@@ -22,17 +22,20 @@ where
 
     // <ClientAddr, Instant>
     heartbeats: Arc<DashMap<String, Instant>>,
+
+    subscriber_timeout: u64,
 }
 
 impl<T> ConsumerGroup<T>
 where
     T: Storage,
 {
-    pub fn new() -> Self {
+    pub fn new(subscriber_timeout: u64) -> Self {
         let group = Self {
             assignments: Arc::new(DashMap::new()),
             sessions: Arc::new(DashMap::new()),
             heartbeats: Arc::new(DashMap::new()),
+            subscriber_timeout,
         };
 
         // 启动心跳检测任务
@@ -80,7 +83,7 @@ where
             // 清理过期消费者
             group
                 .heartbeats
-                .retain(|_, ts| now - *ts < Duration::from_secs(30));
+                .retain(|_, ts| now - *ts < Duration::from_secs(group.subscriber_timeout));
 
             // 清理无心跳的分配
             group.assignments.retain(|_, v| {
@@ -94,7 +97,8 @@ where
     }
 }
 
-// TODO: 轮训从 Storage 中获取 message
+// SubSession 从 Storage 中获取消息
+// 流量控制等
 #[derive(Debug, Clone)]
 pub struct SubSession<T: Storage> {
     topic: String,

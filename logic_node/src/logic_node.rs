@@ -21,6 +21,7 @@ use tokio::{
     time::{self, interval},
 };
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Status};
 
 pub struct Builder<T>
@@ -226,7 +227,7 @@ where
         let coo_id = coo.id;
         info!(
             "Broker[{}] interact with Local-Coo[{}:{}]",
-            broker_id, coo_id, coo.coo_addr
+            broker_id, coo_id, coo.conf.coo_addr
         );
         let broker = broker.clone();
         let mut state_recv = broker.get_state_reciever("logic_node".to_string());
@@ -258,6 +259,7 @@ where
                     }
                 }
 
+                // TODO: 这里可能有问题？
                 changed = rx_watcher.changed() => {
                     // 该 LogicNode 的 Coo 已不是
                     if changed.is_ok() && !*rx_watcher.borrow() {
@@ -272,7 +274,7 @@ where
     async fn broker_interact_with_external_coo(
         &mut self,
         coo_leader: Arc<Mutex<String>>,
-        watcher: watch::Receiver<bool>,
+        mut watcher: watch::Receiver<bool>,
     ) {
         if self.broker.is_none() {
             return;
@@ -315,11 +317,26 @@ where
             });
         }
 
+        let stop = CancellationToken::new();
+        let _stop = stop.clone();
+        let _broker = broker.clone();
+        tokio::spawn(async move {
+            select! {
+                changed = watcher.changed() => {
+                    if changed.is_ok() && *watcher.borrow() {
+                        _broker.unleash_state_reciever("logic_node");
+                        _stop.cancel();
+                        warn!("Coo-Leader has been change to Local(Report Handle)");
+                    }
+                }
+            }
+        });
+
         // Report  BrokerState
         let report_broker = broker.clone();
         let report_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
-        let _coo_leader = coo_leader.clone();
-        let mut _watcher = watcher.clone();
+        let _coo_leader_call = coo_leader.clone();
+        let _stop = stop.clone();
         let report_handle = tokio::spawn(async move {
             let report_resp_strm = report_coo_client
                 .open_bistream(
@@ -329,45 +346,22 @@ where
                         ReceiverStream::new(report_recver)
                     },
                     |chan, request, addr| async {
-                        *_coo_leader.lock().await = addr;
+                        *_coo_leader_call.lock().await = addr;
                         BrokerCooServiceClient::new(chan).report(request).await
                     },
+                    |res| {
+                        let _coo_leader_resp = _coo_leader_call.clone();
+                        async move {
+                            info!(
+                                "Broker[{broker_id}]->External-Coo[{}]: Report BrokerState",
+                                _coo_leader_resp.lock().await,
+                            );
+                            Ok(())
+                        }
+                    },
+                    _stop,
                 )
                 .await;
-
-            match report_resp_strm {
-                Ok(mut strm) => {
-                    loop {
-                        select! {
-                            resp = strm.next() => {
-                                if resp.is_none() {
-                                    continue;
-                                }
-                                match resp.unwrap() {
-                                    Ok(resp) => {
-                                        info!("Broker[{}]->External-Coo[{}]: Report BrokerState", broker_id, _coo_leader.lock().await);
-                                        let _ = resp;
-                                        // TODO:
-                                    }
-                                    Err(ref status) => {
-                                        change_with_status(status, _coo_leader.clone()).await;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            changed = _watcher.changed() => {
-                                if changed.is_ok() && *_watcher.borrow() {
-                                    report_broker.unleash_state_reciever("logic_node");
-                                    warn!("Coo-Leader has been change to Local(Report Handle)");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(ref status) => change_with_status(status, _coo_leader).await,
-            }
             error!("broker-report: 自动调用完成?");
             time::sleep(Duration::from_secs(2)).await;
         });
@@ -375,8 +369,9 @@ where
         // Pull  Broker Partition
         let pull_broker = broker.clone();
         let pull_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
-        let _coo_leader = coo_leader.clone();
-        let mut _watcher = watcher.clone();
+        let _coo_leader_call = coo_leader.clone();
+        let _coo_leader_resp = coo_leader.clone();
+        let _stop = stop.clone();
         let pull_handle = tokio::spawn(async move {
             // Pull Broker Partition
             let pull_resp_strm = pull_coo_client
@@ -387,47 +382,20 @@ where
                         broker_id,
                     },
                     |chan, request, addr| async {
-                        *_coo_leader.lock().await = addr;
+                        *_coo_leader_call.lock().await = addr;
                         BrokerCooServiceClient::new(chan).pull(request).await
                     },
+                    |res| async {
+                        pull_broker.apply_topic_infos(res);
+                        info!(
+                            "Broker[{broker_id}]->External-Coo[{}]: Pull TopicList",
+                            _coo_leader_resp.lock().await,
+                        );
+                        Ok(())
+                    },
+                    _stop,
                 )
                 .await;
-
-            let mut ticker = interval(Duration::from_secs(5));
-            match pull_resp_strm {
-                Ok(mut strm) => loop {
-                    select! {
-                        strm = strm.next() => {
-                            if strm.is_none() {
-                                continue;
-                            }
-                            match strm.unwrap() {
-                                Ok(tl) => pull_broker.apply_topic_infos(tl),
-                                Err(status) => {
-                                    change_with_status(&status, _coo_leader.clone()).await;
-                                    break;
-                                },
-                            }
-                        }
-
-                        changed = _watcher.changed() => {
-                            if changed.is_ok() && *_watcher.borrow() {
-                                warn!("Coo-Leader has been change to Local(Pull Handle)");
-                                break;
-                            }
-                        }
-
-                        _ = ticker.tick() => {
-                            info!("Broker[{}]->External-Coo[{}]: Pull Topic-Partition", broker_id, _coo_leader.lock().await);
-                        }
-                    }
-                },
-
-                Err(status) => {
-                    change_with_status(&status, _coo_leader).await;
-                }
-            };
-
             error!("pull TopicList: 自动调用完成?");
         });
 

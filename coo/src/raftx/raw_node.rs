@@ -13,7 +13,6 @@ use grpcx::cooraftsvc::{self, ConfChangeReq, RaftMessage, raft_service_client::R
 use log::{debug, error, info, trace, warn};
 use protobuf::Message as PbMessage;
 use raft::{Config, StateRole, prelude::*, raw_node::RawNode};
-use sled::Db;
 use std::{num::NonZero, sync::Arc, time::Instant};
 use tokio::{
     select,
@@ -130,14 +129,17 @@ where
         (rn, tx_grpc)
     }
 
+    #[inline]
     pub fn get_id(&self) -> u32 {
         self.id
     }
 
+    #[inline]
     pub async fn get_leader_id(&self) -> u32 {
         self.raw_node.lock().await.raft.leader_id as u32
     }
 
+    #[inline]
     pub fn get_peer(&self) -> Vec<Arc<PeerState>> {
         let mut list = vec![];
         self.peer.iter().for_each(|v| {

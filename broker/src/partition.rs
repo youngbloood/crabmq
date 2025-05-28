@@ -7,8 +7,6 @@ pub struct PartitionManager {
     broker_id: u32,
     // 当前节点负责的分区 (topic, partition) -> bool
     my_partitions: Arc<DashMap<(String, u32), bool>>,
-    // // 协调器客户端
-    // client: Option<SmartClient>,
 }
 
 impl PartitionManager {

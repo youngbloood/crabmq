@@ -15,4 +15,5 @@ log = "0.4.27"
 storagev2 = { version = "0.1.0", path = "../storagev2" }
 tokio = "1.45.0"
 tokio-stream = "0.1.17"
+tokio-util = "0.7.15"
 tonic = "0.13.1"

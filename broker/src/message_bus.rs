@@ -13,14 +13,22 @@ pub struct MessageBus {
     producers: Arc<DashMap<MessageBusKey, MessageBusValue>>,
     // 消费者总线：topic-partition ->  ModuleName -> sender
     consumers: Arc<DashMap<MessageBusKey, MessageBusValue>>,
+
+    message_bus_producer_buffer_size: usize,
+    message_bus_consumer_buffer_size: usize,
 }
 
 impl MessageBus {
-    pub fn new() -> Self {
+    pub fn new(
+        message_bus_producer_buffer_size: usize,
+        message_bus_consumer_buffer_size: usize,
+    ) -> Self {
         Self {
             timeout: Duration::from_millis(10),
             producers: Arc::new(DashMap::new()),
             consumers: Arc::new(DashMap::new()),
+            message_bus_producer_buffer_size,
+            message_bus_consumer_buffer_size,
         }
     }
 
@@ -33,7 +41,7 @@ impl MessageBus {
         partition: u32,
     ) -> mpsc::Receiver<Bytes> {
         let key = (topic.to_string(), partition);
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(self.message_bus_producer_buffer_size);
         self.producers.entry(key).and_modify(|v| {
             v.insert(module_name.clone(), tx.clone());
         });
@@ -72,7 +80,7 @@ impl MessageBus {
         partition: u32,
     ) -> mpsc::Receiver<Bytes> {
         let key = (topic.to_string(), partition);
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(self.message_bus_consumer_buffer_size);
         self.consumers.entry(key).and_modify(|v| {
             v.insert(module_name.clone(), tx.clone());
         });

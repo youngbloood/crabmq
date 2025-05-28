@@ -4,9 +4,10 @@ mod peer;
 pub mod raw_node;
 mod storage;
 
+use sled::Db;
+
 pub use mailbox_message_type::*;
 pub use raw_node::*;
-use sled::Db;
 
 use crate::partition::SinglePartition;
 use anyhow::Result;

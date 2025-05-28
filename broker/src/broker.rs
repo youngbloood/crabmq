@@ -17,6 +17,7 @@ use tokio::{sync::mpsc, time::interval};
 use tonic::{Request, Response, Status, async_trait, transport::Server};
 
 use crate::{
+    config::Config,
     consumer_group::{ConsumerGroup, SubSession},
     message_bus::MessageBus,
     partition::PartitionManager,
@@ -24,8 +25,8 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Broker<T: Storage> {
-    id: u32,
-    broker_addr: String,
+    conf: Config,
+
     storage: T,
     partitions: PartitionManager,
     consumers: ConsumerGroup<T>,
@@ -35,15 +36,17 @@ pub struct Broker<T: Storage> {
 }
 
 impl<T: Storage> Broker<T> {
-    pub fn new(id: u32, broker_addr: String, storage: T) -> Self {
+    pub fn new(conf: Config, storage: T) -> Self {
         Self {
-            id,
-            broker_addr,
             storage,
-            partitions: PartitionManager::new(id),
-            consumers: ConsumerGroup::new(),
-            message_bus: MessageBus::new(),
+            partitions: PartitionManager::new(conf.id),
+            consumers: ConsumerGroup::new(conf.subscriber_timeout),
+            message_bus: MessageBus::new(
+                conf.message_bus_producer_buffer_size,
+                conf.message_bus_consumer_buffer_size,
+            ),
             state_bus: Arc::new(DashMap::new()),
+            conf,
         }
     }
 }
@@ -58,7 +61,7 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
         request: Request<tonic::Streaming<PublishReq>>,
     ) -> Result<Response<Self::PublishStream>, Status> {
         let mut strm = request.into_inner();
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let (tx, rx) = tokio::sync::mpsc::channel(self.conf.publish_buffer_size);
 
         let broker = self.clone();
         tokio::spawn(async move {
@@ -79,7 +82,7 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let remote_addr = request.remote_addr().unwrap().to_string();
         let mut stream = request.into_inner();
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let (tx, rx) = tokio::sync::mpsc::channel(self.conf.subscribe_buffer_size);
 
         let broker = self.clone();
         tokio::spawn(async move {
@@ -102,11 +105,11 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
 
 impl<T: Storage> Broker<T> {
     pub fn get_id(&self) -> u32 {
-        self.id
+        self.conf.id
     }
 
     pub fn get_state_reciever(&self, module: String) -> mpsc::Receiver<BrokerState> {
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(self.conf.state_bus_buffer_size);
         self.state_bus.insert(module, tx);
         rx
     }
@@ -128,10 +131,11 @@ impl<T: Storage> Broker<T> {
 
     pub async fn run(&self) -> Result<()> {
         let broker = self.clone();
+        let report_broker_state_interval = self.conf.report_broker_state_interval;
         // 定时发送 BrokerState 至 state_bus
         let broker_state_handle = tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_secs(5));
-            let timeout = Duration::from_millis(100);
+            let mut ticker = interval(Duration::from_secs(report_broker_state_interval));
+            let timeout = Duration::from_millis(10);
             loop {
                 ticker.tick().await;
                 let state = broker.get_state();
@@ -145,7 +149,11 @@ impl<T: Storage> Broker<T> {
 
         let broker = self.clone();
         // 启动 grpc service
-        let broker_socket = self.broker_addr.parse().expect("need correct socket addr");
+        let broker_socket = self
+            .conf
+            .broker_addr
+            .parse()
+            .expect("need correct socket addr");
         let server_handle = tokio::spawn(async move {
             let svc = ClientBrokerServiceServer::new(broker);
             let server = Server::builder().add_service(svc);

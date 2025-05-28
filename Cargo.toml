@@ -7,7 +7,6 @@ resolver = "2"
 members = [
     "common",
     "core",
-    "cmd/client",
     "cmd/crabmqd",
     "protocol",
     "storage",
@@ -16,5 +15,6 @@ members = [
     "logic_node",
     "storagev2",
     "grpcx",
+    "client",
 ]
 # resolver = "2"

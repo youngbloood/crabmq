@@ -14,8 +14,9 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::time;
+use tokio::{select, time};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{
     Code, IntoStreamingRequest, Request, Response, Status, Streaming,
     transport::{Channel, Endpoint},
@@ -274,24 +275,6 @@ impl SmartClient {
             .await
     }
 
-    /// 开启客户端流（客户端发送单个请求 ，服务端响应流）
-    pub async fn open_sstream<Req, Res, C, Fut>(
-        &self,
-        request: Req,
-        call: C,
-    ) -> Result<SmartStream<Res>, Status>
-    where
-        Req: Send + Clone,
-        C: Fn(Channel, Request<Req>, String) -> Fut,
-        Fut: std::future::Future<Output = Result<Response<Streaming<Res>>, Status>>,
-    {
-        let req = request.clone();
-        let stream = self
-            .retry_operation(|channel, addr| call(channel, Request::new(req.clone()), addr))
-            .await?;
-        Ok(SmartStream::new(stream.into_inner(), self.clone()))
-    }
-
     /// 开启客户端流（客户端发送流，服务端返回单个响应）
     pub async fn open_cstream<Req, Res, F, Fut, S>(
         &self,
@@ -311,26 +294,99 @@ impl SmartClient {
         .await
     }
 
+    /// 开启服务端流（客户端发送单个请求 ，服务端响应流）
+    pub async fn open_sstream<Req, Res, C, Fut, HR, HRFut>(
+        &self,
+        request: Req,
+        call: C,
+        handle_resp: HR,
+        stop: CancellationToken,
+    ) -> Result<(), Status>
+    where
+        Req: Send + Clone,
+        C: Fn(Channel, Request<Req>, String) -> Fut,
+        Fut: std::future::Future<Output = Result<Response<Streaming<Res>>, Status>>,
+        HR: Fn(Res) -> HRFut,
+        HRFut: std::future::Future<Output = Result<(), Status>>,
+    {
+        loop {
+            let req = request.clone();
+            let resp = self
+                .retry_operation(|channel, addr| call(channel, Request::new(req.clone()), addr))
+                .await?;
+
+            let mut resp_strm = SmartStream::new(resp.into_inner(), self.clone());
+            loop {
+                select! {
+                    resp = resp_strm.next() => {
+                        if resp.is_none() {
+                            continue;
+                        }
+                        match resp.unwrap(){
+                            Ok(res) =>  handle_resp(res).await?,
+                            Err(status) => {
+                                self.handle_refresh_error(status).await;
+                                break;
+                            },
+                        }
+                    }
+
+                    _ = stop.cancelled() => {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 开启双向流（客户端和服务端双向流）
-    pub async fn open_bistream<Req, Res, C, Fut, F: Fn() -> ReceiverStream<Req>>(
+    pub async fn open_bistream<Req, Res, C, Fut, F, HR, HRFut>(
         &self,
         stream_factory: F,
         call: C,
-    ) -> Result<SmartStream<Res>, Status>
+        handle_resp: HR,
+        stop: CancellationToken,
+    ) -> Result<(), Status>
     where
-        // S: ReceiverStream<Req>,
         Req: Send + Clone + 'static,
         C: Fn(Channel, SmartReqStream<Req>, String) -> Fut,
         Fut: std::future::Future<Output = Result<Response<Streaming<Res>>, Status>>,
+        F: Fn() -> ReceiverStream<Req>,
+        HR: Fn(Res) -> HRFut,
+        HRFut: std::future::Future<Output = Result<(), Status>>,
     {
-        let strm = self
-            .retry_operation(|channel, addr| {
-                let stream = stream_factory();
-                call(channel, SmartReqStream::new(Box::pin(stream)), addr)
-            })
-            .await?;
+        loop {
+            let resp = self
+                .retry_operation(|channel, addr| {
+                    let stream = stream_factory();
+                    call(channel, SmartReqStream::new(Box::pin(stream)), addr)
+                })
+                .await?;
 
-        Ok(SmartStream::new(strm.into_inner(), self.clone()))
+            let mut resp_strm = SmartStream::new(resp.into_inner(), self.clone());
+            loop {
+                select! {
+                    resp = resp_strm.next() => {
+                        if resp.is_none() {
+                            continue;
+                        }
+                        match resp.unwrap(){
+                            Ok(res) =>  handle_resp(res).await?,
+                            Err(status) => {
+                                self.handle_refresh_error(status).await;
+                                break;
+                            },
+                        }
+                    }
+
+                    _ = stop.cancelled() => {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn retry_operation<T, F, Fut>(&self, mut operation: F) -> Result<T, Status>

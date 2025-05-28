@@ -20,6 +20,7 @@ thiserror = "2.0.12"
 async-stream = "0.3.6"
 futures = "0.3.31"
 tokio-stream = "0.1.17"
+tokio-util = "0.7.15"
 
 [build-dependencies]
 tonic-build = "0.13.1"

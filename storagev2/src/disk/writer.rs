@@ -1,5 +1,5 @@
 use super::{
-    config::DiskConfig, fd_cache::FdCacheAync, meta::WriterPositionPtr, meta::gen_record_filename,
+    config::Config, fd_cache::FdCacheAync, meta::WriterPositionPtr, meta::gen_record_filename,
 };
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -19,7 +19,7 @@ use tokio::{
 
 pub struct PartitionWriter {
     dir: PathBuf,
-    config: DiskConfig,
+    config: Config,
 
     // 当前写的文件因子：用于构成写入的目标文件
     current_factor: Arc<AtomicU64>,
@@ -40,7 +40,7 @@ pub struct PartitionWriter {
 impl PartitionWriter {
     pub async fn new(
         dir: PathBuf,
-        config: &DiskConfig,
+        config: &Config,
         fd_cache: Arc<FdCacheAync>,
         write_ptr: Arc<RwLock<WriterPositionPtr>>,
     ) -> Result<Self> {

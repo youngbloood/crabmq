@@ -1,5 +1,4 @@
 // 新增事件总线模块 src/event_bus.rs
-use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -8,18 +7,20 @@ use tokio::sync::mpsc;
 pub struct EventBus<T: Clone> {
     subscriptions: Arc<DashMap<String, mpsc::Sender<T>>>,
     timeout: Duration,
+    event_bus_buffer_size: usize,
 }
 
 impl<T: Clone + Send + 'static> EventBus<T> {
-    pub fn new() -> Self {
+    pub fn new(event_bus_buffer_size: usize) -> Self {
         Self {
             subscriptions: Arc::new(DashMap::new()),
             timeout: Duration::from_millis(10),
+            event_bus_buffer_size,
         }
     }
 
     pub fn subscribe(&self, id: String) -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
-        let (tx, rx) = mpsc::channel(12);
+        let (tx, rx) = mpsc::channel(self.event_bus_buffer_size);
         self.subscriptions.insert(id, tx.clone());
         (tx, rx)
     }

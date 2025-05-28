@@ -1,4 +1,4 @@
-use super::DiskConfig;
+use super::Config as DiskConfig;
 use super::fd_cache::FdCacheAync;
 use super::flusher::Flusher;
 use super::meta::{META_NAME, PartitionMeta, PositionPtr, TopicMeta, gen_record_filename};

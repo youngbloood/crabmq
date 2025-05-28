@@ -139,26 +139,31 @@ impl Args {
 async fn main() -> Result<()> {
     let mut args = Args::from_args();
     args.validate()?;
-
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut builder = logic_node::Builder::new();
+
     if args.coo_args.coo.is_some() {
-        let db_path = Path::new(&args.coo_args.db_path).join(format!("coo{}", args.id));
-        let coo = Coordinator::new(
-            args.id,
-            db_path.as_os_str(),
-            args.coo_args.coo.unwrap(),
-            args.coo_args.coo_raft.unwrap(),
-            args.broker_args.raft_leader.unwrap(),
-        );
+        let conf = coo::default_config()
+            .with_id(args.id)
+            .with_coo_addr(args.coo_args.coo.unwrap())
+            .with_raft_addr(args.coo_args.coo_raft.unwrap())
+            .with_db_path(Path::new(&args.coo_args.db_path).join(format!("coo{}", args.id)));
+
+        let coo = Coordinator::new(args.broker_args.raft_leader.unwrap(), conf);
         builder = builder.coo(coo);
     }
+
     if args.broker_args.broker.is_some() {
-        let store = DiskStorage::new(default_config());
-        let broker = Broker::new(args.id, args.broker_args.broker.unwrap(), store);
+        let broker = Broker::new(
+            broker::default_config()
+                .with_id(args.id)
+                .with_broker_addr(args.broker_args.broker.unwrap()),
+            DiskStorage::new(default_config()),
+        );
         builder = builder.broker(broker);
     }
+
     if args.slave_args.slave.is_some() {
         builder = builder.slave(Slave);
     }

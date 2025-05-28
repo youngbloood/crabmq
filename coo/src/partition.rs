@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::sync::Arc;
 
+const TOPIC_META_PREFFIX: &str = "topic_meta/";
+const TOPIC_PARTITION_PREFFIX: &str = "topic_partition/";
+const TOPIC_KEY_PREFFIX: &str = "topic_key/";
+
 #[derive(Debug, thiserror::Error)]
 pub enum PartitionError {
     #[error("Topic not found")]
@@ -74,7 +78,7 @@ pub struct PartitionManager {
     // Topic -> TopicAssignment
     assignments: Arc<DashMap<String, TopicAssignment>>,
     policy: Arc<PartitionPolicy>,
-
+    // 与 raftx/storage.rs 使用同一个 Db
     db: Db,
 }
 
@@ -168,10 +172,10 @@ impl PartitionManager {
     /// 加载所有 Topic 的元数据
     pub fn load_all_topics(&self) -> Result<()> {
         let mut topics = Vec::new();
-        for meta_res in self.db.scan_prefix("topic_meta/") {
+        for meta_res in self.db.scan_prefix(TOPIC_META_PREFFIX) {
             let (meta_key, _) = meta_res?;
             let topic = String::from_utf8(meta_key.to_vec())?
-                .trim_start_matches("topic_meta/")
+                .trim_start_matches(TOPIC_META_PREFFIX)
                 .to_string();
             topics.push(topic);
         }
@@ -184,14 +188,14 @@ impl PartitionManager {
 
     pub fn load_topic_data(&self, topic: &str, insert: bool) -> Result<TopicAssignment> {
         // 1. 加载元数据
-        let meta_key = format!("topic_meta/{}", topic);
+        let meta_key = format!("{}{}", TOPIC_META_PREFFIX, topic);
         let meta_bytes = self.db.get(&meta_key)?.unwrap();
         let res = bincode::serde::decode_from_slice(&meta_bytes, config::standard())
             .map_err(|e| anyhow!(e.to_string()))?;
         let meta: TopicMeta = res.0;
 
         // 2. 加载所有分区数据
-        let partition_prefix = format!("topic_partition/{}/", topic);
+        let partition_prefix = format!("{}{}/", TOPIC_PARTITION_PREFFIX, topic);
         let mut partition_list: Vec<PartitionInfo> = self
             .db
             .scan_prefix(partition_prefix)
@@ -211,7 +215,7 @@ impl PartitionManager {
         }
 
         // 3. 加载 Key 映射
-        let key_prefix = format!("topic_key/{}/", topic);
+        let key_prefix = format!("{}{}/", TOPIC_KEY_PREFFIX, topic);
         let key_mappings = self
             .db
             .scan_prefix(key_prefix)
@@ -220,7 +224,7 @@ impl PartitionManager {
                 let key = String::from_utf8(k.to_vec())
                     .ok()?
                     .split('/')
-                    .last()?
+                    .next_back()?
                     .to_string();
                 let partition_id = bincode::serde::decode_from_slice(&v, config::standard())
                     .ok()
@@ -267,7 +271,7 @@ impl PartitionApply for PartitionManager {
         let mut batch = sled::Batch::default();
 
         // 1. 存储元数据
-        let meta_key = format!("topic_meta/{}", &part.topic);
+        let meta_key = format!("{}{}", TOPIC_META_PREFFIX, &part.topic);
         let meta = TopicMeta {
             version: part.partitions.version,
             num_partition: part.partitions.partitions.len() as u64,
@@ -280,7 +284,7 @@ impl PartitionApply for PartitionManager {
 
         // 2. 存储分区数据
         for p in part.partitions.partitions.iter() {
-            let partition_key = format!("topic_partition/{}/{}", &part.topic, p.id);
+            let partition_key = format!("{}{}/{}", TOPIC_PARTITION_PREFFIX, &part.topic, p.id);
             batch.insert(
                 partition_key.into_bytes(),
                 bincode::serde::encode_to_vec(p.value(), config::standard()).unwrap(),
@@ -291,7 +295,7 @@ impl PartitionApply for PartitionManager {
         for entry in part.partitions.key_to_partition.iter() {
             let key = entry.key();
             let partition_id = entry.value();
-            let key_map_key = format!("topic_key/{}/{}", &part.topic, key);
+            let key_map_key = format!("{}{}/{}", TOPIC_KEY_PREFFIX, &part.topic, key);
             batch.insert(
                 key_map_key.into_bytes(),
                 bincode::serde::encode_to_vec(partition_id, config::standard()).unwrap(),

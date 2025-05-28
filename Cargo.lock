@@ -464,10 +464,9 @@ checksum = "98cc8fbded0c607b7ba9dd60cd98df59af97e84d24e49c8557331cfc26d301ce"
 name = "client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "dashmap",
  "grpcx",
- "structopt",
- "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -1129,6 +1128,7 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "tower",
@@ -1564,6 +1564,7 @@ dependencies = [
  "storagev2",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
 ]
 
