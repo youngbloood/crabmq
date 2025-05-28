@@ -3,7 +3,7 @@ use broker::Broker;
 use coo::coo::Coordinator;
 use logic_node::Slave;
 use std::{net::SocketAddr, path::Path, sync::Arc};
-use storagev2::mem;
+use storagev2::disk::{DiskStorage, default_config};
 use structopt::StructOpt;
 use tokio::sync::Mutex;
 
@@ -63,8 +63,8 @@ struct SlaveArgs {
 impl Args {
     fn validate(&mut self) -> Result<()> {
         // 规则1: slave不为空时，broker和coo必须为空
-        if !self.slave_args.slave.is_none()
-            && (!self.broker_args.broker.is_none() || !self.coo_args.coo.is_none())
+        if self.slave_args.slave.is_some()
+            && (self.broker_args.broker.is_some() || self.coo_args.coo.is_some())
         {
             return Err(anyhow!(
                 "When slave is specified, broker and coo must be empty"
@@ -82,9 +82,9 @@ impl Args {
         }
 
         // 规则3: .coo 和 .coo_raft 互补
-        if self.coo_args.coo_raft.is_none() && !self.coo_args.coo.is_none() {
+        if self.coo_args.coo_raft.is_none() && self.coo_args.coo.is_some() {
             self.coo_args.coo_raft = self.coo_args.coo.clone();
-        } else if !self.coo_args.coo_raft.is_none() && self.coo_args.coo.is_none() {
+        } else if self.coo_args.coo_raft.is_some() && self.coo_args.coo.is_none() {
             self.coo_args.coo = self.coo_args.coo_raft.clone();
         }
         if self.coo_args.coo.is_none() != self.coo_args.coo_raft.is_none() {
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut builder = logic_node::Builder::new();
-    if !args.coo_args.coo.is_none() {
+    if args.coo_args.coo.is_some() {
         let db_path = Path::new(&args.coo_args.db_path).join(format!("coo{}", args.id));
         let coo = Coordinator::new(
             args.id,
@@ -154,12 +154,12 @@ async fn main() -> Result<()> {
         );
         builder = builder.coo(coo);
     }
-    if !args.broker_args.broker.is_none() {
-        let store = mem::MemStorage::new();
+    if args.broker_args.broker.is_some() {
+        let store = DiskStorage::new(default_config());
         let broker = Broker::new(args.id, args.broker_args.broker.unwrap(), store);
         builder = builder.broker(broker);
     }
-    if !args.slave_args.slave.is_none() {
+    if args.slave_args.slave.is_some() {
         builder = builder.slave(Slave);
     }
 
