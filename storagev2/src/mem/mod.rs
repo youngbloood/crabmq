@@ -5,12 +5,14 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::oneshot;
+use tokio::select;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::Storage;
 
 struct PartitionQueue {
+    sema: Arc<Semaphore>,
     messages: Arc<Mutex<VecDeque<Bytes>>>,
     read_pos: Arc<AtomicUsize>, // 当前读取位置
 }
@@ -46,11 +48,13 @@ impl Storage for MemStorage {
             .partitions
             .entry(partition)
             .or_insert_with(|| PartitionQueue {
+                sema: Arc::new(Semaphore::new(0)),
                 messages: Arc::new(Mutex::new(VecDeque::new())),
                 read_pos: Arc::new(AtomicUsize::new(0)),
             });
 
         partition_queue.messages.lock().unwrap().push_back(data);
+        partition_queue.sema.add_permits(1);
         Ok(())
     }
 
@@ -70,6 +74,15 @@ impl Storage for MemStorage {
             .partitions
             .get_mut(&partition)
             .ok_or_else(|| anyhow!("Partition {} not found", partition))?;
+
+        select! {
+            _ = partition_queue.sema.acquire() =>{},
+            _ = stop_signal.cancelled() => {
+                return Err(anyhow!("stopped"))
+            }
+        };
+
+        let _ = partition_queue.sema.acquire().await?;
 
         let msg = {
             let messages = partition_queue.messages.lock().unwrap();
