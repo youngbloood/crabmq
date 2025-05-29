@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
             .with_coo_addr(args.coo_args.coo.unwrap())
             .with_raft_addr(args.coo_args.coo_raft.unwrap())
             .with_db_path(Path::new(&args.coo_args.db_path).join(format!("coo{}", args.id)));
-
+        conf.validate()?;
         let coo = Coordinator::new(args.broker_args.raft_leader.unwrap(), conf);
         builder = builder.coo(coo);
     }

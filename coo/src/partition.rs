@@ -4,7 +4,7 @@ use bincode::config;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sled::Db;
-use std::sync::Arc;
+use std::{num::ParseIntError, sync::Arc};
 
 const TOPIC_META_PREFFIX: &str = "topic_meta/";
 const TOPIC_PARTITION_PREFFIX: &str = "topic_partition/";
@@ -54,6 +54,7 @@ pub struct PartitionInfo {
     pub leader: u32,         // 主副本 Broker ID
     pub followers: Vec<u32>, // 从副本 Broker IDs
     pub key: Option<String>, // 关联的 Key（仅 HashKey 策略）
+    pub brokers: Vec<String>,
 }
 
 /// Topic 的分区分配信息（统一存储分区）
@@ -128,7 +129,7 @@ impl PartitionManager {
         broker_ids: &[u32],
         partition_ids: &[u32],
         keys: &[String],
-    ) -> Vec<(String, PartitionInfo)> {
+    ) -> Vec<(String, TopicAssignment)> {
         let mut result = Vec::new();
 
         // 使用统一的迭代器类型
@@ -139,6 +140,7 @@ impl PartitionManager {
 
         // 遍历匹配的 Topic 的分区
         for assignment in assignments_iter {
+            let mut ta = TopicAssignment::default();
             assignment.partitions.iter().for_each(|p| {
                 // Broker 筛选：检查主副本或从副本是否在 broker_ids 中
                 let match_broker = broker_ids.is_empty()
@@ -148,14 +150,20 @@ impl PartitionManager {
                 // Partition ID 筛选
                 let match_partition = partition_ids.is_empty() || partition_ids.contains(&p.id);
 
-                // Key 筛选（仅针对 HashKey 策略）
-                let match_key =
-                    keys.is_empty() || p.key.as_ref().map(|k| keys.contains(k)).unwrap_or(false);
-
-                if match_broker && match_partition && match_key {
-                    result.push((assignment.key().clone(), p.value().clone()));
+                if match_broker && match_partition {
+                    ta.partitions.insert(p.key().clone(), p.value().clone());
                 }
             });
+            assignment.key_to_partition.iter().for_each(|p| {
+                // Key 筛选（仅针对 HashKey 策略）
+                let match_key = keys.is_empty() || keys.contains(p.key());
+
+                if match_key {
+                    ta.key_to_partition
+                        .insert(p.key().clone(), p.value().clone());
+                }
+            });
+            result.push((assignment.key().clone(), ta));
         }
 
         result
@@ -247,10 +255,15 @@ impl PartitionManager {
         Ok(topic_assignment)
     }
 
-    pub fn build_allocator(&self, brokers: Option<Arc<DashMap<u32, BrokerNode>>>) -> Allocator {
+    pub fn build_allocator(
+        &self,
+        new_topic_partition_factor: String,
+        brokers: Option<Arc<DashMap<u32, BrokerNode>>>,
+    ) -> Allocator {
         if brokers.is_none() {
             return Allocator {
                 mngr: self,
+                new_topic_partition_factor,
                 brokers: Arc::default(),
                 policy: &self.policy,
             };
@@ -258,6 +271,7 @@ impl PartitionManager {
 
         Allocator {
             mngr: self,
+            new_topic_partition_factor,
             brokers: brokers.unwrap(),
             policy: &self.policy,
         }
@@ -315,28 +329,44 @@ impl PartitionApply for PartitionManager {
 
 pub struct Allocator<'a> {
     mngr: &'a PartitionManager,
+    new_topic_partition_factor: String,
     brokers: Arc<DashMap<u32, BrokerNode>>,
     policy: &'a PartitionPolicy,
 }
 
 impl Allocator<'_> {
     /// 分配新 Topic 的分区（根据策略选择主副本）
-    pub fn assign_new_topic(&self, topic: &str, num_partitions: u32) -> Result<SinglePartition> {
+    pub fn assign_new_topic(
+        &self,
+        topic: &str,
+        mut num_partitions: u32,
+    ) -> Result<SinglePartition> {
         if self.brokers.is_empty() {
             return Err(anyhow!("Not brokers to assign"));
         }
         // 1. 选择可用 Broker（基于策略）
-        let broker_ids = self.select_available_brokers();
+        let selected_brokers = self.select_available_brokers();
+
+        if num_partitions == 0 {
+            let (_num_partitions, only_number) = extract_value(&self.new_topic_partition_factor)?;
+            num_partitions = _num_partitions as u32;
+            if !only_number {
+                num_partitions *= (self.brokers.len() as u32);
+            }
+        }
 
         // 2. 分配分区
         let mut partitions = Vec::with_capacity(num_partitions as usize);
-        for id in 0..num_partitions {
-            let (leader, followers) = self.select_replicas(&broker_ids, id as usize);
+        for id in 1..num_partitions + 1 {
+            let (leader, followers) = self.select_replicas(&selected_brokers, id as usize);
+            let mut brokers = vec![leader.1];
+            brokers.extend_from_slice(&followers.1);
             let partition = PartitionInfo {
                 id,
-                leader,
-                followers,
+                leader: leader.0,
+                followers: followers.0,
                 key: None, // 初始无 Key 关联
+                brokers,
             };
             partitions.push(partition);
         }
@@ -345,13 +375,13 @@ impl Allocator<'_> {
         let assignment = TopicAssignment {
             partitions: DashMap::from_iter(partitions.into_iter().map(|p| (p.id, p))),
             key_to_partition: DashMap::new(),
-            version: 0,
+            version: chrono::Local::now().timestamp() as u64,
             next_round_robin: 1,
         };
 
         // 4. 返回新分区的副本信息
         Ok(SinglePartition {
-            unique_id: "".to_string(),
+            unique_id: chrono::Local::now().timestamp_micros().to_string(),
             topic: topic.to_string(),
             partitions: assignment,
         })
@@ -379,11 +409,14 @@ impl Allocator<'_> {
         let mut new_partitions = Vec::with_capacity(additional as usize);
         for id in start_id..start_id + additional {
             let (leader, followers) = self.select_replicas(&broker_ids, id as usize);
+            let mut brokers = vec![leader.1];
+            brokers.extend_from_slice(&followers.1);
             let partition = PartitionInfo {
                 id,
-                leader,
-                followers,
+                leader: leader.0,
+                followers: followers.0,
                 key: None,
+                brokers,
             };
             new_partitions.push(partition);
         }
@@ -442,7 +475,7 @@ impl Allocator<'_> {
     }
 
     /// 选择可用 Broker（根据策略）
-    fn select_available_brokers(&self) -> Vec<u32> {
+    fn select_available_brokers(&self) -> Vec<(u32, String)> {
         match self.policy.strategy {
             PartitionStrategy::LoadAware => {
                 // 负载感知策略：按负载排序选择
@@ -454,43 +487,51 @@ impl Allocator<'_> {
                         let load_score = bn.state.cpurat as f32 * 0.3
                             + bn.state.memrate as f32 * 0.3
                             + bn.state.diskrate as f32 * 0.4;
-                        (*entry.key(), load_score)
+                        (*entry.key(), load_score, bn.state.addr.clone()) // 捕获 addr
                     })
                     .collect();
+
+                // 按负载分数升序排序（选择负载低的）
                 candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+                // 取前 N 个 Broker，返回 (id, addr)
                 candidates
                     .iter()
                     .take(self.policy.replication_factor)
-                    .map(|(id, _)| *id)
+                    .map(|(id, _, addr)| (*id, addr.clone()))
                     .collect()
             }
             _ => {
-                // 其他策略：直接取前 N 个 Broker（假设 Broker 已排序）
+                // 其他策略：直接取前 N 个 Broker，返回 (id, addr)
                 self.brokers
                     .iter()
                     .take(self.policy.replication_factor)
-                    .map(|entry| *entry.key())
+                    .map(|entry| (*entry.key(), entry.value().state.addr.clone()))
                     .collect()
             }
         }
     }
 
     /// 选择主副本和从副本（动态轮询主副本）
-    fn select_replicas(&self, broker_ids: &[u32], partition_index: usize) -> (u32, Vec<u32>) {
+    fn select_replicas(
+        &self,
+        selected_brokers: &[(u32, String)],
+        partition_index: usize,
+    ) -> ((u32, String), (Vec<u32>, Vec<String>)) {
         // 主副本选择逻辑
         let leader = match self.policy.strategy {
             PartitionStrategy::RoundRobin => {
                 // 轮询策略：按分区索引轮询
-                broker_ids[partition_index % broker_ids.len()]
+                selected_brokers[partition_index % selected_brokers.len()].clone()
             }
             PartitionStrategy::HashKey | PartitionStrategy::LoadAware => {
                 // 哈希或负载策略：选择第一个 Broker 作为主副本
-                broker_ids[0]
+                selected_brokers[0].clone()
             }
         };
 
         // 从副本选择剩余 Broker
-        let followers = broker_ids
+        let followers = selected_brokers
             .iter()
             .filter(|id| **id != leader)
             .take(self.policy.replication_factor - 1)
@@ -499,4 +540,12 @@ impl Allocator<'_> {
 
         (leader, followers)
     }
+}
+
+fn extract_value(s: &str) -> Result<(u64, bool), ParseIntError> {
+    let (num_str, has_n) = match s.chars().last() {
+        Some('n') | Some('N') => (&s[..s.len() - 1], true),
+        _ => (s, false),
+    };
+    num_str.parse::<u64>().map(|num| (num, has_n))
 }

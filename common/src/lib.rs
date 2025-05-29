@@ -3,7 +3,7 @@ pub mod util;
 
 pub use util::*;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 

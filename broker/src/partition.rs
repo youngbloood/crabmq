@@ -1,12 +1,12 @@
 use dashmap::DashMap;
-use grpcx::commonsvc::{TopicList, topic_list};
+use grpcx::commonsvc;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct PartitionManager {
     broker_id: u32,
     // 当前节点负责的分区 (topic, partition) -> bool
-    my_partitions: Arc<DashMap<(String, u32), bool>>,
+    my_partitions: Arc<DashMap<(String, u32), ()>>,
 }
 
 impl PartitionManager {
@@ -22,22 +22,16 @@ impl PartitionManager {
             .contains_key(&(topic.to_string(), partition))
     }
 
-    pub fn apply_topic_infos(&self, tl: TopicList) {
-        match tl.list.unwrap() {
-            topic_list::List::Init(topic_list_init) => {
-                for info in topic_list_init.topics {
-                    for part in info.partition {
-                        self.my_partitions
-                            .insert((info.topic.clone(), part.id), true);
-                    }
-                }
+    pub fn apply_topic_infos(&self, tp: commonsvc::TopicPartition) {
+        for (k, v) in &tp.assignments {
+            for pi in &v.partitions {
+                self.my_partitions.insert((k.clone(), pi.id), ());
             }
-            topic_list::List::Add(topic_list_add) => {
-                for info in topic_list_add.topics {
-                    for part in info.partition {
-                        self.my_partitions
-                            .insert((info.topic.clone(), part.id), true);
-                    }
+        }
+        for (k, v) in &tp.assignments {
+            for pids in &v.key_to_partition {
+                for pid in &pids.ids {
+                    self.my_partitions.insert((k.clone(), *pid), ());
                 }
             }
         }

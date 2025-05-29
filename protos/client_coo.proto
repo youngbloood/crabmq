@@ -9,9 +9,9 @@ import "common.proto";
 service ClientCooService {
     rpc Auth (AuthReq) returns (AuthResp);
     rpc List (commonsvc.CooListReq) returns (stream commonsvc.CooListResp);
-    rpc NewTopic (AddTopicReq) returns (AddTopicResp);
+    rpc NewTopic (NewTopicReq) returns (NewTopicResp);
     rpc AddPartitions (AddPartitionsReq) returns (AddPartitionsResp);
-    rpc Pull (PullReq) returns (stream commonsvc.TopicList);
+    rpc Pull (PullReq) returns (stream commonsvc.TopicPartition);
 }
 
 message AuthReq {
@@ -26,16 +26,17 @@ message AuthResp {
     string token = 2;
 }
 
-message AddTopicReq {
+message NewTopicReq {
     // topic 
     string topic = 1;
     // 该 topic 的分区数量
     uint32 partitio_num = 2;
 }
 
-message AddTopicResp {
+message NewTopicResp {
     bool success = 1;
     string error = 2;
+    optional commonsvc.TopicPartition detail = 3;
 }
 
 message AddPartitionsReq {
@@ -49,6 +50,7 @@ message AddPartitionsReq {
 message AddPartitionsResp {
     bool success = 1;
     string error = 2;
+    optional commonsvc.TopicPartition detail = 3;
 }
 
 message PullReq {

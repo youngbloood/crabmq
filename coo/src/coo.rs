@@ -2,12 +2,12 @@ use super::Config as CooConfig;
 use super::partition;
 use super::raftx;
 use crate::event_bus::EventBus;
+use crate::partition::PartitionInfo;
 use crate::partition::PartitionPolicy;
 use crate::partition::SinglePartition;
 use crate::partition::TopicAssignment;
 use crate::raftx::Callback;
 use crate::raftx::ProproseData;
-use crate::raftx::repair_addr_with_http;
 use crate::{BrokerNode, ClientNode};
 use anyhow::Result;
 use anyhow::anyhow;
@@ -16,19 +16,16 @@ use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
 use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
 use grpcx::commonsvc;
 use grpcx::commonsvc::CooListResp;
-use grpcx::commonsvc::PartitionInfos;
-use grpcx::commonsvc::TopicInfos;
-use grpcx::commonsvc::TopicList;
-use grpcx::commonsvc::TopicListAdd;
-use grpcx::commonsvc::topic_list;
 use grpcx::cooraftsvc;
 use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
+use grpcx::smart_client::repair_addr_with_http;
 use grpcx::{brokercoosvc, clientcoosvc};
 use log::info;
 use partition::PartitionManager;
 use protobuf::Message as _;
 use raft::prelude::*;
 use raftx::{MessageType as AllMessageType, RaftNode};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -289,7 +286,7 @@ impl Coordinator {
     pub async fn broker_pull(
         &self,
         broker_id: u32,
-    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicList, Status>>> {
+    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicPartition, Status>>> {
         let id = format!("local_broker_{}", broker_id);
         let (_, mut recver) = self.broker_event_bus.subscribe(id.clone());
         let bus = self.broker_event_bus.clone();
@@ -297,12 +294,13 @@ impl Coordinator {
         let (tx, rx) = mpsc::unbounded_channel();
         let init = self.qeury_topics(&[], &[broker_id], &[], &[]).await;
         // 返回初始值
-        for v in init {
-            let _ = tx.send(Ok(v));
-        }
 
         let raft_node = self.raft_node.clone();
         tokio::spawn(async move {
+            // 发送初始值
+            let _ = tx.send(Ok(init));
+
+            // 发送后续增量值
             while let Some(part) = recver.recv().await {
                 match part {
                     PartitionEvent::NotLeader {
@@ -335,7 +333,7 @@ impl Coordinator {
                             filter_single_partition(added, &[], &[broker_id], &[], &[])
                         {
                             let _ = tx
-                                .send(Ok(convert_to_added_resp(added, raft_node.get_term().await)));
+                                .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)));
                         }
                     }
                 }
@@ -361,39 +359,20 @@ impl Coordinator {
         broker_ids: &[u32],
         partition_ids: &[u32],
         keys: &[String],
-    ) -> Vec<commonsvc::TopicList> {
-        let partition_info =
+    ) -> commonsvc::TopicPartition {
+        let topic_assignment =
             self.partition_mgr
                 .query_partitions(topics, broker_ids, partition_ids, keys);
 
-        let mut tl = commonsvc::TopicList {
+        let mut tp = commonsvc::TopicPartition {
             term: self.get_term().await,
-            list: None,
+            assignments: HashMap::default(),
         };
-
-        let mut init_topics = commonsvc::TopicListInit { topics: Vec::new() };
-        for part in partition_info {
-            let mut tis = TopicInfos {
-                topic: part.0,
-                partition: vec![PartitionInfos {
-                    id: part.1.id,
-                    broker_id: part.1.leader,
-                    broker_addr: "".to_string(),
-                }],
-            };
-
-            for f in part.1.followers {
-                tis.partition.push(PartitionInfos {
-                    id: part.1.id,
-                    broker_id: f,
-                    broker_addr: "".to_string(),
-                });
-            }
-            init_topics.topics.push(tis);
+        for (topic, ta) in topic_assignment {
+            tp.assignments
+                .insert(topic, commonsvc::PartitionAssignment::from(ta));
         }
-        tl.list = Some(commonsvc::topic_list::List::Init(init_topics));
-
-        vec![tl]
+        tp
     }
 
     async fn propose(
@@ -477,7 +456,7 @@ pub enum PartitionEvent {
 #[tonic::async_trait]
 impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
     type ReportStream = tonic::codegen::BoxStream<brokercoosvc::BrokerStateResp>;
-    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicList>;
+    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartition>;
     type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
 
     async fn auth(
@@ -575,9 +554,7 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
 
         tokio::spawn(async move {
             // 发送初始数据
-            for resp in init_data {
-                let _ = resp_tx.send(Ok(resp)).await;
-            }
+            let _ = resp_tx.send(Ok(init_data)).await;
 
             // 监听事件
             while let Some(event) = event_rx.recv().await {
@@ -624,7 +601,7 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                             &[],
                         ) {
                             let _ = resp_tx
-                                .send(Ok(convert_to_added_resp(added, raft_node.get_term().await)))
+                                .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)))
                                 .await;
                         }
                     }
@@ -639,7 +616,7 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
 
 #[tonic::async_trait]
 impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
-    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicList>;
+    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartition>;
     type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
 
     async fn auth(
@@ -672,14 +649,17 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
     /// 3. 发送topic元信息广播至 `broker_event_bus` 和 `client_event_bus`
     async fn new_topic(
         &self,
-        request: tonic::Request<clientcoosvc::AddTopicReq>,
-    ) -> std::result::Result<tonic::Response<clientcoosvc::AddTopicResp>, tonic::Status> {
+        request: tonic::Request<clientcoosvc::NewTopicReq>,
+    ) -> std::result::Result<tonic::Response<clientcoosvc::NewTopicResp>, tonic::Status> {
         self.check_leader().await?;
 
         let req = request.into_inner();
         let part = self
             .partition_mgr
-            .build_allocator(Some(self.brokers.clone()))
+            .build_allocator(
+                self.conf.new_topic_partition_factor.clone(),
+                Some(self.brokers.clone()),
+            )
             .assign_new_topic(&req.topic, req.partitio_num)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
@@ -705,9 +685,10 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                             .broadcast(PartitionEvent::NewTopic { partitions: part })
                             .await;
 
-                        Ok(Response::new(clientcoosvc::AddTopicResp {
+                        Ok(Response::new(clientcoosvc::NewTopicResp {
                             success: true,
                             error: "".to_string(),
+                            detail: todo!(),
                         }))
                     } else {
                         Err(tonic::Status::internal("unique_id not eq part.unique_id"))
@@ -748,7 +729,10 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         }
         let added = self
             .partition_mgr
-            .build_allocator(Some(self.brokers.clone()))
+            .build_allocator(
+                self.conf.new_topic_partition_factor.clone(),
+                Some(self.brokers.clone()),
+            )
             .add_partitions(&req.topic, req.partitio_num)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
@@ -777,6 +761,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                         Ok(Response::new(clientcoosvc::AddPartitionsResp {
                             success: true,
                             error: "".to_string(),
+                            detail: todo!(),
                         }))
                     } else {
                         Err(tonic::Status::internal("unique_id not eq added.unique_id"))
@@ -807,9 +792,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         let (resp_tx, resp_rx) = mpsc::channel(self.conf.client_pull_buffer_size);
         let raft_node = self.raft_node.clone();
         tokio::spawn(async move {
-            for resp in init_data {
-                let _ = resp_tx.send(Ok(resp)).await;
-            }
+            let _ = resp_tx.send(Ok(init_data)).await;
 
             while let Some(event) = event_rx.recv().await {
                 match event {
@@ -855,7 +838,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                             &req.keys,
                         ) {
                             let _ = resp_tx
-                                .send(Ok(convert_to_added_resp(added, raft_node.get_term().await)))
+                                .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)))
                                 .await;
                         }
                     }
@@ -984,47 +967,10 @@ impl cooraftsvc::raft_service_server::RaftService for Coordinator {
 }
 
 // 转换函数示例
-fn convert_to_pull_resp(ps: SinglePartition, term: u64) -> commonsvc::TopicList {
-    let mut tl = commonsvc::TopicList::from(ps);
-    tl.term = term;
-    tl
-}
-
-// 转换函数示例
-fn convert_to_added_resp(ps: SinglePartition, term: u64) -> commonsvc::TopicList {
-    let mut tl = commonsvc::TopicList::from(ps);
-    tl.term = term;
-    tl
-}
-
-impl From<SinglePartition> for TopicList {
-    fn from(sp: SinglePartition) -> Self {
-        let mut tla = TopicListAdd { topics: Vec::new() };
-        for (_, part) in sp.partitions.partitions {
-            let mut partition = vec![PartitionInfos {
-                id: part.id,
-                broker_id: part.leader,
-                broker_addr: String::new(),
-            }];
-            for f in part.followers {
-                partition.push(PartitionInfos {
-                    id: part.id,
-                    broker_id: f,
-                    broker_addr: String::new(),
-                });
-            }
-
-            tla.topics.push(TopicInfos {
-                topic: sp.topic.clone(),
-                partition,
-            });
-        }
-
-        TopicList {
-            term: 0,
-            list: Some(topic_list::List::Add(tla)),
-        }
-    }
+fn convert_to_pull_resp(ps: SinglePartition, term: u64) -> commonsvc::TopicPartition {
+    let mut tp = commonsvc::TopicPartition::from(ps);
+    tp.term = term;
+    tp
 }
 
 fn filter_single_partition(
@@ -1108,4 +1054,38 @@ fn filter_single_partition(
         topic: sp.topic,
         partitions: filtered_assignment,
     })
+}
+
+impl From<SinglePartition> for commonsvc::TopicPartition {
+    fn from(sp: SinglePartition) -> Self {
+        let mut tp = commonsvc::TopicPartition::default();
+        tp.assignments.insert(
+            sp.topic.clone(),
+            commonsvc::PartitionAssignment::from(sp.partitions),
+        );
+
+        tp
+    }
+}
+
+impl From<TopicAssignment> for commonsvc::PartitionAssignment {
+    fn from(ta: TopicAssignment) -> Self {
+        let mut res = commonsvc::PartitionAssignment::default();
+        for (k, v) in ta.partitions {
+            res.partitions
+                .push(commonsvc::PartitionInfo::from(v.clone()));
+        }
+        res
+    }
+}
+
+impl From<PartitionInfo> for commonsvc::PartitionInfo {
+    fn from(pi: PartitionInfo) -> Self {
+        commonsvc::PartitionInfo {
+            id: pi.id,
+            leader: pi.leader,
+            followers: pi.followers,
+            addrs: pi.brokers,
+        }
+    }
 }

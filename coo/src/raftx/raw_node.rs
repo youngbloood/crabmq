@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow};
 use bincode::config;
 use dashmap::DashMap;
 use grpcx::cooraftsvc::{self, ConfChangeReq, RaftMessage, raft_service_client::RaftServiceClient};
+use grpcx::smart_client::repair_addr_with_http;
 use log::{debug, error, info, trace, warn};
 use protobuf::Message as PbMessage;
 use raft::{Config, StateRole, prelude::*, raw_node::RawNode};
@@ -708,11 +709,4 @@ impl Mailbox {
             }
         }
     }
-}
-
-pub fn repair_addr_with_http(addr: String) -> String {
-    if !(addr.starts_with("http") || addr.starts_with("https")) {
-        return format!("http://{}", addr);
-    }
-    addr
 }

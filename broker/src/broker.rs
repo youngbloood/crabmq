@@ -8,7 +8,7 @@ use grpcx::{
         client_broker_service_server::{ClientBrokerService, ClientBrokerServiceServer},
         subscribe_req,
     },
-    commonsvc::TopicList,
+    commonsvc,
 };
 use log::{debug, error, info};
 use std::{sync::Arc, time::Duration};
@@ -104,6 +104,7 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
 }
 
 impl<T: Storage> Broker<T> {
+    #[inline]
     pub fn get_id(&self) -> u32 {
         self.conf.id
     }
@@ -125,8 +126,8 @@ impl<T: Storage> Broker<T> {
         BrokerState::default()
     }
 
-    pub fn apply_topic_infos(&self, tl: TopicList) {
-        self.partitions.apply_topic_infos(tl)
+    pub fn apply_topic_infos(&self, tp: commonsvc::TopicPartition) {
+        self.partitions.apply_topic_infos(tp)
     }
 
     pub async fn run(&self) -> Result<()> {

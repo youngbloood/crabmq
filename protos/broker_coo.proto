@@ -14,7 +14,7 @@ service BrokerCooService {
     // broker 向 coo 上报自身状态
     rpc Report (stream BrokerState) returns (stream BrokerStateResp);
     // coo 主动向 broker 推送新的 Topic-Partition 信息
-    rpc Pull (PullReq) returns (stream commonsvc.TopicList);
+    rpc Pull (PullReq) returns (stream commonsvc.TopicPartition);
 }
 
 message AuthReq {
