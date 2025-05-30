@@ -25,26 +25,54 @@ message PublishResp {
 // ========== 消费消息协议 ==========
 message SubscribeReq {
   oneof request {
-    Subscription sub = 1;   // 初始化订阅
-    Ack ack = 2;            // 消息确认
-    FlowControl flow = 3;   // 流控
+    Subscription sub = 1;       // 初始化订阅
+    Ack ack = 2;                // 消息确认
+    FlowControl flow = 3;       // 流控请求
+    Heartbeat heartbeat = 4;    // 新增：心跳包
   }
 }
 
 message Subscription {
-  string topic = 1;
-  uint32 partition = 2;
-  uint64 offset = 3;         // 起始消费位移（-1表示最新）
-  int32 window_size = 4; // 初始客户端接受窗口大小
+  uint32 group_id = 1;
+  string member_id = 2;
+
+  message SubTopic {
+    string topic = 1;
+    uint32 partition = 2;
+    uint64 offset = 3;            // 起始消费位移（-1表示最新）
+  }
+  repeated SubTopic SubTopics = 3;
+  
+  // 改进的流控参数
+  message FlowConfig {
+    uint32 max_bytes = 1;       // 最大字节数 (默认10MB)
+    uint32 max_messages = 2;    // 最大消息数 (默认500)
+    uint32 min_bytes = 3;       // 最小触发字节 (默认1)
+    uint32 max_wait_ms = 4;     // 最大等待时间 (默认500ms)
+    uint32 max_partition_bytes = 5; // 单分区最大字节 (默认1MB)
+  }
+  FlowConfig flow_config = 4;   // 流控配置
 }
 
 message Ack {
   string message_id = 1;
-  bool commit = 2;          // true=确认消费，false=拒绝
+  bool commit = 2;              // true=确认消费，false=拒绝
+  uint32 credit_return = 3;     // 新增：返还的信用额度（字节数）
 }
 
 message FlowControl {
-  int32 window_size = 1;    // 客户端接收窗口大小
+  enum Action {
+    INCREASE = 0;
+    DECREASE = 1;
+    PAUSE = 2;
+    RESUME = 3;
+  }
+  Action action = 1;
+  uint32 value = 2;             // 调整值（字节或消息数）
+}
+
+message Heartbeat {
+  uint32 credit_request = 1;    // 请求的信用额度（字节数）
 }
 
 
@@ -56,6 +84,10 @@ message Message {
   int64 offset = 4;         // Broker维护的位移
   bytes payload = 5;
   map<string,string> metadata = 6;  // 扩展元数据
+  // 新增流控元数据
+  uint32 credit_remaining = 7;      // Broker端剩余信用额度
+  uint32 credit_consumed = 8;       // 本条消息消耗的信用
+  uint32 recommended_next_bytes = 9; // 建议下次请求字节数
 }
 
 enum Status {

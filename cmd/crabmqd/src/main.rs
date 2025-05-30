@@ -3,7 +3,9 @@ use broker::Broker;
 use coo::coo::Coordinator;
 use logic_node::Slave;
 use std::{net::SocketAddr, path::Path, sync::Arc};
-use storagev2::disk::{DiskStorage, default_config};
+use storagev2::disk::DiskStorageReader;
+use storagev2::disk::DiskStorageWriter;
+use storagev2::disk::default_config;
 use structopt::StructOpt;
 use tokio::sync::Mutex;
 
@@ -155,11 +157,13 @@ async fn main() -> Result<()> {
     }
 
     if args.broker_args.broker.is_some() {
+        let conf = default_config();
         let broker = Broker::new(
             broker::default_config()
                 .with_id(args.id)
                 .with_broker_addr(args.broker_args.broker.unwrap()),
-            DiskStorage::new(default_config()),
+            DiskStorageWriter::new(conf.clone()),
+            DiskStorageReader::new(conf.storage_dir),
         );
         builder = builder.broker(broker);
     }

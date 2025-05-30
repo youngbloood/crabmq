@@ -13,30 +13,32 @@ use std::{
     },
     time::Duration,
 };
-use storagev2::Storage;
+use storagev2::{StorageReader, StorageWriter};
 use tokio::{
     select,
     sync::{Mutex, watch},
     task::JoinHandle,
     time::{self, interval},
 };
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Status};
 
-pub struct Builder<T>
+pub struct Builder<SW, SR>
 where
-    T: Storage + 'static,
+    SW: StorageWriter,
+    SR: StorageReader,
 {
     id: u32,
-    broker: Option<Broker<T>>,
+    broker: Option<Broker<SW, SR>>,
     coo: Option<Coordinator>,
     salve: Option<Slave>,
 }
 
-impl<T> Default for Builder<T>
+impl<SW, SR> Default for Builder<SW, SR>
 where
-    T: Storage + 'static,
+    SW: StorageWriter,
+    SR: StorageReader,
 {
     fn default() -> Self {
         Self {
@@ -48,9 +50,10 @@ where
     }
 }
 
-impl<T> Builder<T>
+impl<SW, SR> Builder<SW, SR>
 where
-    T: Storage + 'static,
+    SW: StorageWriter,
+    SR: StorageReader,
 {
     pub fn new() -> Self {
         Self::default()
@@ -61,7 +64,7 @@ where
         self
     }
 
-    pub fn broker(mut self, b: Broker<T>) -> Self {
+    pub fn broker(mut self, b: Broker<SW, SR>) -> Self {
         self.broker = Some(b);
         self
     }
@@ -87,7 +90,7 @@ where
         Ok(())
     }
 
-    pub fn build(self) -> LogicNode<T> {
+    pub fn build(self) -> LogicNode<SW, SR> {
         let _ = &self.validate().expect("LoginNode validate failed");
         LogicNode {
             id: self.id,
@@ -109,22 +112,24 @@ impl Slave {
     }
 }
 
-pub struct LogicNode<T>
+pub struct LogicNode<SW, SR>
 where
-    T: Storage + 'static,
+    SW: StorageWriter,
+    SR: StorageReader,
 {
     id: u32,
     coo: Option<Coordinator>,
-    broker: Option<Broker<T>>,
+    broker: Option<Broker<SW, SR>>,
     slave: Option<Slave>,
 
     coo_leader_client: Option<SmartClient>,
     start_smart_client: Arc<AtomicBool>,
 }
 
-impl<T> LogicNode<T>
+impl<SW, SR> LogicNode<SW, SR>
 where
-    T: Storage + 'static,
+    SW: StorageWriter,
+    SR: StorageReader,
 {
     pub async fn run(&mut self, coo_leader: Arc<Mutex<String>>) -> Result<()> {
         self.start_modules().await;
@@ -399,7 +404,37 @@ where
             error!("pull TopicList: 自动调用完成?");
         });
 
-        if let Err(e) = tokio::try_join!(report_handle, pull_handle) {
+        // SyncConsumerGroup
+        let sync_consumergroup_broker = broker.clone();
+        let sync_consumergroup_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
+        let _coo_leader_sync_consumergroup = coo_leader.clone();
+        let _stop = stop.clone();
+        let sync_consumergroup_handle = tokio::spawn(async move {
+            // Pull Broker Partition
+            let sync_resp = sync_consumergroup_coo_client
+                .open_sstream(
+                    brokercoosvc::SyncConsumerAssignmentsReq { broker_id },
+                    |chan, request, addr| async {
+                        *_coo_leader_sync_consumergroup.lock().await = addr;
+                        BrokerCooServiceClient::new(chan)
+                            .sync_consumer_assignments(request)
+                            .await
+                    },
+                    |res| async {
+                        sync_consumergroup_broker.apply_consumergroup(res).await;
+                        info!(
+                            "Broker[{broker_id}]->External-Coo[{}]: SyncConsumerGroup",
+                            _coo_leader_sync_consumergroup.lock().await,
+                        );
+                        Ok(())
+                    },
+                    _stop,
+                )
+                .await;
+            error!("SyncConsumerGroup 自动调用完成？");
+        });
+
+        if let Err(e) = tokio::try_join!(report_handle, pull_handle, sync_consumergroup_handle) {
             error!("tokio try_join error: {:?}", e);
         }
     }

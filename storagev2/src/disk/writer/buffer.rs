@@ -1,5 +1,7 @@
-use super::{
-    config::Config, fd_cache::FdCacheAync, meta::WriterPositionPtr, meta::gen_record_filename,
+use crate::disk::{
+    Config,
+    fd_cache::FdWriterCacheAync,
+    meta::{WriterPositionPtr, gen_record_filename},
 };
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -13,11 +15,11 @@ use std::{
     },
 };
 use tokio::{
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncSeekExt as _, AsyncWriteExt as _},
     sync::RwLock,
 };
 
-pub struct PartitionWriter {
+pub struct PartitionWriterBuffer {
     dir: PathBuf,
     config: Config,
 
@@ -25,7 +27,7 @@ pub struct PartitionWriter {
     current_factor: Arc<AtomicU64>,
 
     // 定期刷盘至磁盘
-    fd_cache: Arc<FdCacheAync>,
+    fd_cache: Arc<FdWriterCacheAync>,
 
     // 先将数据存入内存缓冲区
     buffer: Arc<RwLock<BytesMut>>,
@@ -37,11 +39,11 @@ pub struct PartitionWriter {
     has_create_next_record_file: Arc<AtomicBool>,
 }
 
-impl PartitionWriter {
+impl PartitionWriterBuffer {
     pub async fn new(
         dir: PathBuf,
         config: &Config,
-        fd_cache: Arc<FdCacheAync>,
+        fd_cache: Arc<FdWriterCacheAync>,
         write_ptr: Arc<RwLock<WriterPositionPtr>>,
     ) -> Result<Self> {
         let mut files = dir_recursive(dir.clone(), &[OsString::from("record")])?;
@@ -154,7 +156,7 @@ impl PartitionWriter {
 
         let mut buffer_wl = self.buffer.write().await;
         {
-            let mut fd_wl = fd.writer().write().await;
+            let mut fd_wl = fd.write().await;
             let buf_len = buffer_wl.to_vec().len();
             let mut writer_ptr_wl = self.write_ptr.write().await;
             fd_wl

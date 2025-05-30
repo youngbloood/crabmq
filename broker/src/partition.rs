@@ -22,17 +22,12 @@ impl PartitionManager {
             .contains_key(&(topic.to_string(), partition))
     }
 
-    pub fn apply_topic_infos(&self, tp: commonsvc::TopicPartition) {
-        for (k, v) in &tp.assignments {
-            for pi in &v.partitions {
-                self.my_partitions.insert((k.clone(), pi.id), ());
-            }
-        }
-        for (k, v) in &tp.assignments {
-            for pids in &v.key_to_partition {
-                for pid in &pids.ids {
-                    self.my_partitions.insert((k.clone(), *pid), ());
-                }
+    pub fn apply_topic_infos(&self, tpr: commonsvc::TopicPartitionResp) {
+        for tpm in &tpr.list {
+            self.my_partitions
+                .insert((tpm.topic.clone(), tpm.partition_id), ());
+            for (k, v) in &tpm.multi_labels {
+                todo!()
             }
         }
     }

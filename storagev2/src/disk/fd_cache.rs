@@ -7,54 +7,122 @@ use std::{
     fs::OpenOptions,
     io::Seek,
     num::NonZeroUsize,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{fs::File as AsyncFile, sync::RwLock};
 
+// 读文件句柄
 #[derive(Clone, Debug)]
-pub struct FileHandlerAsync {
-    reader: Arc<RwLock<AsyncFile>>,
-    writer: Arc<RwLock<AsyncFile>>,
+pub struct FileReaderHandlerAsync {
+    inner: Arc<RwLock<AsyncFile>>,
 }
 
-impl FileHandlerAsync {
-    fn new(reader: AsyncFile, writer: AsyncFile) -> Self {
-        FileHandlerAsync {
-            reader: Arc::new(RwLock::new(reader)),
-            writer: Arc::new(RwLock::new(writer)),
-        }
-    }
+impl Deref for FileReaderHandlerAsync {
+    type Target = Arc<RwLock<AsyncFile>>;
 
-    pub fn reader(&self) -> &Arc<RwLock<AsyncFile>> {
-        &self.reader
-    }
-
-    pub fn writer(&self) -> &Arc<RwLock<AsyncFile>> {
-        &self.writer
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct FdCacheAync {
-    inner: Arc<ShardedLock<LruCache<PathBuf, FileHandlerAsync>>>,
+pub struct FdReaderCacheAync {
+    inner: Arc<ShardedLock<LruCache<PathBuf, FileReaderHandlerAsync>>>,
 }
 
-impl FdCacheAync {
+impl FdReaderCacheAync {
     pub fn new(size: usize) -> Self {
-        FdCacheAync {
+        FdReaderCacheAync {
             inner: Arc::new(ShardedLock::new(LruCache::new(
                 NonZeroUsize::new(size).unwrap(),
             ))),
         }
     }
 
-    pub fn get(&self, key: &Path) -> Option<FileHandlerAsync> {
+    pub fn get(&self, key: &Path) -> Option<FileReaderHandlerAsync> {
         let mut wg = self.inner.write().expect("Failed to acquire write lock");
         wg.get(key).cloned()
     }
 
-    pub fn get_or_create(&self, key: &Path) -> Result<FileHandlerAsync> {
+    pub fn get_or_create(&self, key: &Path) -> Result<FileReaderHandlerAsync> {
+        // 第一次检查缓存
+        {
+            let mut wg = self.inner.write().expect("Failed to acquire write lock");
+            if let Some(handler) = wg.get(key) {
+                return Ok(handler.clone());
+            }
+        }
+
+        // 确保父目录存在
+        if let Some(parent) = key.parent() {
+            if !check_exist(parent) {
+                check_and_create_dir(parent)?;
+            }
+        }
+
+        // 然后打开读文件句柄
+        let read_fd = OpenOptions::new()
+            .read(true)
+            .open(key)
+            .map_err(|e| anyhow::anyhow!("Failed to open read file: {}", e))?;
+
+        let async_read = Arc::new(RwLock::new(AsyncFile::from_std(read_fd)));
+        let handler = FileReaderHandlerAsync { inner: async_read };
+
+        // 再次检查并插入缓存
+        let mut wg = self.inner.write().expect("Failed to acquire write lock");
+        if let Some(existing) = wg.get(key) {
+            return Ok(existing.clone());
+        }
+        wg.put(key.to_path_buf(), handler.clone());
+        Ok(handler)
+    }
+}
+
+// 写文件句柄
+#[derive(Clone, Debug)]
+pub struct FileWriterHandlerAsync {
+    inner: Arc<RwLock<AsyncFile>>,
+}
+
+impl Deref for FileWriterHandlerAsync {
+    type Target = Arc<RwLock<AsyncFile>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl FileWriterHandlerAsync {
+    fn new(f: AsyncFile) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(f)),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FdWriterCacheAync {
+    inner: Arc<ShardedLock<LruCache<PathBuf, FileWriterHandlerAsync>>>,
+}
+
+impl FdWriterCacheAync {
+    pub fn new(size: usize) -> Self {
+        FdWriterCacheAync {
+            inner: Arc::new(ShardedLock::new(LruCache::new(
+                NonZeroUsize::new(size).unwrap(),
+            ))),
+        }
+    }
+
+    pub fn get(&self, key: &Path) -> Option<FileWriterHandlerAsync> {
+        let mut wg = self.inner.write().expect("Failed to acquire write lock");
+        wg.get(key).cloned()
+    }
+
+    pub fn get_or_create(&self, key: &Path) -> Result<FileWriterHandlerAsync> {
         // 第一次检查缓存
         {
             let mut wg = self.inner.write().expect("Failed to acquire write lock");
@@ -85,15 +153,8 @@ impl FdCacheAync {
         preallocate(&write_fd, 1000)?;
         write_fd.seek(std::io::SeekFrom::Start(0))?;
 
-        // 然后打开读文件句柄
-        let read_fd = OpenOptions::new()
-            .read(true)
-            .open(key)
-            .map_err(|e| anyhow::anyhow!("Failed to open read file: {}", e))?;
-
         let async_write = AsyncFile::from_std(write_fd);
-        let async_read = AsyncFile::from_std(read_fd);
-        let handler = FileHandlerAsync::new(async_read, async_write);
+        let handler = FileWriterHandlerAsync::new(async_write);
 
         // 再次检查并插入缓存
         let mut wg = self.inner.write().expect("Failed to acquire write lock");
@@ -112,7 +173,7 @@ mod test {
 
     #[test]
     fn test_lru_cache_push() -> Result<()> {
-        let fd_cache = FdCacheAync::new(4);
+        let fd_cache = FdReaderCacheAync::new(4);
         for i in 0..10 {
             let p = format!("../target/debug/{}", i);
             fd_cache.get_or_create(Path::new(&p))?;

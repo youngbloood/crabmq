@@ -1,8 +1,12 @@
+use crate::{
+    config::Config, consumer_group_v2::ConsumerGroupManager, message_bus::MessageBus,
+    partition::PartitionManager,
+};
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
 use grpcx::{
-    brokercoosvc::BrokerState,
+    brokercoosvc::{BrokerState, SyncConsumerAssignmentsResp},
     clientbrokersvc::{
         Message, PublishReq, PublishResp, Status as BrokerStatus, SubscribeReq,
         client_broker_service_server::{ClientBrokerService, ClientBrokerServiceServer},
@@ -12,35 +16,36 @@ use grpcx::{
 };
 use log::{debug, error, info};
 use std::{sync::Arc, time::Duration};
-use storagev2::Storage;
+use storagev2::{StorageReader, StorageWriter};
 use tokio::{sync::mpsc, time::interval};
 use tonic::{Request, Response, Status, async_trait, transport::Server};
 
-use crate::{
-    config::Config,
-    consumer_group::{ConsumerGroup, SubSession},
-    message_bus::MessageBus,
-    partition::PartitionManager,
-};
-
 #[derive(Clone)]
-pub struct Broker<T: Storage> {
+pub struct Broker<SW, SR>
+where
+    SW: StorageWriter,
+    SR: StorageReader,
+{
     conf: Config,
 
-    storage: T,
+    storage_writer: SW,
     partitions: PartitionManager,
-    consumers: ConsumerGroup<T>,
+    consumers: ConsumerGroupManager<SR>,
     message_bus: MessageBus,
 
     state_bus: Arc<DashMap<String, mpsc::Sender<BrokerState>>>,
 }
 
-impl<T: Storage> Broker<T> {
-    pub fn new(conf: Config, storage: T) -> Self {
+impl<SW, SR> Broker<SW, SR>
+where
+    SW: StorageWriter,
+    SR: StorageReader,
+{
+    pub fn new(conf: Config, sw: SW, sr: SR) -> Self {
         Self {
-            storage,
+            storage_writer: sw,
             partitions: PartitionManager::new(conf.id),
-            consumers: ConsumerGroup::new(conf.subscriber_timeout),
+            consumers: ConsumerGroupManager::new(conf.subscriber_timeout, sr),
             message_bus: MessageBus::new(
                 conf.message_bus_producer_buffer_size,
                 conf.message_bus_consumer_buffer_size,
@@ -52,7 +57,11 @@ impl<T: Storage> Broker<T> {
 }
 
 #[async_trait]
-impl<T: Storage> ClientBrokerService for Broker<T> {
+impl<SW, SR> ClientBrokerService for Broker<SW, SR>
+where
+    SW: StorageWriter,
+    SR: StorageReader,
+{
     type PublishStream = tonic::codegen::BoxStream<PublishResp>;
     type SubscribeStream = tonic::codegen::BoxStream<Message>;
 
@@ -87,7 +96,10 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
         let broker = self.clone();
         tokio::spawn(async move {
             while let Ok(Some(req)) = stream.message().await {
-                match broker.process_subscribe(&remote_addr, req, &tx).await {
+                match broker
+                    .process_subscribe(&remote_addr, req, tx.clone())
+                    .await
+                {
                     Ok(_) => {}
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
@@ -103,7 +115,11 @@ impl<T: Storage> ClientBrokerService for Broker<T> {
     }
 }
 
-impl<T: Storage> Broker<T> {
+impl<SW, SR> Broker<SW, SR>
+where
+    SW: StorageWriter,
+    SR: StorageReader,
+{
     #[inline]
     pub fn get_id(&self) -> u32 {
         self.conf.id
@@ -126,8 +142,12 @@ impl<T: Storage> Broker<T> {
         BrokerState::default()
     }
 
-    pub fn apply_topic_infos(&self, tp: commonsvc::TopicPartition) {
-        self.partitions.apply_topic_infos(tp)
+    pub fn apply_topic_infos(&self, tpr: commonsvc::TopicPartitionResp) {
+        self.partitions.apply_topic_infos(tpr)
+    }
+
+    pub async fn apply_consumergroup(&self, s: SyncConsumerAssignmentsResp) {
+        self.consumers.apply_consumergroup(s).await;
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -185,7 +205,7 @@ impl<T: Storage> Broker<T> {
         let payload = Bytes::from(req.payload);
         // 存储消息
         let message_id = self
-            .storage
+            .storage_writer
             .store(&req.topic, req.partition, payload.clone())
             .await
             .map_err(|e| {
@@ -211,40 +231,45 @@ impl<T: Storage> Broker<T> {
         &self,
         client_addr: &str,
         req: SubscribeReq,
-        tx: &tokio::sync::mpsc::Sender<Result<Message, Status>>,
+        tx: mpsc::Sender<Result<Message, Status>>,
     ) -> Result<(), Status> {
         match req.request {
             Some(subscribe_req::Request::Sub(sub)) => {
-                // 验证分区归属
-                if !self.partitions.is_my_partition(&sub.topic, sub.partition) {
-                    return Err(Status::new(
-                        tonic::Code::InvalidArgument,
-                        "Invalid partition",
-                    ));
-                }
+                for sub_topic in &sub.sub_topics {
+                    // 验证分区归属
+                    if !self
+                        .partitions
+                        .is_my_partition(&sub_topic.topic, sub_topic.partition)
+                    {
+                        return Err(Status::new(
+                            tonic::Code::InvalidArgument,
+                            "invalid topic or partition",
+                        ));
+                    }
 
-                // 检查是否已有订阅
-                if self.consumers.has_subscription(&sub.topic, sub.partition) {
-                    return Err(Status::new(
-                        tonic::Code::PermissionDenied,
-                        "Partition has been subscribed",
-                    ));
+                    // 检查该客户端是否有订阅该分区的权限
+                    if !self
+                        .consumers
+                        .check_consumer(
+                            // sub.group_id,
+                            &sub.member_id,
+                            &sub_topic.topic,
+                            sub_topic.partition,
+                        )
+                        .await
+                    {
+                        return Err(Status::new(
+                            tonic::Code::PermissionDenied,
+                            "the client not allowed to sub the partition",
+                        ));
+                    }
                 }
 
                 // 创建会话
-                let session: SubSession<T> = SubSession::new(
-                    sub.topic.clone(),
-                    sub.partition,
-                    client_addr.to_string(),
-                    self.storage.clone(),
-                );
-
-                // 启动消息推送
-                let broker = self.clone();
-                let tx_clone = tx.clone();
-                tokio::spawn(async move {
-                    broker.push_messages(session, tx_clone).await;
-                });
+                self.consumers
+                    .new_sesssion(sub.group_id, sub.sub_topics, client_addr.to_string(), tx)
+                    .await
+                    .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
             }
             Some(subscribe_req::Request::Ack(ack)) => {
                 let sess = self.consumers.get_session(client_addr);
@@ -273,33 +298,36 @@ impl<T: Storage> Broker<T> {
                 // 处理ACK逻辑
                 sess.handle_flow(flow);
             }
+            Some(subscribe_req::Request::Heartbeat(hb)) => {
+                todo!()
+            }
             None => return Err(tonic::Status::new(tonic::Code::InvalidArgument, "Unkown ")),
         }
         Ok(())
     }
 
-    async fn push_messages(
-        &self,
-        mut session: SubSession<T>,
-        tx: mpsc::Sender<Result<Message, Status>>,
-    ) {
-        loop {
-            match session.next().await {
-                Ok(msg) => {
-                    tx.send(Ok(msg.clone())).await;
-                    self.message_bus
-                        .broadcast_consumer_message("topic", 1, Bytes::new())
-                        .await
-                }
-                Err(status) => {
-                    if status.code() == tonic::Code::DeadlineExceeded {
-                        tx.send(Err(status)).await;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // async fn push_messages(
+    //     &self,
+    //     mut session: SubSession<T>,
+    //     tx: mpsc::Sender<Result<Message, Status>>,
+    // ) {
+    //     loop {
+    //         match session.next().await {
+    //             Ok(msg) => {
+    //                 tx.send(Ok(msg.clone())).await;
+    //                 self.message_bus
+    //                     .broadcast_consumer_message("topic", 1, Bytes::new())
+    //                     .await
+    //             }
+    //             Err(status) => {
+    //                 if status.code() == tonic::Code::DeadlineExceeded {
+    //                     tx.send(Err(status)).await;
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 #[derive(thiserror::Error, Debug)]

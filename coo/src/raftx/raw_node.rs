@@ -6,6 +6,7 @@ use super::{
     peer::PeerState,
 };
 use crate::partition::SinglePartition;
+use crate::raftx::ProposeData;
 use anyhow::{Result, anyhow};
 use bincode::config;
 use dashmap::DashMap;
@@ -275,7 +276,13 @@ where
                         }
 
                         AllMessageType::RaftPropose(pp) => {
-                           let _ = self.propose(&pp.topic, pp.callback).await;
+                            match pp{
+                                ProposeData::TopicPartition(tp) => {
+                                    let _ = self.propose(&tp.topic, tp.callback).await;
+                                },
+                                ProposeData::ConsumerGroupDetail() => todo!(),
+                            }
+
                         }
                     }
                 }

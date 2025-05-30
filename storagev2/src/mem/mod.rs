@@ -3,13 +3,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::select;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::Storage;
+use crate::{StorageReader, StorageReaderSession, StorageWriter};
 
 struct PartitionQueue {
     sema: Arc<Semaphore>,
@@ -31,31 +31,6 @@ impl MemStorage {
         Self {
             topics: Arc::new(DashMap::new()),
         }
-    }
-}
-#[async_trait]
-impl Storage for MemStorage {
-    /// 存储消息到指定 topic 和 partition
-    async fn store(&self, topic: &str, partition: u32, data: Bytes) -> Result<()> {
-        let topic_storage =
-            self.topics
-                .entry(topic.to_string())
-                .or_insert_with(|| PartitionStorage {
-                    partitions: Arc::new(DashMap::new()),
-                });
-
-        let partition_queue = topic_storage
-            .partitions
-            .entry(partition)
-            .or_insert_with(|| PartitionQueue {
-                sema: Arc::new(Semaphore::new(0)),
-                messages: Arc::new(Mutex::new(VecDeque::new())),
-                read_pos: Arc::new(AtomicUsize::new(0)),
-            });
-
-        partition_queue.messages.lock().unwrap().push_back(data);
-        partition_queue.sema.add_permits(1);
-        Ok(())
     }
 
     /// 获取下一个消息并移动读取指针
@@ -120,5 +95,95 @@ impl Storage for MemStorage {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl StorageWriter for MemStorage {
+    /// 存储消息到指定 topic 和 partition
+    async fn store(&self, topic: &str, partition: u32, data: Bytes) -> Result<()> {
+        let topic_storage =
+            self.topics
+                .entry(topic.to_string())
+                .or_insert_with(|| PartitionStorage {
+                    partitions: Arc::new(DashMap::new()),
+                });
+
+        let partition_queue = topic_storage
+            .partitions
+            .entry(partition)
+            .or_insert_with(|| PartitionQueue {
+                sema: Arc::new(Semaphore::new(0)),
+                messages: Arc::new(Mutex::new(VecDeque::new())),
+                read_pos: Arc::new(AtomicUsize::new(0)),
+            });
+
+        partition_queue.messages.lock().unwrap().push_back(data);
+        partition_queue.sema.add_permits(1);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct MemStorageReader {
+    storage: MemStorage,
+    has_session: Arc<AtomicBool>,
+}
+
+impl MemStorageReader {
+    fn new(storage: MemStorage) -> Self {
+        Self {
+            storage,
+            has_session: Arc::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl StorageReader for MemStorageReader {
+    /// New a session with group_id, it will be return Err() when session has been created.
+    async fn new_session(&self, _group_id: u32) -> Result<Box<dyn StorageReaderSession>> {
+        if self
+            .has_session
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Ok(Box::new(MemStorageReaderSession::new(self.storage.clone())));
+        }
+        Err(anyhow!("mem storage only open once session"))
+    }
+
+    /// Close a session by group_id.
+    async fn close_session(&self, _group_id: u32) {
+        let _ =
+            self.has_session
+                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+pub struct MemStorageReaderSession {
+    storage: MemStorage,
+}
+
+impl MemStorageReaderSession {
+    fn new(storage: MemStorage) -> Self {
+        Self { storage }
+    }
+}
+
+#[async_trait]
+impl StorageReaderSession for MemStorageReaderSession {
+    async fn next(
+        &self,
+        topic: &str,
+        partition: u32,
+        stop_signal: CancellationToken,
+    ) -> Result<Bytes> {
+        self.storage.next(topic, partition, stop_signal).await
+    }
+
+    /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
+    async fn commit(&self, topic: &str, partition: u32) -> Result<()> {
+        self.storage.commit(topic, partition).await
     }
 }

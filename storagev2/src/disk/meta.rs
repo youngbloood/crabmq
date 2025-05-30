@@ -2,7 +2,7 @@ use anyhow::Result;
 use bincode::{Decode, Encode};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{ops::Deref, path::PathBuf, sync::Arc};
 use tokio::{fs, sync::RwLock};
 
 pub const META_NAME: &str = "meta.bin";
@@ -55,46 +55,39 @@ impl TopicMeta {
 
 // Partition 元数据
 #[derive(Debug, Clone)]
-pub struct PartitionMeta {
-    commit_ptr: Arc<RwLock<PositionPtr>>,
-    read_ptr: Arc<RwLock<PositionPtr>>,
-    write_ptr: Arc<RwLock<WriterPositionPtr>>,
+pub struct PartitionWriterMeta {
+    inner: Arc<RwLock<WriterPositionPtr>>,
 }
 
-impl PartitionMeta {
+impl Deref for PartitionWriterMeta {
+    type Target = Arc<RwLock<WriterPositionPtr>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl PartitionWriterMeta {
     pub fn new(init_filename: PathBuf) -> Self {
-        PartitionMeta {
-            read_ptr: Arc::new(RwLock::new(PositionPtr::new(init_filename.clone()))),
-            commit_ptr: Arc::new(RwLock::new(PositionPtr::new(init_filename.clone()))),
-            write_ptr: Arc::new(RwLock::new(WriterPositionPtr::new(init_filename))),
+        PartitionWriterMeta {
+            inner: Arc::new(RwLock::new(WriterPositionPtr::new(init_filename))),
         }
     }
 
-    pub fn get_write_ptr(&self) -> Arc<RwLock<WriterPositionPtr>> {
-        self.write_ptr.clone()
+    pub fn get_inner(&self) -> Arc<RwLock<WriterPositionPtr>> {
+        self.inner.clone()
     }
 
-    pub fn get_read_ptr(&self) -> Arc<RwLock<PositionPtr>> {
-        self.read_ptr.clone()
+    pub async fn load(path: &PathBuf) -> Result<Self> {
+        let ptr = WriterPositionPtr::load(path).await?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(ptr)),
+        })
     }
 
-    pub fn get_commit_ptr(&self) -> Arc<RwLock<PositionPtr>> {
-        self.commit_ptr.clone()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct PositionPtr {
-    pub filename: PathBuf,
-    pub offset: u64,
-}
-
-impl PositionPtr {
-    pub fn new(filename: PathBuf) -> Self {
-        Self {
-            filename,
-            offset: Default::default(),
-        }
+    pub async fn save(&self, path: &PathBuf) -> Result<()> {
+        self.inner.read().await.save(path).await?;
+        Ok(())
     }
 }
 
@@ -114,50 +107,47 @@ impl WriterPositionPtr {
             ..Default::default()
         }
     }
-}
 
-// 用于序列化的中间结构体
-#[derive(Serialize, Deserialize)]
-struct SerializedPartitionMeta {
-    commit_ptr: PositionPtr,
-    read_ptr: PositionPtr,
-    write_ptr: WriterPositionPtr,
-}
-
-impl PartitionMeta {
     pub async fn load(path: &PathBuf) -> Result<Self> {
-        // 读取文件内容
         let data = tokio::fs::read_to_string(path).await?;
-
-        // 反序列化中间结构体
-        let mut serialized: SerializedPartitionMeta = serde_json::from_str(&data)?;
-        serialized.write_ptr.flush_offset = serialized.write_ptr.offset;
-        // 用 commit_ptr 初始化 read_ptr，用于重启后后继续从 commit_ptr 位置读给消费者
-        serialized.read_ptr = serialized.commit_ptr.clone();
-
-        // 转换为目标结构体
-        Ok(Self {
-            commit_ptr: Arc::new(RwLock::new(serialized.commit_ptr)),
-            read_ptr: Arc::new(RwLock::new(serialized.read_ptr)),
-            write_ptr: Arc::new(RwLock::new(serialized.write_ptr)),
-        })
+        let mut ptr: WriterPositionPtr = serde_json::from_str(&data)?;
+        ptr.flush_offset = ptr.offset;
+        Ok(ptr)
     }
 
     pub async fn save(&self, path: &PathBuf) -> Result<()> {
-        // 并行获取所有指针的读锁
-        let commit_ptr = self.commit_ptr.read().await;
-        let read_ptr = self.read_ptr.read().await;
-        let write_ptr = self.write_ptr.read().await;
+        let json_data = serde_json::to_string_pretty(&self)?;
+        tokio::fs::write(path, json_data).await?;
 
-        // 创建可序列化结构体
-        let serialized = SerializedPartitionMeta {
-            commit_ptr: (*commit_ptr).clone(),
-            read_ptr: (*read_ptr).clone(),
-            write_ptr: (*write_ptr).clone(),
-        };
+        Ok(())
+    }
+}
 
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ReaderPositionPtr {
+    pub group_id: u32,
+    pub filename: PathBuf,
+    pub offset: u64,
+}
+
+impl ReaderPositionPtr {
+    pub fn new(group_id: u32, filename: PathBuf) -> Self {
+        Self {
+            group_id,
+            filename,
+            offset: Default::default(),
+        }
+    }
+
+    pub async fn load(path: &PathBuf) -> Result<Self> {
+        let data = tokio::fs::read_to_string(path).await?;
+        let ptr: ReaderPositionPtr = serde_json::from_str(&data)?;
+        Ok(ptr)
+    }
+
+    pub async fn save(&self, path: &PathBuf) -> Result<()> {
         // 序列化为JSON并保存
-        let json_data = serde_json::to_string_pretty(&serialized)?;
+        let json_data = serde_json::to_string_pretty(&self)?;
         tokio::fs::write(path, json_data).await?;
 
         Ok(())

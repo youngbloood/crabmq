@@ -11,7 +11,10 @@ service ClientCooService {
     rpc List (commonsvc.CooListReq) returns (stream commonsvc.CooListResp);
     rpc NewTopic (NewTopicReq) returns (NewTopicResp);
     rpc AddPartitions (AddPartitionsReq) returns (AddPartitionsResp);
-    rpc Pull (PullReq) returns (stream commonsvc.TopicPartition);
+    rpc Pull (PullReq) returns (stream commonsvc.TopicPartitionResp);
+
+    rpc JoinGroup(GroupJoinRequest) returns (GroupJoinResponse);
+    rpc SyncConsumerAssignments(SyncConsumerAssignmentsReq) returns (stream SyncConsumerAssignmentsResp);
 }
 
 message AuthReq {
@@ -36,7 +39,7 @@ message NewTopicReq {
 message NewTopicResp {
     bool success = 1;
     string error = 2;
-    optional commonsvc.TopicPartition detail = 3;
+    optional commonsvc.TopicPartitionResp detail = 3;
 }
 
 message AddPartitionsReq {
@@ -50,7 +53,7 @@ message AddPartitionsReq {
 message AddPartitionsResp {
     bool success = 1;
     string error = 2;
-    optional commonsvc.TopicPartition detail = 3;
+    optional commonsvc.TopicPartitionResp detail = 3;
 }
 
 message PullReq {
@@ -59,4 +62,40 @@ message PullReq {
     repeated uint32 partition_ids = 2;
     repeated uint32 broker_ids = 3;
     repeated string keys = 4;
+}
+
+message GroupJoinRequest {
+    uint32 group_id = 1;
+    string client_id = 2;
+    repeated string topics = 3;
+    uint32 capacity = 4;  // 新增：客户端处理能力
+}
+
+message GroupJoinResponse {
+    uint32 group_id = 1;
+    string member_id = 2;
+    int32 generation_id = 3;
+    repeated string assigned_topics = 4;  // 统一后的订阅列表
+    commonsvc.GroupStatus status = 5;
+    enum ErrorCode {
+        NONE = 0;
+        InvalidTopic = 1;
+        SUBSCRIPTION_CONFLICT = 2;
+        INVALID_GENERATION = 3;
+    }
+    ErrorCode error = 6;
+}
+
+message SyncConsumerAssignmentsReq {
+    uint32 group_id = 1;
+    string member_id = 2;
+    int32 generation_id = 3;
+}
+
+message SyncConsumerAssignmentsResp {
+    uint32 group_id = 1;
+    string member_id = 2;
+    // 客户端存储成 map: broker_id -> Vec<(topic-partition)>
+    repeated commonsvc.TopicPartitionMeta list = 3;
+    commonsvc.GroupStatus status = 4;
 }

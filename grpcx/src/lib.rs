@@ -1,4 +1,6 @@
 pub mod smart_client;
+pub mod topic_meta;
+
 pub mod brokercoosvc {
     tonic::include_proto!("brokercoosvc");
 }

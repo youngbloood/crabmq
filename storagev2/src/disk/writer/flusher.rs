@@ -1,7 +1,6 @@
-use super::{
-    meta::{PartitionMeta, TopicMeta},
-    writer::PartitionWriter,
-};
+use crate::disk::meta::{PartitionWriterMeta, TopicMeta};
+
+use super::buffer::PartitionWriterBuffer;
 use dashmap::DashMap;
 use log::error;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -9,9 +8,9 @@ use tokio::{select, sync::mpsc, time};
 
 #[derive(Clone)]
 pub struct Flusher {
-    writers: Arc<DashMap<PathBuf, Arc<PartitionWriter>>>,
+    writers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
     topic_metas: Arc<DashMap<PathBuf, TopicMeta>>,
-    partition_metas: Arc<DashMap<PathBuf, PartitionMeta>>,
+    partition_metas: Arc<DashMap<PathBuf, PartitionWriterMeta>>,
     interval: Duration,
 }
 
@@ -40,7 +39,7 @@ impl Flusher {
         }
     }
 
-    pub fn add_partition_writer(&self, key: PathBuf, writer: Arc<PartitionWriter>) {
+    pub fn add_partition_writer(&self, key: PathBuf, writer: Arc<PartitionWriterBuffer>) {
         self.writers.insert(key, writer);
     }
 
@@ -48,7 +47,7 @@ impl Flusher {
         self.topic_metas.insert(topic, meta);
     }
 
-    pub fn add_partition_meta(&self, partition: PathBuf, meta: PartitionMeta) {
+    pub fn add_partition_meta(&self, partition: PathBuf, meta: PartitionWriterMeta) {
         self.partition_metas.insert(partition, meta);
     }
 

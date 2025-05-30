@@ -469,6 +469,7 @@ dependencies = [
  "dashmap",
  "grpcx",
  "indexmap",
+ "log",
  "murmur3",
  "tokio",
  "tokio-stream",
@@ -562,10 +563,12 @@ dependencies = [
  "dashmap",
  "grpcx",
  "log",
+ "nanoid",
  "parking_lot 0.12.3",
  "prost",
  "protobuf",
  "raft",
+ "rand 0.9.1",
  "serde",
  "serde_json",
  "sled",
@@ -1132,6 +1135,7 @@ dependencies = [
  "pin-project",
  "prost",
  "prost-build",
+ "serde",
  "thiserror 2.0.12",
  "tokio",
  "tokio-stream",
@@ -1698,6 +1702,15 @@ name = "murmurhash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
+
+[[package]]
+name = "nanoid"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ffa00dec017b5b1a8b7cf5e2c008bfda1aa7e0697ac1508b491fdf2622fb4d8"
+dependencies = [
+ "rand 0.8.5",
+]
 
 [[package]]
 name = "nom"

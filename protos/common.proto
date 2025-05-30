@@ -32,25 +32,51 @@ enum CooRole {
     Unknown = 4;
 }
 
-message TopicPartition {
+message TopicPartitionResp {
     uint64 term = 1;
-    map<string, PartitionAssignment> assignments = 2;    // Topic名称 → 分配信息
+    repeated TopicPartitionMeta list = 2;
 }
 
-message PartitionAssignment {
-    repeated PartitionInfo partitions = 1;       // 分区ID → 分区元数据
-    // 暂时没用
-    repeated KeyAssignment key_to_partition = 2;        // Key → 分区IDs
+message Partition {
+    uint32 broker_id = 1;
+    string topic = 2;
+    uint32 partition_id = 3;
 }
 
-message KeyAssignment {
-    string key = 1;
-    repeated uint32 ids = 2;
+message ConsumerMember {
+    string member_id = 1;        // Coo分配的成员ID
+    string client_id = 2;        // 客户端原始ID
+    repeated string topics = 3;  // 订阅主题列表
+    uint32 capacity = 4;         // 处理能力权重 (0-100)
 }
 
-message PartitionInfo {
-    uint32 id = 1; // 分区 ID
-    uint32 leader = 2; // 该分区下的 Broker Leader ID
-    repeated uint32 followers = 3; // 该分区下的 Broker Follower ID
-    repeated string addrs = 4; // 该分区下的所有 Broker Addrs，优先排 Leader
+
+// ========== 状态枚举 ==========
+enum GroupStatus {
+    EMPTY = 0;       // 无成员
+    STABLE = 1;      // 稳定状态
+    REBALANCING = 2; // 再平衡中
+    DEAD = 3;        // 组已失效
+}
+
+message TopicPartitionMeta {
+    // topic
+    string topic = 1;
+    // 分区 id
+    uint32 partition_id = 2;
+
+    // 该 topic-partition 下的单值标签
+    // 如：broker_leader_id: 1
+    // broker_leader_addr: 127.0.0.1:16001
+    map<string, string> single_labels = 3;
+    // 该 topic-partition 下的多值标签
+    // 如：broker_follower_ids: [2,3]
+    // broker_follower_addrs: [127.0.0.1:16002]
+    // member_ids: [xxxx] // 消费者组某成员可以消费该分区的消息
+    // pub_keys: [order] // 发布消息时根据该key来路由 
+    map<string, LabelValue> multi_labels = 4;
+}
+
+message LabelValue{
+    repeated string values = 1;
 }

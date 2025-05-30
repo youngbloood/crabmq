@@ -3,7 +3,6 @@ use grpcx::clientbrokersvc::{Ack, FlowControl, Message};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
-use storagev2::Storage;
 use tokio::sync::Semaphore;
 use tokio::time;
 use tokio_util::sync::CancellationToken;

@@ -1,13 +1,13 @@
 use super::Config as CooConfig;
 use super::partition;
 use super::raftx;
+use crate::consumer_group::ConsumerGroupManager;
 use crate::event_bus::EventBus;
-use crate::partition::PartitionInfo;
 use crate::partition::PartitionPolicy;
 use crate::partition::SinglePartition;
-use crate::partition::TopicAssignment;
 use crate::raftx::Callback;
-use crate::raftx::ProproseData;
+use crate::raftx::ProposeData;
+use crate::raftx::TopicPartitionData;
 use crate::{BrokerNode, ClientNode};
 use anyhow::Result;
 use anyhow::anyhow;
@@ -20,16 +20,17 @@ use grpcx::cooraftsvc;
 use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
 use grpcx::smart_client::repair_addr_with_http;
 use grpcx::{brokercoosvc, clientcoosvc};
+use log::error;
 use log::info;
 use partition::PartitionManager;
 use protobuf::Message as _;
 use raft::prelude::*;
 use raftx::{MessageType as AllMessageType, RaftNode};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::select;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio::time::timeout;
@@ -62,7 +63,10 @@ pub struct Coordinator {
     peer_change_bus: EventBus<Result<CooListResp, Status>>,
 
     // 分区管理
-    partition_mgr: PartitionManager,
+    partition_manager: PartitionManager,
+
+    // 消费者组管理器
+    consumer_group_manager: ConsumerGroupManager,
 }
 
 impl Deref for Coordinator {
@@ -97,8 +101,11 @@ impl Coordinator {
             broker_event_bus: EventBus::new(conf.event_bus_buffer_size),
             client_event_bus: EventBus::new(conf.event_bus_buffer_size),
             peer_change_bus: EventBus::new(conf.event_bus_buffer_size),
-            partition_mgr: partition_manager,
+            consumer_group_manager: ConsumerGroupManager::new(partition_manager.all_topics.clone()),
+            partition_manager,
             conf,
+            // broker_consumer_bus: todo!(),
+            // client_consumer_bus: todo!(),
         }
     }
 
@@ -286,7 +293,7 @@ impl Coordinator {
     pub async fn broker_pull(
         &self,
         broker_id: u32,
-    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicPartition, Status>>> {
+    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicPartitionResp, Status>>> {
         let id = format!("local_broker_{}", broker_id);
         let (_, mut recver) = self.broker_event_bus.subscribe(id.clone());
         let bus = self.broker_event_bus.clone();
@@ -359,20 +366,21 @@ impl Coordinator {
         broker_ids: &[u32],
         partition_ids: &[u32],
         keys: &[String],
-    ) -> commonsvc::TopicPartition {
+    ) -> commonsvc::TopicPartitionResp {
         let topic_assignment =
-            self.partition_mgr
+            self.partition_manager
                 .query_partitions(topics, broker_ids, partition_ids, keys);
 
-        let mut tp = commonsvc::TopicPartition {
+        let mut tpr = commonsvc::TopicPartitionResp {
             term: self.get_term().await,
-            assignments: HashMap::default(),
+            list: vec![],
         };
         for (topic, ta) in topic_assignment {
-            tp.assignments
-                .insert(topic, commonsvc::PartitionAssignment::from(ta));
+            ta.iter()
+                .map(|v| tpr.list.push(v.convert_to_topic_partition_meta(&topic)));
         }
-        tp
+
+        tpr
     }
 
     async fn propose(
@@ -381,10 +389,12 @@ impl Coordinator {
         callback: Option<Callback>,
     ) -> Result<()> {
         self.raft_node_sender
-            .send(AllMessageType::RaftPropose(ProproseData {
-                topic: partitions.clone(),
-                callback,
-            }))
+            .send(AllMessageType::RaftPropose(ProposeData::TopicPartition(
+                TopicPartitionData {
+                    topic: partitions.clone(),
+                    callback,
+                },
+            )))
             .await?;
         Ok(())
     }
@@ -456,8 +466,10 @@ pub enum PartitionEvent {
 #[tonic::async_trait]
 impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
     type ReportStream = tonic::codegen::BoxStream<brokercoosvc::BrokerStateResp>;
-    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartition>;
+    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartitionResp>;
     type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
+    type SyncConsumerAssignmentsStream =
+        tonic::codegen::BoxStream<brokercoosvc::SyncConsumerAssignmentsResp>;
 
     async fn auth(
         &self,
@@ -612,12 +624,51 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
         });
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
     }
+
+    async fn sync_consumer_assignments(
+        &self,
+        request: tonic::Request<brokercoosvc::SyncConsumerAssignmentsReq>,
+    ) -> std::result::Result<tonic::Response<Self::SyncConsumerAssignmentsStream>, tonic::Status>
+    {
+        let req = request.into_inner();
+        let broker_id = req.broker_id;
+        let mut rx = self.consumer_group_manager.subscribe_broker_consumer(req);
+
+        let (tx_middleware, rx_middleware) = mpsc::channel(1);
+        tokio::spawn(async move {
+            loop {
+                if rx.is_closed() {
+                    break;
+                }
+                select! {
+                    res = rx.recv() => {
+                        if res.is_none() {
+                            continue;
+                        }
+                        let res = res.unwrap();
+                        if res.broker_id == broker_id {
+                            if let Err(e) = tx_middleware.send(Ok(res)).await {
+                                error!("sync_consumer_assignments resp stream err: {e:?}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(tonic::Response::new(Box::pin(ReceiverStream::new(
+            rx_middleware,
+        ))))
+    }
 }
 
 #[tonic::async_trait]
 impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
-    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartition>;
+    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartitionResp>;
     type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
+    type SyncConsumerAssignmentsStream =
+        tonic::codegen::BoxStream<clientcoosvc::SyncConsumerAssignmentsResp>;
 
     async fn auth(
         &self,
@@ -655,7 +706,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
 
         let req = request.into_inner();
         let part = self
-            .partition_mgr
+            .partition_manager
             .build_allocator(
                 self.conf.new_topic_partition_factor.clone(),
                 Some(self.brokers.clone()),
@@ -715,7 +766,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         self.check_leader().await?;
 
         let req = request.into_inner();
-        if !self.partition_mgr.has_topic(&req.topic) {
+        if !self.partition_manager.has_topic(&req.topic) {
             return Err(tonic::Status::new(
                 tonic::Code::InvalidArgument,
                 format!("Not has topic: {}", &req.topic),
@@ -728,7 +779,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
             ));
         }
         let added = self
-            .partition_mgr
+            .partition_manager
             .build_allocator(
                 self.conf.new_topic_partition_factor.clone(),
                 Some(self.brokers.clone()),
@@ -849,6 +900,61 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
 
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
     }
+
+    async fn join_group(
+        &self,
+        request: tonic::Request<clientcoosvc::GroupJoinRequest>,
+    ) -> std::result::Result<tonic::Response<clientcoosvc::GroupJoinResponse>, tonic::Status> {
+        let res = self
+            .consumer_group_manager
+            .apply_join(&request.into_inner())
+            .await
+            .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
+
+        if res.error == 0 {
+            // TODO: 提交消费者详情值 raft
+            // self.raft_node_sender.send(AllMessageType::RaftPropose(()))
+        }
+
+        Ok(tonic::Response::new(res))
+    }
+
+    async fn sync_consumer_assignments(
+        &self,
+        request: tonic::Request<clientcoosvc::SyncConsumerAssignmentsReq>,
+    ) -> std::result::Result<tonic::Response<Self::SyncConsumerAssignmentsStream>, tonic::Status>
+    {
+        let req = request.into_inner();
+        let member_id = req.member_id.clone();
+        let mut rx = self.consumer_group_manager.subscribe_client_consumer(req);
+
+        let (tx_middleware, rx_middleware) = mpsc::channel(1);
+        tokio::spawn(async move {
+            loop {
+                if rx.is_closed() {
+                    break;
+                }
+                select! {
+                    res = rx.recv() => {
+                        if res.is_none() {
+                            continue;
+                        }
+                        let res = res.unwrap();
+                        if res.member_id == member_id {
+                            if let Err(e) = tx_middleware.send(Ok(res)).await {
+                                error!("sync_consumer_assignments resp stream err: {e:?}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(tonic::Response::new(Box::pin(ReceiverStream::new(
+            rx_middleware,
+        ))))
+    }
 }
 
 #[tonic::async_trait]
@@ -897,10 +1003,12 @@ impl cooraftsvc::raft_service_server::RaftService for Coordinator {
         let (tx_notify, mut rx_notify) = mpsc::channel(1);
         let _ = self
             .raft_node_sender
-            .send(AllMessageType::RaftPropose(ProproseData {
-                topic: SinglePartition::default(),
-                callback: Some(tx_notify),
-            }))
+            .send(AllMessageType::RaftPropose(ProposeData::TopicPartition(
+                TopicPartitionData {
+                    topic: SinglePartition::default(),
+                    callback: Some(tx_notify),
+                },
+            )))
             .await;
 
         let _ = rx_notify.recv().await;
@@ -967,8 +1075,8 @@ impl cooraftsvc::raft_service_server::RaftService for Coordinator {
 }
 
 // 转换函数示例
-fn convert_to_pull_resp(ps: SinglePartition, term: u64) -> commonsvc::TopicPartition {
-    let mut tp = commonsvc::TopicPartition::from(ps);
+fn convert_to_pull_resp(ps: SinglePartition, term: u64) -> commonsvc::TopicPartitionResp {
+    let mut tp = commonsvc::TopicPartitionResp::from(ps);
     tp.term = term;
     tp
 }
@@ -986,65 +1094,31 @@ fn filter_single_partition(
     }
 
     // 2. 创建新的 TopicAssignment 用于存储过滤结果
-    let filtered_assignment = TopicAssignment {
-        partitions: DashMap::new(),
-        key_to_partition: DashMap::new(),
-        version: sp.partitions.version,
-        next_round_robin: sp.partitions.next_round_robin,
-    };
+    let mut filtered_assignment = vec![];
 
-    // 3. 过滤分区
-    for entry in sp.partitions.partitions.iter() {
-        let partition = entry.value();
-
+    // 3. 过滤分区，broker, keys
+    for entry in sp.partitions.iter() {
         // 检查分区 ID 是否匹配
-        let match_partition = partition_ids.is_empty() || partition_ids.contains(&partition.id);
+        let match_partition = partition_ids.is_empty() || partition_ids.contains(&entry.id);
 
         // 检查 Broker 是否匹配（主副本或从副本）
         let match_broker = broker_ids.is_empty()
-            || broker_ids.contains(&partition.leader)
-            || partition.followers.iter().any(|f| broker_ids.contains(f));
+            || broker_ids.contains(&entry.broker_leader_id)
+            || entry
+                .broker_follower_ids
+                .iter()
+                .any(|f| broker_ids.contains(f));
 
         // 检查 Key 是否匹配
-        let match_key = keys.is_empty()
-            || partition
-                .key
-                .as_ref()
-                .map(|k| keys.contains(k))
-                .unwrap_or(false);
+        let match_key = keys.is_empty() || entry.pub_keys.iter().any(|k| keys.contains(k));
 
         if match_partition && match_broker && match_key {
-            filtered_assignment
-                .partitions
-                .insert(partition.id, partition.clone());
-        }
-    }
-
-    // 4. 过滤 key_to_partition 映射
-    for entry in sp.partitions.key_to_partition.iter() {
-        let (key, pids) = entry.pair();
-
-        // 检查 Key 是否匹配
-        if !keys.is_empty() && !keys.contains(key) {
-            continue;
-        }
-
-        // 过滤分区 ID
-        let filtered_pids: Vec<u32> = pids
-            .iter()
-            .filter(|pid| partition_ids.is_empty() || partition_ids.contains(pid))
-            .cloned()
-            .collect();
-
-        if !filtered_pids.is_empty() {
-            filtered_assignment
-                .key_to_partition
-                .insert(key.clone(), filtered_pids);
+            filtered_assignment.push(entry.clone());
         }
     }
 
     // 5. 如果没有任何分区匹配，则返回 None
-    if filtered_assignment.partitions.is_empty() {
+    if filtered_assignment.is_empty() {
         return None;
     }
 
@@ -1056,36 +1130,13 @@ fn filter_single_partition(
     })
 }
 
-impl From<SinglePartition> for commonsvc::TopicPartition {
+impl From<SinglePartition> for commonsvc::TopicPartitionResp {
     fn from(sp: SinglePartition) -> Self {
-        let mut tp = commonsvc::TopicPartition::default();
-        tp.assignments.insert(
-            sp.topic.clone(),
-            commonsvc::PartitionAssignment::from(sp.partitions),
-        );
+        let mut tp = commonsvc::TopicPartitionResp::default();
+        sp.partitions.iter().map(|v| {
+            tp.list.push(v.convert_to_topic_partition_meta(&sp.topic));
+        });
 
         tp
-    }
-}
-
-impl From<TopicAssignment> for commonsvc::PartitionAssignment {
-    fn from(ta: TopicAssignment) -> Self {
-        let mut res = commonsvc::PartitionAssignment::default();
-        for (k, v) in ta.partitions {
-            res.partitions
-                .push(commonsvc::PartitionInfo::from(v.clone()));
-        }
-        res
-    }
-}
-
-impl From<PartitionInfo> for commonsvc::PartitionInfo {
-    fn from(pi: PartitionInfo) -> Self {
-        commonsvc::PartitionInfo {
-            id: pi.id,
-            leader: pi.leader,
-            followers: pi.followers,
-            addrs: pi.brokers,
-        }
     }
 }

@@ -1,11 +1,14 @@
 pub mod config;
+mod consumer_group;
 pub mod coo;
 mod event_bus;
 mod partition;
 mod raftx;
+// mod topic_meta;
+use std::collections::HashMap;
 
 pub use config::*;
-use grpcx::brokercoosvc;
+use grpcx::{brokercoosvc, commonsvc::TopicPartitionMeta};
 struct BrokerNode {
     state: brokercoosvc::BrokerState,
 }

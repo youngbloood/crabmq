@@ -14,7 +14,9 @@ service BrokerCooService {
     // broker 向 coo 上报自身状态
     rpc Report (stream BrokerState) returns (stream BrokerStateResp);
     // coo 主动向 broker 推送新的 Topic-Partition 信息
-    rpc Pull (PullReq) returns (stream commonsvc.TopicPartition);
+    rpc Pull (PullReq) returns (stream commonsvc.TopicPartitionResp);
+
+    rpc SyncConsumerAssignments(SyncConsumerAssignmentsReq) returns (stream SyncConsumerAssignmentsResp);
 }
 
 message AuthReq {
@@ -66,4 +68,15 @@ message PullReq {
     uint32 broker_id = 1;
     repeated string topics = 2;
     repeated uint32 partition_ids = 3;
+}
+
+message SyncConsumerAssignmentsReq {
+     // 过滤条件
+    uint32 broker_id = 1;
+}
+
+message SyncConsumerAssignmentsResp {
+    uint32 broker_id = 1;
+    uint32 term = 2;
+    repeated commonsvc.TopicPartitionMeta list = 3;
 }
