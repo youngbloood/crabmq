@@ -2,7 +2,11 @@ use crate::{BrokerNode, raftx::PartitionApply};
 use anyhow::{Result, anyhow};
 use bincode::config;
 use dashmap::DashMap;
-use grpcx::topic_meta::{TopicPartitionDetail, TopicPartitionDetailSnapshot};
+use grpcx::{
+    brokercoosvc::BrokerState,
+    commonsvc::TopicPartitionMeta,
+    topic_meta::{TopicPartitionDetail, TopicPartitionDetailSnapshot},
+};
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::{num::ParseIntError, sync::Arc};
@@ -64,13 +68,6 @@ pub struct PartitionManager {
     policy: Arc<PartitionPolicy>,
     // 与 raftx/storage.rs 使用同一个 Db
     db: Db,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SinglePartition {
-    pub unique_id: String, // 唯一 id, 用于标识该消息
-    pub topic: String,
-    pub partitions: Vec<TopicPartitionDetailSnapshot>,
 }
 
 impl PartitionManager {
@@ -203,7 +200,7 @@ impl PartitionManager {
     pub fn build_allocator(
         &self,
         new_topic_partition_factor: String,
-        brokers: Option<Arc<DashMap<u32, BrokerNode>>>,
+        brokers: Option<Arc<DashMap<u32, BrokerState>>>,
     ) -> Allocator {
         if brokers.is_none() {
             return Allocator {
@@ -297,11 +294,11 @@ impl PartitionApply for PartitionManager {
 pub struct Allocator<'a> {
     mngr: &'a PartitionManager,
     new_topic_partition_factor: String,
-    brokers: Arc<DashMap<u32, BrokerNode>>,
+    brokers: Arc<DashMap<u32, BrokerState>>,
     policy: &'a PartitionPolicy,
 }
 
-impl<'a> Allocator<'a> {
+impl Allocator<'_> {
     /// 为新 Topic 的 Partition 分配 broker（根据策略选择主副本）
     pub fn assign_new_topic(
         &self,
@@ -326,7 +323,6 @@ impl<'a> Allocator<'a> {
 
         // 2. 选择可用 Broker
         let selected_brokers = self.select_available_brokers();
-
         // 3. 分配分区
         let mut partitions = Vec::with_capacity(num_partitions as usize);
         for id in 1..num_partitions + 1 {
@@ -336,12 +332,12 @@ impl<'a> Allocator<'a> {
             let leader_addr = self
                 .brokers
                 .get(&leader_id)
-                .map(|b| b.state.addr.clone())
+                .map(|b| b.addr.clone())
                 .unwrap_or_default();
 
             let follower_addrs = followers
                 .iter()
-                .filter_map(|id| self.brokers.get(id).map(|b| b.state.addr.clone()))
+                .filter_map(|id| self.brokers.get(id).map(|b| b.addr.clone()))
                 .collect::<Vec<_>>();
 
             let partition = TopicPartitionDetail {
@@ -397,12 +393,12 @@ impl<'a> Allocator<'a> {
             let leader_addr = self
                 .brokers
                 .get(&leader_id)
-                .map(|b| b.state.addr.clone())
+                .map(|b| b.addr.clone())
                 .unwrap_or_default();
 
             let follower_addrs = followers
                 .iter()
-                .filter_map(|id| self.brokers.get(id).map(|b| b.state.addr.clone()))
+                .filter_map(|id| self.brokers.get(id).map(|b| b.addr.clone()))
                 .collect::<Vec<_>>();
 
             let partition = TopicPartitionDetail {
@@ -471,9 +467,9 @@ impl<'a> Allocator<'a> {
                 // 负载感知策略：按负载排序选择
                 broker_ids.sort_by_key(|id| {
                     let broker = self.brokers.get(id).unwrap();
-                    (broker.state.cpurat as f64 * 100.0
-                        + broker.state.memrate as f64 * 100.0
-                        + broker.state.diskrate as f64 * 100.0) as u32
+                    (broker.cpurate as f64 * 100.0
+                        + broker.memrate as f64 * 100.0
+                        + broker.diskrate as f64 * 100.0) as u32
                 });
             }
             _ => {
@@ -524,4 +520,20 @@ fn extract_value(s: &str) -> Result<(u64, bool), ParseIntError> {
         _ => (s, false),
     };
     num_str.parse::<u64>().map(|num| (num, has_n))
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SinglePartition {
+    pub unique_id: String, // 唯一 id, 用于标识该消息
+    pub topic: String,
+    pub partitions: Vec<TopicPartitionDetailSnapshot>,
+}
+
+impl From<SinglePartition> for Vec<TopicPartitionMeta> {
+    fn from(val: SinglePartition) -> Self {
+        val.partitions
+            .iter()
+            .map(|v| v.convert_to_topic_partition_meta(&val.topic.clone()))
+            .collect()
+    }
 }

@@ -1,8 +1,11 @@
 use dashmap::DashMap;
-use grpcx::commonsvc;
+use grpcx::{
+    commonsvc::{self, TopicPartitionMeta},
+    topic_meta::TopicPartitionDetail,
+};
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PartitionManager {
     broker_id: u32,
     // 当前节点负责的分区 (topic, partition) -> bool
@@ -22,13 +25,10 @@ impl PartitionManager {
             .contains_key(&(topic.to_string(), partition))
     }
 
-    pub fn apply_topic_infos(&self, tpr: commonsvc::TopicPartitionResp) {
-        for tpm in &tpr.list {
+    pub fn apply_topic_infos(&self, tpms: Vec<TopicPartitionDetail>) {
+        for tpm in &tpms {
             self.my_partitions
                 .insert((tpm.topic.clone(), tpm.partition_id), ());
-            for (k, v) in &tpm.multi_labels {
-                todo!()
-            }
         }
     }
 }

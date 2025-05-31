@@ -401,7 +401,7 @@ impl SmartClient {
             match self.must_leader_channel().await {
                 Ok((chan, addr)) => match operation(chan, addr).await {
                     Ok(result) => {
-                        info!("[SmartClient]: connect to Leader and operation success");
+                        // info!("[SmartClient]: connect to Leader and operation success");
                         return Ok(result);
                     }
                     Err(e) => {

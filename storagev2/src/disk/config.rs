@@ -39,6 +39,11 @@ impl Config {
 
         Ok(())
     }
+
+    pub fn with_storage_dir(mut self, storage_dir: PathBuf) -> Self {
+        self.storage_dir = storage_dir;
+        self
+    }
 }
 
 pub fn default_config() -> Config {

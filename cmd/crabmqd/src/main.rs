@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use broker::Broker;
 use coo::coo::Coordinator;
 use logic_node::Slave;
+use std::path::PathBuf;
 use std::{net::SocketAddr, path::Path, sync::Arc};
 use storagev2::disk::DiskStorageReader;
 use storagev2::disk::DiskStorageWriter;
@@ -157,7 +158,7 @@ async fn main() -> Result<()> {
     }
 
     if args.broker_args.broker.is_some() {
-        let conf = default_config();
+        let conf = default_config().with_storage_dir(PathBuf::from("./data/message"));
         let broker = Broker::new(
             broker::default_config()
                 .with_id(args.id)

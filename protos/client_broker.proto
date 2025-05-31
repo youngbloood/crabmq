@@ -78,11 +78,11 @@ message Heartbeat {
 
 // ========== 通用结构 ==========
 message Message {
-  string message_id = 1;
-  string topic = 2;
-  uint32 partition = 3;
-  int64 offset = 4;         // Broker维护的位移
-  bytes payload = 5;
+  string topic = 1;
+  uint32 partition = 2;
+  string message_id = 3;
+  bytes payload = 4;
+  int64 offset = 5;         // Broker维护的位移
   map<string,string> metadata = 6;  // 扩展元数据
   // 新增流控元数据
   uint32 credit_remaining = 7;      // Broker端剩余信用额度

@@ -12,6 +12,7 @@ use crate::{BrokerNode, ClientNode};
 use anyhow::Result;
 use anyhow::anyhow;
 use dashmap::DashMap;
+use grpcx::brokercoosvc::BrokerState;
 use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
 use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
 use grpcx::commonsvc;
@@ -28,6 +29,7 @@ use raft::prelude::*;
 use raftx::{MessageType as AllMessageType, RaftNode};
 use std::net::SocketAddr;
 use std::ops::Deref;
+use std::os::macos::raw::stat;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
@@ -50,7 +52,7 @@ pub struct Coordinator {
     raft_node_sender: mpsc::Sender<AllMessageType>,
 
     // coo: leader 收集到的 broker 上报信息
-    brokers: Arc<DashMap<u32, BrokerNode>>,
+    brokers: Arc<DashMap<u32, BrokerState>>,
 
     // 链接 coo 的客户端
     clients: Arc<DashMap<String, ClientNode>>,
@@ -134,15 +136,15 @@ impl Coordinator {
     /// broker_pull
     ///
     /// 用于本地的 `broker` 向 coo 报道自身信息
-    pub fn broker_report(&self, state: brokercoosvc::BrokerState) {
+    pub fn apply_broker_report(&self, state: brokercoosvc::BrokerState) {
         let id = state.id;
         self.brokers
             .entry(id)
             .and_modify(|entry| {
-                // 修改值
-                entry.state.memrate = state.memrate;
+                // TODO: 修改值
+                *entry = state.clone();
             })
-            .or_insert_with(|| BrokerNode { state });
+            .or_insert(state.clone());
     }
 
     /// 启动 Coordinator 服务
@@ -328,10 +330,8 @@ impl Coordinator {
                         if let Some(partitions) =
                             filter_single_partition(partitions, &[], &[broker_id], &[], &[])
                         {
-                            let _ = tx.send(Ok(convert_to_pull_resp(
-                                partitions,
-                                raft_node.get_term().await,
-                            )));
+                            let res = convert_to_pull_resp(partitions, raft_node.get_term().await);
+                            let _ = tx.send(Ok(res));
                         }
                     }
 
@@ -526,12 +526,12 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                 let id = state.id;
                 info!("Coo[{}] handle Broker[{}] BrokerState",coo_id,id);
 
-                brokers.entry(id).and_modify(|entry| {
-                    // 修改值
-                    entry.state.memrate = state.memrate;
-                }).or_insert_with(|| {
-                    BrokerNode { state }
-                });
+                brokers.entry(id)
+                .and_modify(|entry| {
+                    // TODO: 修改值
+                    *entry = state.clone();
+                })
+                .or_insert(state.clone());
 
                   // 返回响应
                 yield brokercoosvc::BrokerStateResp {
@@ -733,13 +733,20 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                             .await;
 
                         self.client_event_bus
-                            .broadcast(PartitionEvent::NewTopic { partitions: part })
+                            .broadcast(PartitionEvent::NewTopic {
+                                partitions: part.clone(),
+                            })
                             .await;
+
+                        let detail = commonsvc::TopicPartitionResp {
+                            term: self.get_term().await,
+                            list: part.into(),
+                        };
 
                         Ok(Response::new(clientcoosvc::NewTopicResp {
                             success: true,
                             error: "".to_string(),
-                            detail: todo!(),
+                            detail: Some(detail),
                         }))
                     } else {
                         Err(tonic::Status::internal("unique_id not eq part.unique_id"))
@@ -1133,9 +1140,11 @@ fn filter_single_partition(
 impl From<SinglePartition> for commonsvc::TopicPartitionResp {
     fn from(sp: SinglePartition) -> Self {
         let mut tp = commonsvc::TopicPartitionResp::default();
-        sp.partitions.iter().map(|v| {
-            tp.list.push(v.convert_to_topic_partition_meta(&sp.topic));
-        });
+        tp.list = sp
+            .partitions
+            .iter()
+            .map(|v| v.convert_to_topic_partition_meta(&sp.topic))
+            .collect();
 
         tp
     }

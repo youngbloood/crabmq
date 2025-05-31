@@ -3,17 +3,18 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use grpcx::{
     clientbrokersvc::{
-        PublishReq, PublishResp, client_broker_service_client::ClientBrokerServiceClient,
+        Message, PublishReq, PublishResp, client_broker_service_client::ClientBrokerServiceClient,
     },
     clientcoosvc::{
-        AddPartitionsReq, NewTopicReq, PullReq, client_coo_service_client::ClientCooServiceClient,
+        self, AddPartitionsReq, GroupJoinRequest, NewTopicReq, PullReq,
+        client_coo_service_client::ClientCooServiceClient, group_join_response,
     },
     commonsvc,
     smart_client::{SmartClient, SmartReqStream, repair_addr_with_http},
-    topic_meta,
+    topic_meta::{self, TopicPartitionDetail},
 };
 use indexmap::IndexMap;
-use log::error;
+use log::{error, warn};
 use murmur3::murmur3_32;
 use std::{
     io::Cursor,
@@ -22,7 +23,10 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
-use tokio::{select, sync::mpsc};
+use tokio::{
+    select,
+    sync::{Mutex, mpsc},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
@@ -101,6 +105,11 @@ impl PartitionAssignment {
     }
 }
 
+fn key_hash_partition(key: String, num_partitions: u32) -> Result<u32> {
+    let hash = murmur3_32(&mut Cursor::new(key), 0)?; // 种子为 0，与 Kafka 一致
+    Ok((hash % num_partitions) as u32)
+}
+
 #[derive(Debug, Clone, Default)]
 struct TopicAssignment {
     // Topic -> PartitionAssignment
@@ -170,6 +179,26 @@ impl Client {
         client
     }
 
+    pub fn publisher(&self, topic: String) -> Arc<Publisher> {
+        Arc::new(Publisher {
+            topic,
+            client: Arc::new(self.clone()),
+            broker_clients: Arc::default(),
+            partitions_sender: Arc::default(),
+            stop: CancellationToken::new(),
+            new_topic_lock: Mutex::default(),
+        })
+    }
+
+    pub fn subscriber(&self, group_id: u32, topics: Vec<String>) -> Arc<Subscriber> {
+        Arc::new(Subscriber {
+            group_id,
+            topics,
+            client: self.clone(),
+            member_id: String::new(),
+        })
+    }
+
     fn apply_topic_list(&self, tpr: commonsvc::TopicPartitionResp) {
         self.topics.apply_topics(tpr);
     }
@@ -178,27 +207,24 @@ impl Client {
         &self,
         topic: &str,
         key: &str,
-        auto_map: bool,
-    ) -> Result<Option<topic_meta::TopicPartitionDetail>> {
+        auto_map_key: bool, /* 自动映射 key 至 partition */
+    ) -> Option<topic_meta::TopicPartitionDetail> {
         if !self.topics.has_topic(topic) {
-            return Err(anyhow!("not found the topic"));
+            return None;
         }
         let topic_assignment = self.topics.assignments.get(topic).unwrap();
+
         if key.is_empty() {
-            return Ok(topic_assignment.next().cloned());
+            return topic_assignment.next().cloned();
         }
 
         if !topic_assignment.has_key(key) {
-            if !auto_map {
-                return Err(anyhow!("not found the topic-partition"));
+            if !auto_map_key {
+                return None;
             }
-            return Ok(topic_assignment.hash_key(key).cloned());
+            return topic_assignment.hash_key(key).cloned();
         }
-        if key.is_empty() {
-            Ok(topic_assignment.next().cloned())
-        } else {
-            Ok(topic_assignment.by_key(key).cloned())
-        }
+        topic_assignment.by_key(key).cloned()
     }
 
     fn has_topic(&self, topic: &str) -> bool {
@@ -207,14 +233,6 @@ impl Client {
 
     fn has_topic_key(&self, topic: &str, key: &str) -> bool {
         self.has_topic(topic) && self.topics.has_topic_key(topic, key)
-    }
-
-    pub fn publisher(&self, topic: String) -> Publisher {
-        Publisher {
-            topic,
-            client: self,
-            broker_clients: Arc::default(),
-        }
     }
 
     async fn run(&self) {
@@ -248,14 +266,19 @@ impl Client {
     }
 }
 
-pub struct Publisher<'a> {
+pub struct Publisher {
     topic: String,
-    client: &'a Client,
+    client: Arc<Client>,
     broker_clients: Arc<DashMap<String, Channel>>,
+    partitions_sender: Arc<DashMap<u32, mpsc::Sender<PublishReq>>>,
+    stop: CancellationToken,
+
+    new_topic_lock: Mutex<()>,
 }
 
-impl Publisher<'_> {
+impl Publisher {
     async fn new_topic(&self, topic: &str, partition_num: u32) -> Result<()> {
+        self.new_topic_lock.lock().await;
         let resp = self
             .client
             .smart_coo_client
@@ -271,7 +294,10 @@ impl Publisher<'_> {
         if !resp.success {
             return Err(anyhow!(resp.error));
         }
-        self.client.apply_topic_list(resp.detail.unwrap());
+        if let Some(detail) = resp.detail {
+            self.client.apply_topic_list(detail);
+        }
+
         Ok(())
     }
 
@@ -323,79 +349,163 @@ impl Publisher<'_> {
     //     self.client.apply_topic_list(resp.detail.unwrap());
     //     Ok(())
     // }
-
-    pub async fn publish<HR, HRFut>(
-        &self,
-        mut rx: mpsc::Receiver<(String, Bytes)>, /* payload 接收器，tx 端关闭即可停止向 broker 发送消息 */
-        handle_resp: HR,                         /* 处理返回流中的 resp */
-        auto_create: bool,                       /* 如果没有 topic 或 key 时自动创建 */
-    ) -> Result<()>
-    where
-        HR: Fn(PublishResp) -> HRFut,
-        HRFut: std::future::Future<Output = Result<()>>,
+    pub fn publish<HR, HRFut>(
+        self: &Arc<Self>,
+        mut rx: mpsc::Receiver<(String, Bytes)>, /* 当 rx 对端的 tx close/drop 时，publisher 的后台 task 结束 */
+        handle_resp: HR,
+        auto_create: bool,
+    ) where
+        HR: Fn(Result<PublishResp>) -> HRFut + Send + 'static + Clone,
+        HRFut: std::future::Future<Output = ()> + Send,
     {
-        let (tx_middleware, rx_middleware) = mpsc::channel(1);
-        let _topic = self.topic.clone();
-        let client = self.client.clone();
+        let topic = self.topic.clone();
         let publisher = self.clone();
 
         tokio::spawn(async move {
-            loop {
-                if rx.is_closed() {
-                    break;
-                }
-                let bts = rx.recv().await;
-                if bts.is_none() {
-                    continue;
-                }
-                let (key, payload) = bts.unwrap();
-                loop {
-                    let partition =
-                        publisher
-                            .client
-                            .get_partition(&publisher.topic, &key, auto_create)?;
-                    if partition.is_none() {
-                        if !auto_create {
-                            error!("not found the partition");
-                            break;
-                            // return Err(anyhow!("not found the partition"));
-                        }
-                        if !publisher.client.has_topic(&publisher.topic) {
-                            publisher.new_topic(&publisher.topic, 0).await?;
-                        }
+            while let Some((key, payload)) = rx.recv().await {
+                // 获取分区信息
+                let partition = match publisher.get_partition_with_retry(&key, auto_create).await {
+                    Ok(partition) => partition,
+                    Err(e) => {
+                        // 错误处理
+                        let _ = handle_resp(Err(e)).await;
+                        continue;
                     }
-                    let partition = partition.unwrap();
-                    let endpoint = publisher
-                        .get_or_create_channel(&partition.broker_leader_addr)
-                        .await?;
+                };
 
-                    let partition_id = client
-                        .get_partition(&_topic, &key, auto_create)
-                        .unwrap()
-                        .unwrap()
-                        .partition_id;
-                    let _ = tx_middleware
-                        .send(PublishReq {
-                            topic: _topic.clone(),
-                            partition: partition_id,
-                            payload: payload.to_vec(),
-                            message_id: None,
-                        })
-                        .await;
+                // 获取分区发送器
+                let sender = match publisher
+                    .get_or_create_partition_sender(&partition, handle_resp.clone())
+                    .await
+                {
+                    Ok(sender) => sender,
+                    Err(e) => {
+                        error!("get_or_create_partition_sender err: {:?}", e);
+                        let _ = handle_resp(Err(e)).await;
+                        continue;
+                    }
+                };
+
+                if let Err(e) = sender
+                    .send(PublishReq {
+                        topic: topic.clone(),
+                        partition: partition.partition_id,
+                        payload: payload.to_vec(),
+                        message_id: None,
+                    })
+                    .await
+                {
+                    error!(
+                        "Failed to send message to partition {}: {:?}",
+                        partition.partition_id, e
+                    );
+                    let _ = handle_resp(Err(e.into())).await;
                 }
             }
+            publisher.stop.cancel();
         });
+    }
 
-        let req_strm = SmartReqStream::new(ReceiverStream::new(rx_middleware));
-        let resp = ClientBrokerServiceClient::new(endpoint)
-            .publish(req_strm)
+    // 带重试的分区获取
+    async fn get_partition_with_retry(
+        self: &Arc<Self>,
+        key: &str,
+        auto_create: bool,
+    ) -> Result<TopicPartitionDetail> {
+        // 第一次尝试获取分区
+        if let Some(partition) = self.client.get_partition(&self.topic, key, auto_create) {
+            return Ok(partition);
+        }
+
+        // 如果启用了自动创建但分区不存在
+        if auto_create {
+            // 检查topic是否存在
+            if !self.client.has_topic(&self.topic) {
+                // 尝试创建topic
+                self.new_topic(&self.topic, 0).await?;
+            }
+
+            // 再次尝试获取分区
+            return self
+                .client
+                .get_partition(&self.topic, key, auto_create)
+                .ok_or_else(|| anyhow!("Partition not found after auto-create attempt"));
+        }
+
+        Err(anyhow!("Partition not found and auto-create is disabled"))
+    }
+
+    // 获取或创建分区发送器
+    async fn get_or_create_partition_sender<HR, HRFut>(
+        self: &Arc<Self>,
+        partition: &TopicPartitionDetail,
+        handle_resp: HR,
+    ) -> Result<mpsc::Sender<PublishReq>>
+    where
+        HR: Fn(Result<PublishResp>) -> HRFut + Send + 'static + Clone,
+        HRFut: std::future::Future<Output = ()> + Send,
+    {
+        let partition_id: u32 = partition.partition_id;
+
+        // 检查是否已有发送器
+        if let Some(sender) = self.partitions_sender.get(&partition_id) {
+            return Ok(sender.value().clone());
+        }
+
+        // 创建新连接
+        let chan = self
+            .get_or_create_channel(&partition.broker_leader_addr)
             .await?;
 
-        let mut resp_strm = resp.into_inner();
-        while let Ok(Some(resp)) = resp_strm.message().await {
-            handle_resp(resp).await?;
-        }
-        Ok(())
+        // 创建通道和流
+        let (tx_middleware, rx_middleware) = mpsc::channel(100); // 更大的缓冲区
+        let req_stream = SmartReqStream::new(ReceiverStream::new(rx_middleware));
+        // 创建gRPC客户端，发送请求并获取响应流
+        let mut resp_stream = ClientBrokerServiceClient::new(chan)
+            .publish(req_stream)
+            .await?
+            .into_inner();
+        // 存储发送器
+        self.partitions_sender
+            .insert(partition_id, tx_middleware.clone());
+
+        // 启动响应处理任务
+        let partition_id_clone = partition_id;
+        let broker_leader_addr = partition.broker_leader_addr.clone();
+        let stop = self.stop.clone();
+        let publisher = self.clone();
+        tokio::spawn(async move {
+            let cc = resp_stream.message().await;
+            loop {
+                select! {
+                    resp = resp_stream.message() => {
+                        match resp {
+                            Ok(resp) => {
+                                // 处理响应
+                                let result = match resp {
+                                    Some(res) => handle_resp(Ok(res)).await,
+                                    None => break,
+                                };
+                            },
+                            Err(e) => {
+                                error!("receive broker[{broker_leader_addr}] err: {e:?}");
+                                break;
+                            },
+                        }
+                    }
+
+                    _ = stop.cancelled() => {
+                        warn!("tx peer has been dropped or closed");
+                        break;
+                    }
+                }
+            }
+
+            // 当响应流结束时，移除发送器
+            publisher.partitions_sender.remove(&partition_id_clone);
+        });
+
+        Ok(tx_middleware)
     }
 
     async fn get_or_create_channel(&self, addr: &str) -> Result<Channel> {
@@ -409,7 +519,60 @@ impl Publisher<'_> {
     }
 }
 
-fn key_hash_partition(key: String, num_partitions: u32) -> Result<u32> {
-    let hash = murmur3_32(&mut Cursor::new(key), 0)?; // 种子为 0，与 Kafka 一致
-    Ok((hash % num_partitions) as u32)
+pub struct Subscriber {
+    group_id: u32,
+    member_id: String,
+    topics: Vec<String>,
+
+    client: Client,
+}
+
+impl Subscriber {
+    pub async fn join(&mut self, capacity: u32) -> Result<()> {
+        let resp = self
+            .client
+            .smart_coo_client
+            .execute_unary(
+                GroupJoinRequest {
+                    group_id: self.group_id,
+                    topics: self.topics.clone(),
+                    capacity,
+                },
+                |chan, req, _addr| async {
+                    ClientCooServiceClient::new(chan).join_group(req).await
+                },
+            )
+            .await?
+            .into_inner();
+
+        match resp.error() {
+            group_join_response::ErrorCode::None => {
+                self.member_id = resp.member_id;
+                Ok(())
+            }
+            group_join_response::ErrorCode::InvalidTopic => Err(anyhow!(format!(
+                "invalid topic, consumer group topics are: {:?}",
+                resp.assigned_topics
+            ))),
+            group_join_response::ErrorCode::SubscriptionConflict => Err(anyhow!(format!(
+                "subscription topics has conflict, consumer group topics are: {:?}",
+                resp.assigned_topics
+            ))),
+            group_join_response::ErrorCode::InvalidGeneration => {
+                Err(anyhow!(resp.error().as_str_name()))
+            }
+        }
+    }
+
+    pub fn subscribe<HM, HMFut>(&self, hm: HM) -> Result<()>
+    where
+        HM: Fn() -> HMFut,
+        HMFut: std::future::Future<Output = ()>,
+    {
+        if self.member_id.is_empty() {
+            return Err(anyhow!("must join fisrtly"));
+        }
+
+        Ok(())
+    }
 }

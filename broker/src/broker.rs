@@ -12,12 +12,17 @@ use grpcx::{
         client_broker_service_server::{ClientBrokerService, ClientBrokerServiceServer},
         subscribe_req,
     },
-    commonsvc,
+    commonsvc::{self, TopicPartitionMeta, TopicPartitionResp},
+    topic_meta::TopicPartitionDetail,
 };
 use log::{debug, error, info};
 use std::{sync::Arc, time::Duration};
 use storagev2::{StorageReader, StorageWriter};
-use tokio::{sync::mpsc, time::interval};
+use sysinfo::System;
+use tokio::{
+    sync::{RwLock, mpsc},
+    time::{self, interval},
+};
 use tonic::{Request, Response, Status, async_trait, transport::Server};
 
 #[derive(Clone)]
@@ -33,6 +38,7 @@ where
     consumers: ConsumerGroupManager<SR>,
     message_bus: MessageBus,
 
+    metrics: Arc<RwLock<BrokerState>>,
     state_bus: Arc<DashMap<String, mpsc::Sender<BrokerState>>>,
 }
 
@@ -51,6 +57,11 @@ where
                 conf.message_bus_consumer_buffer_size,
             ),
             state_bus: Arc::new(DashMap::new()),
+            metrics: Arc::new(RwLock::new(BrokerState {
+                id: conf.id,
+                addr: conf.broker_addr.clone(),
+                ..Default::default()
+            })),
             conf,
         }
     }
@@ -72,10 +83,14 @@ where
         let mut strm = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(self.conf.publish_buffer_size);
 
+        let broker_id = self.conf.id;
         let broker = self.clone();
         tokio::spawn(async move {
             while let Ok(Some(req)) = strm.message().await {
                 let result = broker.process_publish(req).await;
+                if let Err(ref e) = result {
+                    error!("broker[{broker_id}] process publish message err: {e:?}");
+                }
                 let _ = tx.send(result.map_err(Into::into)).await;
             }
         });
@@ -138,12 +153,17 @@ where
         }
     }
 
-    pub fn get_state(&self) -> BrokerState {
-        BrokerState::default()
+    pub async fn get_state(&self) -> BrokerState {
+        self.metrics.read().await.clone()
     }
 
-    pub fn apply_topic_infos(&self, tpr: commonsvc::TopicPartitionResp) {
-        self.partitions.apply_topic_infos(tpr)
+    pub fn apply_topic_infos(&self, tpr: TopicPartitionResp) {
+        let list = tpr
+            .list
+            .iter()
+            .map(|v| TopicPartitionDetail::from(v))
+            .collect();
+        self.partitions.apply_topic_infos(list)
     }
 
     pub async fn apply_consumergroup(&self, s: SyncConsumerAssignmentsResp) {
@@ -159,7 +179,7 @@ where
             let timeout = Duration::from_millis(10);
             loop {
                 ticker.tick().await;
-                let state = broker.get_state();
+                let state = broker.get_state().await;
                 for sender in broker.state_bus.iter() {
                     if let Err(e) = sender.send_timeout(state.clone(), timeout).await {
                         error!("Send BrokerState to {} err: {:?}", sender.key(), e);
@@ -192,7 +212,51 @@ where
             }
         });
 
-        tokio::try_join!(broker_state_handle, server_handle);
+        let metrics = self.metrics.clone();
+        let metrics_handle = tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(5));
+            let mut sys = System::new_all();
+            loop {
+                interval.tick().await;
+
+                let mut metrics = metrics.write().await;
+                metrics.version = chrono::Local::now().timestamp() as _;
+                // 更新系统指标
+                sys.refresh_all();
+
+                // 获取CPU使用率（平均所有核心）
+                metrics.cpurate = sys.global_cpu_usage() as u32;
+
+                // 获取内存使用率
+                let mem_usage = (sys.used_memory() as f64 / sys.total_memory() as f64) * 100.0;
+                metrics.memrate = mem_usage as u32;
+
+                // 获取磁盘使用率（假设第一个磁盘是数据盘）
+                // let disk_usage = sys
+                //     .disks()
+                //     .iter()
+                //     .find(|d| {
+                //         d.type_() == sysinfo::DiskType::SSD || d.type_() == sysinfo::DiskType::HDD
+                //     })
+                //     .map(|disk| {
+                //         let used = disk.total_space() - disk.available_space();
+                //         (used as f64 / disk.total_space() as f64) * 100.0
+                //     })
+                //     .unwrap_or(0.0);
+                // metrics.diskrate.store(disk_usage as u32, Ordering::Relaxed);
+
+                // 获取网络速率（所有接口的总和）
+                // let net_rate = sys
+                //     .networks()
+                //     .values()
+                //     .map(|net| net.received() + net.transmitted())
+                //     .sum::<u64>()
+                //     / 1024; // 转换为KB/s
+                // metrics.netrate.store(net_rate as u32, Ordering::Relaxed);
+            }
+        });
+
+        tokio::try_join!(broker_state_handle, server_handle, metrics_handle);
         Ok(())
     }
 

@@ -15,6 +15,6 @@ members = [
     "logic_node",
     "storagev2",
     "grpcx",
-    "client",
+    "client", "cmd/client_bench",
 ]
 # resolver = "2"

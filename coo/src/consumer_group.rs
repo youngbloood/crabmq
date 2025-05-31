@@ -15,7 +15,6 @@ use tokio::sync::mpsc;
 struct ConsumerMember {
     // member_id: 由 coo 端生成
     member_id: String,
-    client_id: String,
     topics: Arc<DashSet<String>>,
     // 消费容量
     capacity: u32,
@@ -223,10 +222,9 @@ impl ConsumerGroupManager {
         }
 
         // 生成成员ID
-        let member_id = format!("{}-{}", req.client_id, nanoid::nanoid!());
+        let member_id = format!("{}-{}", req.group_id, nanoid::nanoid!());
         let member = ConsumerMember {
             member_id: member_id.clone(),
-            client_id: req.client_id.clone(),
             topics: group.topics.clone(),
             capacity: req.capacity,
             last_seen: chrono::Local::now().timestamp_millis() as _,

@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
+// 与 commonsvc::TopicPartitionMeta 相对应
 #[derive(Debug, Clone)]
 pub struct TopicPartitionDetail {
     pub topic: String,
@@ -146,31 +147,39 @@ impl From<TopicPartitionMeta> for TopicPartitionDetailSnapshot {
 
 impl From<&TopicPartitionMeta> for TopicPartitionDetailSnapshot {
     fn from(v: &TopicPartitionMeta) -> Self {
+        let mut broker_follower_ids = vec![];
+        v.multi_labels.get("broker_follower_ids").map(|vs| {
+            vs.values
+                .iter()
+                .map(|v| broker_follower_ids.push(v.parse::<u32>().unwrap()))
+        });
+
+        let mut broker_follower_addrs = vec![];
+        v.multi_labels.get("broker_follower_addrs").map(|vs| {
+            vs.values
+                .iter()
+                .map(|v| broker_follower_addrs.push(v.to_string()))
+        });
+
+        let mut pub_keys = vec![];
+        v.multi_labels
+            .get("pub_keys")
+            .map(|vs| vs.values.iter().map(|v| pub_keys.push(v.to_string())));
+
+        let mut sub_member_ids = vec![];
+        v.multi_labels
+            .get("sub_member_ids")
+            .map(|vs| vs.values.iter().map(|v| sub_member_ids.push(v.to_string())));
+
         TopicPartitionDetailSnapshot {
             topic: v.topic.clone(),
             id: v.partition_id,
             broker_leader_id: v.single_labels["broker_leader_id"].parse::<u32>().unwrap(),
             broker_leader_addr: v.single_labels["broker_leader_addr"].clone(),
-            broker_follower_ids: v.multi_labels["broker_follower_ids"]
-                .values
-                .iter()
-                .map(|v| v.parse::<u32>().unwrap())
-                .collect(),
-            broker_follower_addrs: v.multi_labels["broker_follower_addrs"]
-                .values
-                .iter()
-                .map(|v| v.to_string())
-                .collect(),
-            pub_keys: v.multi_labels["pub_keys"]
-                .values
-                .iter()
-                .map(|v| v.to_string())
-                .collect(),
-            sub_member_ids: v.multi_labels["sub_member_ids"]
-                .values
-                .iter()
-                .map(|v| v.to_string())
-                .collect(),
+            broker_follower_ids,
+            broker_follower_addrs,
+            pub_keys,
+            sub_member_ids,
         }
     }
 }

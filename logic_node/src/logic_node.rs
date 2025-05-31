@@ -3,7 +3,9 @@ use broker::Broker;
 use coo::coo::Coordinator;
 use grpcx::{
     brokercoosvc::{self, broker_coo_service_client::BrokerCooServiceClient},
+    commonsvc::TopicPartitionMeta,
     smart_client::{SmartClient, extract_leader_address},
+    topic_meta::TopicPartitionDetail,
 };
 use log::{error, info, warn};
 use std::{
@@ -244,7 +246,7 @@ where
                         continue;
                     }
                     info!("Broker[{}]->Local-Coo[{}]: Report BrokerState",broker_id, coo_id);
-                    coo.broker_report(state.unwrap());
+                    coo.apply_broker_report(state.unwrap());
                 }
 
                 topic_list = pull_recv.recv() => {

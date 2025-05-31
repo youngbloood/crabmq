@@ -66,9 +66,8 @@ message PullReq {
 
 message GroupJoinRequest {
     uint32 group_id = 1;
-    string client_id = 2;
-    repeated string topics = 3;
-    uint32 capacity = 4;  // 新增：客户端处理能力
+    repeated string topics = 2;
+    uint32 capacity = 3;  // 新增：客户端处理能力
 }
 
 message GroupJoinResponse {

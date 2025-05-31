@@ -7,12 +7,21 @@ edition = "2024"
 anyhow = "1.0.98"
 async-stream = "0.3.6"
 bytes = "1.10.1"
+chrono = "0.4.41"
 dashmap = "6.1.0"
 futures = "0.3.31"
 grpcx = { version = "0.1.0", path = "../grpcx" }
 log = "0.4.27"
 prost = "0.13.5"
 storagev2 = { version = "0.1.0", path = "../storagev2" }
+sysinfo = { version = "0.35.1", features = [
+    "component",
+    "disk",
+    "network",
+    "system",
+    "user",
+    "objc2-io-kit",
+] }
 thiserror = "2.0.12"
 tokio = "1.45.0"
 tokio-stream = "0.1.17"

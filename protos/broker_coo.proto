@@ -44,7 +44,7 @@ message BrokerState {
     uint32 rbps = 7;// 每秒读取的消息字节数
    
     uint32 netrate = 8;// 该节点的网络速率
-    uint32 cpurat = 9;// 该节点的cpu占用率
+    uint32 cpurate = 9;// 该节点的cpu占用率
     uint32 memrate = 10;// 该节点的mem占用率
     uint32 diskrate = 11;// 该节点的磁盘占用率
 
