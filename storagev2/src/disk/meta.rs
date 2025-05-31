@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::{ops::Deref, path::PathBuf, sync::Arc};
 use tokio::{fs, sync::RwLock};
 
-pub const META_NAME: &str = "meta.bin";
+pub const WRITER_PTR_FILENAME: &str = ".writer.ptr";
+pub const TOPIC_META: &str = "meta.bin";
 
 // 可序列化的中间表示结构
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,11 +56,11 @@ impl TopicMeta {
 
 // Partition 元数据
 #[derive(Debug, Clone)]
-pub struct PartitionWriterMeta {
+pub struct PartitionWriterPtr {
     inner: Arc<RwLock<WriterPositionPtr>>,
 }
 
-impl Deref for PartitionWriterMeta {
+impl Deref for PartitionWriterPtr {
     type Target = Arc<RwLock<WriterPositionPtr>>;
 
     fn deref(&self) -> &Self::Target {
@@ -67,9 +68,9 @@ impl Deref for PartitionWriterMeta {
     }
 }
 
-impl PartitionWriterMeta {
+impl PartitionWriterPtr {
     pub fn new(init_filename: PathBuf) -> Self {
-        PartitionWriterMeta {
+        PartitionWriterPtr {
             inner: Arc::new(RwLock::new(WriterPositionPtr::new(init_filename))),
         }
     }
@@ -93,11 +94,15 @@ impl PartitionWriterMeta {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct WriterPositionPtr {
-    pub filename: PathBuf,
+    pub filename: PathBuf,  // 当前写的文件
     pub offset: u64,        // 当前文件的写位置
     pub current_count: u64, // 当前文件消息数量
     #[serde(skip)]
     pub flush_offset: u64, // 刷盘写的偏移量
+
+                            //  预创建的下一个文件的信息
+                            // pub next_filename: PathBuf, // 下一个文件名
+                            // pub next_offset: u64,       // 写一个文件的写偏移量
 }
 
 impl WriterPositionPtr {
@@ -136,6 +141,14 @@ impl ReaderPositionPtr {
             group_id,
             filename,
             offset: Default::default(),
+        }
+    }
+
+    pub fn with_dir_and_group_id(dir: PathBuf, group_id: u32) -> Self {
+        ReaderPositionPtr {
+            group_id,
+            filename: dir.join(gen_record_filename(0)),
+            offset: 0,
         }
     }
 

@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
             broker::default_config()
                 .with_id(args.id)
                 .with_broker_addr(args.broker_args.broker.unwrap()),
-            DiskStorageWriter::new(conf.clone()),
+            DiskStorageWriter::new(conf.clone())?,
             DiskStorageReader::new(conf.storage_dir),
         );
         builder = builder.broker(broker);

@@ -1,4 +1,4 @@
-use crate::disk::meta::{PartitionWriterMeta, TopicMeta};
+use crate::disk::meta::{PartitionWriterPtr, TopicMeta};
 
 use super::buffer::PartitionWriterBuffer;
 use dashmap::DashMap;
@@ -10,7 +10,7 @@ use tokio::{select, sync::mpsc, time};
 pub struct Flusher {
     writers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
     topic_metas: Arc<DashMap<PathBuf, TopicMeta>>,
-    partition_metas: Arc<DashMap<PathBuf, PartitionWriterMeta>>,
+    partition_metas: Arc<DashMap<PathBuf, PartitionWriterPtr>>,
     interval: Duration,
 }
 
@@ -47,7 +47,7 @@ impl Flusher {
         self.topic_metas.insert(topic, meta);
     }
 
-    pub fn add_partition_meta(&self, partition: PathBuf, meta: PartitionWriterMeta) {
+    pub fn add_partition_meta(&self, partition: PathBuf, meta: PartitionWriterPtr) {
         self.partition_metas.insert(partition, meta);
     }
 

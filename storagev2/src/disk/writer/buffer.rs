@@ -83,6 +83,9 @@ impl PartitionWriterBuffer {
         writer_ptr_wl.offset = 0;
         writer_ptr_wl.current_count = 0;
         writer_ptr_wl.flush_offset = 0;
+
+        // writer_ptr_wl.next_filename = PathBuf::new();
+        // writer_ptr_wl.next_offset = 0;
         self.has_create_next_record_file
             .store(false, Ordering::Relaxed);
     }
@@ -116,7 +119,9 @@ impl PartitionWriterBuffer {
 
             let buffer_rl = self.buffer.read().await;
             // 缓冲区超过4MB立即刷盘
-            if buffer_rl.len() as u64 > self.config.flusher_factor {
+            if self.config.flusher_factor != 0
+                && buffer_rl.len() as u64 > self.config.flusher_factor
+            {
                 self.flush().await?;
             }
         };
@@ -126,17 +131,24 @@ impl PartitionWriterBuffer {
         writer_ptr_rl.offset += data.len() as u64 + 8;
 
         // 当前文件的使用率已经达到设置阈值，预创建下一个
-        if (writer_ptr_rl.offset as f64 / self.config.max_size_per_file as f64) * 100.0
-            >= self.config.create_next_record_file_threshold
+        if ((writer_ptr_rl.offset as f64 / self.config.max_size_per_file as f64) * 100.0) as u64
+            >= self.config.create_next_record_file_threshold as u64
             && self
                 .has_create_next_record_file
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
             let next_filename = self.get_next_filename().await;
+            let writer_ptr = self.write_ptr.clone();
             if self.fd_cache.get(&next_filename).is_none() {
                 let _fd_cache = self.fd_cache.clone();
-                tokio::spawn(async move { _fd_cache.get_or_create(&next_filename) });
+                tokio::spawn(async move {
+                    if _fd_cache.get_or_create(&next_filename).is_ok() {
+                        // let mut wl = writer_ptr.write().await;
+                        // wl.next_filename = next_filename;
+                        // wl.offset = 0;
+                    }
+                });
             }
         }
         Ok(())

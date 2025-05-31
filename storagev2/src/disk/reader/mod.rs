@@ -1,10 +1,12 @@
 use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
+use crate::disk::meta::gen_record_filename;
 use crate::{StorageReader, StorageReaderSession, disk::StorageError};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use common::check_exist;
 use dashmap::DashMap;
+use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use tokio::sync::RwLock;
@@ -31,7 +33,7 @@ impl StorageReader for DiskStorageReader {
     /// New a session with group_id, it will be return Err() when session has been created.
     async fn new_session(&self, group_id: u32) -> Result<Box<dyn StorageReaderSession>> {
         Ok(Box::new(DiskStorageReaderSession::new(
-            PathBuf::new(),
+            self.dir.clone(),
             group_id,
         )))
     }
@@ -90,9 +92,9 @@ impl StorageReaderSession for DiskStorageReaderSession {
                 .insert((topic.to_string(), partition_id), partition);
         }
 
-        let reader = self
+        let mut reader = self
             .readers
-            .get(&(topic.to_string(), partition_id))
+            .get_mut(&(topic.to_string(), partition_id))
             .unwrap();
 
         Ok(reader.next().await?)
@@ -123,26 +125,32 @@ impl DiskStorageReaderSessionPartition {
             dir: dir.clone(),
             group_id,
             fd_cache: FdReaderCacheAync::new(2),
-            reader_ptr: Arc::default(),
+            reader_ptr: Arc::new(RwLock::new(ReaderPositionPtr::with_dir_and_group_id(
+                dir.clone(),
+                group_id,
+            ))),
             reader_ptr_filename: dir.join(format!("{}{}", READER_PTR_FILENAME, group_id)),
-            commit_ptr: Arc::default(),
+            commit_ptr: Arc::new(RwLock::new(ReaderPositionPtr::with_dir_and_group_id(
+                dir.clone(),
+                group_id,
+            ))),
             commit_ptr_filename: dir.join(format!("{}{}", COMMIT_PTR_FILENAME, group_id)),
         }
     }
 
     async fn load_ptr(&mut self) -> Result<()> {
-        if !check_exist(&self.reader_ptr_filename) {
-            return Ok(());
+        if check_exist(&self.reader_ptr_filename) {
+            self.reader_ptr = Arc::new(RwLock::new(
+                ReaderPositionPtr::load(&self.reader_ptr_filename).await?,
+            ));
         }
-        self.reader_ptr = Arc::new(RwLock::new(
-            ReaderPositionPtr::load(&self.reader_ptr_filename).await?,
-        ));
-        if !check_exist(&self.commit_ptr_filename) {
-            return Ok(());
+
+        if check_exist(&self.commit_ptr_filename) {
+            self.commit_ptr = Arc::new(RwLock::new(
+                ReaderPositionPtr::load(&self.commit_ptr_filename).await?,
+            ));
         }
-        self.commit_ptr = Arc::new(RwLock::new(
-            ReaderPositionPtr::load(&self.commit_ptr_filename).await?,
-        ));
+
         Ok(())
     }
 
@@ -164,7 +172,7 @@ impl DiskStorageReaderSessionPartition {
         Ok(())
     }
 
-    async fn next(&self) -> Result<Bytes> {
+    async fn read(&self) -> Result<Bytes> {
         let (filename, read_offset) = {
             let reader_ptr_rl = self.reader_ptr.read().await;
             (reader_ptr_rl.filename.clone(), reader_ptr_rl.offset)
@@ -191,8 +199,63 @@ impl DiskStorageReaderSessionPartition {
         self.reader_ptr.write().await.offset += 8 + len;
         let reader = self.clone();
         tokio::spawn(async move {
-            reader.save_reader_ptr().await;
+            let _ = reader.save_reader_ptr().await;
         });
         Ok(Bytes::from(buf))
+    }
+
+    async fn next(&mut self) -> Result<Bytes> {
+        match self.read().await {
+            Ok(data) => {
+                if !data.is_empty() {
+                    return Ok(data);
+                }
+                // data为空，滚动文件查找
+                let filename = {
+                    let reader_ptr_rl = self.reader_ptr.read().await;
+                    reader_ptr_rl.filename.clone()
+                };
+                // 表示该文件读取完毕，寻找下一个
+                let next_filename = self.dir.join(filename_factor_next_record(&filename));
+                if check_exist(&next_filename) {
+                    let mut read_ptr_wl = self.reader_ptr.write().await;
+                    read_ptr_wl.filename = next_filename;
+                    read_ptr_wl.offset = 0;
+                }
+                return self.read().await;
+            }
+            Err(_) => todo!(),
+        }
+    }
+}
+
+fn filename_factor_next_record(filename: &Path) -> PathBuf {
+    let filename: PathBuf = PathBuf::from(filename.file_name().unwrap());
+    let filename_factor = filename
+        .with_extension("")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    PathBuf::from(gen_record_filename(filename_factor + 1))
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{StorageReader, disk::DiskStorageReader};
+    use std::path::PathBuf;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn reader_session() {
+        let dsr = DiskStorageReader::new(PathBuf::from("./data"));
+        let sess = dsr.new_session(2).await.expect("new session failed");
+        let stop = CancellationToken::new();
+        while let Ok(data) = sess.next("topic111", 11, stop.clone()).await {
+            if data.is_empty() {
+                return;
+            }
+            println!("data = {data:?}");
+        }
     }
 }

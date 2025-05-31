@@ -3,7 +3,9 @@ mod flusher;
 
 use super::Config as DiskConfig;
 use super::fd_cache::FdWriterCacheAync;
-use super::meta::{META_NAME, PartitionWriterMeta, TopicMeta, gen_record_filename};
+use super::meta::{
+    PartitionWriterPtr, TOPIC_META, TopicMeta, WRITER_PTR_FILENAME, gen_record_filename,
+};
 use crate::StorageWriter;
 use anyhow::{Result, anyhow};
 use buffer::PartitionWriterBuffer;
@@ -20,7 +22,7 @@ const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 struct PartitionWriterWrapper {
     dir: PathBuf,
     writer: Arc<PartitionWriterBuffer>,
-    meta: PartitionWriterMeta,
+    writer_ptr: PartitionWriterPtr,
 }
 
 impl PartitionWriterWrapper {
@@ -48,7 +50,8 @@ pub struct DiskStorageWriter {
 }
 
 impl DiskStorageWriter {
-    pub fn new(cfg: DiskConfig) -> Self {
+    pub fn new(cfg: DiskConfig) -> Result<Self> {
+        cfg.validate()?;
         let fd_cache = Arc::new(FdWriterCacheAync::new(cfg.fd_cache_size as usize));
 
         // 启动刷盘守护任务
@@ -57,13 +60,13 @@ impl DiskStorageWriter {
         let (flush_sender, flusher_signal) = mpsc::channel(1);
         tokio::spawn(async move { _flusher.run(flusher_signal).await });
 
-        Self {
+        Ok(Self {
             cfg,
             topics: Arc::new(DashMap::new()),
             fd_cache,
             flusher,
             flush_sender,
-        }
+        })
     }
 
     /// get_topic_storage
@@ -82,7 +85,7 @@ impl DiskStorageWriter {
         let dir = self.cfg.storage_dir.join(topic);
         tokio::fs::create_dir_all(&dir).await?;
 
-        let meta_path = dir.join(META_NAME);
+        let meta_path = dir.join(TOPIC_META);
         let topic_meta = if meta_path.exists() {
             TopicMeta::load(&meta_path).await?
         } else {
@@ -116,11 +119,11 @@ impl DiskStorageWriter {
         let dir = ts.dir.join(format!("{}", partition));
         tokio::fs::create_dir_all(&dir).await?;
 
-        let meta_path = dir.join(META_NAME);
-        let partition_meta = if meta_path.exists() {
-            PartitionWriterMeta::load(&meta_path).await?
+        let writer_ptr_filename = dir.join(WRITER_PTR_FILENAME);
+        let partition_writer_ptr = if writer_ptr_filename.exists() {
+            PartitionWriterPtr::load(&writer_ptr_filename).await?
         } else {
-            PartitionWriterMeta::new(dir.join(gen_record_filename(0)))
+            PartitionWriterPtr::new(dir.join(gen_record_filename(0)))
         };
 
         let writer = Arc::new(
@@ -128,7 +131,7 @@ impl DiskStorageWriter {
                 dir.clone(),
                 &self.cfg,
                 self.fd_cache.clone(),
-                partition_meta.get_inner(),
+                partition_writer_ptr.get_inner(),
             )
             .await?,
         );
@@ -137,9 +140,10 @@ impl DiskStorageWriter {
         let pd = PartitionWriterWrapper {
             dir,
             writer,
-            meta: partition_meta,
+            writer_ptr: partition_writer_ptr,
         };
-        self.flusher.add_partition_meta(meta_path, pd.meta.clone());
+        self.flusher
+            .add_partition_meta(writer_ptr_filename, pd.writer_ptr.clone());
         ts.partitions.insert(partition, pd.clone());
         Ok(pd)
     }
@@ -159,7 +163,6 @@ impl StorageWriter for DiskStorageWriter {
 
 fn filename_factor_next_record(filename: &Path) -> PathBuf {
     let filename = PathBuf::from(filename.file_name().unwrap());
-    println!("filename = {filename:?}");
     let filename_factor = filename
         .with_extension("")
         .to_str()
@@ -177,19 +180,19 @@ mod test {
     use bytes::Bytes;
     use std::{path::PathBuf, time::Duration};
     use tokio::time;
-    use tokio_util::sync::CancellationToken;
 
     fn new_disk_storage() -> DiskStorageWriter {
         DiskStorageWriter::new(DiskConfig {
             storage_dir: PathBuf::from("./data"),
             flusher_period: 50,
-            flusher_factor: 0,
+            flusher_factor: 1024 * 1024 * 1, // 1M
             max_msg_num_per_file: 4000,
             max_size_per_file: 500,
             compress_type: 0,
             fd_cache_size: 20,
-            create_next_record_file_threshold: 80.0,
+            create_next_record_file_threshold: 80,
         })
+        .expect("error config")
     }
 
     #[tokio::test]
@@ -223,7 +226,8 @@ mod test {
             "Yak",
             "Zebra",
         ];
-        for d in datas {
+        // for _ in 0..1000 {
+        for d in &datas {
             if let Err(e) = store
                 .store("topic111", 11, Bytes::copy_from_slice(d.as_bytes()))
                 .await
@@ -231,6 +235,7 @@ mod test {
                 eprintln!("e = {e:?}");
             }
         }
+        // }
         time::sleep(Duration::from_secs(2)).await;
         Ok(())
     }
