@@ -63,9 +63,10 @@ impl MessageBus {
         if let Some(entry) = entry {
             let list: Vec<_> = entry.iter().enumerate().collect();
             for v in list {
-                v.1.value()
-                    .send_timeout(payload.clone(), self.timeout)
-                    .await;
+                let _ =
+                    v.1.value()
+                        .send_timeout(payload.clone(), self.timeout)
+                        .await;
             }
         }
     }

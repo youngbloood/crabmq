@@ -237,7 +237,7 @@ impl SmartClient {
                             }
                             // 心跳超时检测
                             _ = heartbeat_timeout.tick() => {
-                                warn!("[SmartClient]->[{}]: Stream heartbeat timeout, monitor CooListResp continue...", addr);
+                                info!("[SmartClient]->[{}]: Stream heartbeat timeout, monitor CooListResp continue...", addr);
                                 // break;
                             }
                         }
@@ -417,7 +417,7 @@ impl SmartClient {
                     }
                 },
                 Err(e) => {
-                    warn!("[SmartClient]: get_leader_channel failed: {:?}", e);
+                    warn!("[SmartClient]: must_leader_channel failed: {:?}", e);
                     retries += 1;
                     tokio::time::sleep(backoff).await;
                     backoff *= self.retry_policy.backoff_factor;

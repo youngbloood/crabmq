@@ -38,6 +38,21 @@ impl From<TopicPartitionDetailSnapshot> for TopicPartitionDetail {
     }
 }
 
+impl From<&TopicPartitionDetailSnapshot> for TopicPartitionDetail {
+    fn from(v: &TopicPartitionDetailSnapshot) -> Self {
+        TopicPartitionDetail {
+            topic: v.topic.clone(),
+            partition_id: v.id,
+            broker_leader_id: v.broker_leader_id,
+            broker_leader_addr: v.broker_leader_addr.clone(),
+            broker_follower_ids: Arc::new(v.broker_follower_ids.clone()),
+            broker_follower_addrs: Arc::new(v.broker_follower_addrs.clone()),
+            pub_keys: Arc::new(v.pub_keys.clone()),
+            sub_member_ids: v.sub_member_ids.clone(),
+        }
+    }
+}
+
 impl From<TopicPartitionMeta> for TopicPartitionDetail {
     fn from(v: TopicPartitionMeta) -> Self {
         Self::from(TopicPartitionDetailSnapshot::from(v))

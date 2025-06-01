@@ -140,23 +140,29 @@ where
             let broker = self.broker.clone();
             // 表示当前的 Coo 节点是否是 Leader
 
-            if broker.as_ref().is_some() && coo.as_ref().is_some() {
-                let (tx_watcher, rx_watcher) = watch::channel(false);
-                self.start_watcher(tx_watcher);
-                let coo = coo.unwrap().clone();
-                if coo.is_leader().await {
-                    self.broker_interact_with_local_coo(coo_leader.clone(), rx_watcher.clone())
-                        .await
-                } else {
-                    self.broker_interact_with_external_coo(coo_leader.clone(), rx_watcher)
-                        .await;
-                }
-            } else if broker.as_ref().is_some() {
-                // 该 LogicNode 仅有 Broker, 无 Coo 模块
-                let (_, rx_watcher) = watch::channel(false);
-                self.broker_interact_with_external_coo(coo_leader.clone(), rx_watcher)
-                    .await;
-            }
+            let (tx_watcher, rx_watcher) = watch::channel(false);
+            self.broker_interact_with_external_coo(coo_leader.clone(), rx_watcher)
+                .await;
+
+            // TODO: 检查当前 coo 是否是 leader,是则走内存
+            // if broker.as_ref().is_some() && coo.as_ref().is_some() {
+            //     let (tx_watcher, rx_watcher) = watch::channel(false);
+            //     self.start_watcher(tx_watcher);
+            //     let coo = coo.unwrap().clone();
+
+            //     if coo.is_leader().await {
+            //         self.broker_interact_with_local_coo(coo_leader.clone(), rx_watcher.clone())
+            //             .await
+            //     } else {
+            //         self.broker_interact_with_external_coo(coo_leader.clone(), rx_watcher)
+            //             .await;
+            //     }
+            // } else if broker.as_ref().is_some() {
+            //     // 该 LogicNode 仅有 Broker, 无 Coo 模块
+            //     let (_, rx_watcher) = watch::channel(false);
+            //     self.broker_interact_with_external_coo(coo_leader.clone(), rx_watcher)
+            //         .await;
+            // }
         }
         Ok(())
     }

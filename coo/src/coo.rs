@@ -1,6 +1,7 @@
 use super::Config as CooConfig;
 use super::partition;
 use super::raftx;
+use crate::ClientNode;
 use crate::consumer_group::ConsumerGroupManager;
 use crate::event_bus::EventBus;
 use crate::partition::PartitionPolicy;
@@ -8,7 +9,6 @@ use crate::partition::SinglePartition;
 use crate::raftx::Callback;
 use crate::raftx::ProposeData;
 use crate::raftx::TopicPartitionData;
-use crate::{BrokerNode, ClientNode};
 use anyhow::Result;
 use anyhow::anyhow;
 use dashmap::DashMap;
@@ -20,6 +20,7 @@ use grpcx::commonsvc::CooListResp;
 use grpcx::cooraftsvc;
 use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
 use grpcx::smart_client::repair_addr_with_http;
+use grpcx::topic_meta::TopicPartitionDetail;
 use grpcx::{brokercoosvc, clientcoosvc};
 use log::error;
 use log::info;
@@ -29,7 +30,6 @@ use raft::prelude::*;
 use raftx::{MessageType as AllMessageType, RaftNode};
 use std::net::SocketAddr;
 use std::ops::Deref;
-use std::os::macos::raw::stat;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
@@ -705,7 +705,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         self.check_leader().await?;
 
         let req = request.into_inner();
-        let part = self
+        let (part, exist) = self
             .partition_manager
             .build_allocator(
                 self.conf.new_topic_partition_factor.clone(),
@@ -713,6 +713,17 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
             )
             .assign_new_topic(&req.topic, req.partitio_num)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+
+        if exist {
+            return Ok(Response::new(clientcoosvc::NewTopicResp {
+                success: true,
+                error: "".to_string(),
+                detail: Some(commonsvc::TopicPartitionResp {
+                    term: self.get_term().await,
+                    list: part.into(),
+                }),
+            }));
+        }
 
         let (tx_notify, mut rx_notify) = mpsc::channel(1);
         let _ = self.propose(&part, Some(tx_notify)).await;
@@ -725,6 +736,12 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
             Ok(Some(res)) => match res {
                 Ok(unique_id) => {
                     if unique_id == part.unique_id {
+                        self.partition_manager.apply_topic_partition_detail(
+                            part.partitions
+                                .iter()
+                                .map(TopicPartitionDetail::from)
+                                .collect(),
+                        );
                         // 发送通知
                         self.broker_event_bus
                             .broadcast(PartitionEvent::NewTopic {
@@ -1109,12 +1126,12 @@ fn filter_single_partition(
         let match_partition = partition_ids.is_empty() || partition_ids.contains(&entry.id);
 
         // 检查 Broker 是否匹配（主副本或从副本）
-        let match_broker = broker_ids.is_empty()
-            || broker_ids.contains(&entry.broker_leader_id)
-            || entry
-                .broker_follower_ids
-                .iter()
-                .any(|f| broker_ids.contains(f));
+        let match_broker = broker_ids.is_empty() || broker_ids.contains(&entry.broker_leader_id);
+        // TODO： 下面的根据 broker_follower_ids 先隐藏
+        // || entry
+        //     .broker_follower_ids
+        //     .iter()
+        //     .any(|f| broker_ids.contains(f));
 
         // 检查 Key 是否匹配
         let match_key = keys.is_empty() || entry.pub_keys.iter().any(|k| keys.contains(k));

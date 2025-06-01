@@ -80,6 +80,7 @@ where
         &self,
         request: Request<tonic::Streaming<PublishReq>>,
     ) -> Result<Response<Self::PublishStream>, Status> {
+        let remote_addr = request.remote_addr().unwrap();
         let mut strm = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(self.conf.publish_buffer_size);
 
@@ -158,11 +159,7 @@ where
     }
 
     pub fn apply_topic_infos(&self, tpr: TopicPartitionResp) {
-        let list = tpr
-            .list
-            .iter()
-            .map(|v| TopicPartitionDetail::from(v))
-            .collect();
+        let list = tpr.list.iter().map(TopicPartitionDetail::from).collect();
         self.partitions.apply_topic_infos(list)
     }
 

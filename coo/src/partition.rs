@@ -81,6 +81,16 @@ impl PartitionManager {
         pm
     }
 
+    pub fn apply_topic_partition_detail(&self, tpds: Vec<TopicPartitionDetail>) {
+        tpds.iter().for_each(|v| {
+            self.all_topics
+                .entry(v.topic.clone())
+                .and_modify(|entry_list| {
+                    entry_list.push(v.clone());
+                })
+                .or_insert(vec![v.clone()]);
+        });
+    }
     /// 哈希函数（示例：使用简单的 DJB2 哈希）
     fn hash_key(&self, key: &str) -> u32 {
         let mut hash: u32 = 5381;
@@ -304,12 +314,21 @@ impl Allocator<'_> {
         &self,
         topic: &str,
         mut num_partitions: u32,
-    ) -> Result<SinglePartition> {
+    ) -> Result<(SinglePartition, bool)> {
         if self.brokers.is_empty() {
             return Err(anyhow!("not have brokers to assign"));
         }
+
         if self.mngr.all_topics.contains_key(topic) {
-            return Err(anyhow!("the topic has assigned partition"));
+            let cc = self.mngr.all_topics.get(topic).unwrap();
+            return Ok((
+                SinglePartition {
+                    unique_id: chrono::Local::now().timestamp_micros().to_string(),
+                    topic: topic.to_string(),
+                    partitions: cc.value().clone().iter().map(|v| v.snapshot()).collect(),
+                },
+                true,
+            ));
         }
 
         // 1. 解析分区因子
@@ -363,11 +382,14 @@ impl Allocator<'_> {
         }
 
         // 4. 返回新分区的副本信息
-        Ok(SinglePartition {
-            unique_id: chrono::Local::now().timestamp_micros().to_string(),
-            topic: topic.to_string(),
-            partitions,
-        })
+        Ok((
+            SinglePartition {
+                unique_id: chrono::Local::now().timestamp_micros().to_string(),
+                topic: topic.to_string(),
+                partitions,
+            },
+            false,
+        ))
     }
 
     /// 为现有 Topic 增加分区（自动分配主副本）

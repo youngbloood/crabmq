@@ -158,7 +158,8 @@ async fn main() -> Result<()> {
     }
 
     if args.broker_args.broker.is_some() {
-        let conf = default_config().with_storage_dir(PathBuf::from("./data/message"));
+        let conf =
+            default_config().with_storage_dir(PathBuf::from(format!("./data/message{}", args.id)));
         let broker = Broker::new(
             broker::default_config()
                 .with_id(args.id)

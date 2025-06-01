@@ -99,8 +99,9 @@ impl DiskStorageWriter {
             partitions: Arc::new(DashMap::new()),
             meta: topic_meta,
         };
-        self.flusher.add_topic_meta(meta_path, ts.meta.clone());
         self.topics.insert(topic.to_string(), ts.clone());
+        self.flusher.add_topic_meta(meta_path, ts.meta.clone());
+
         Ok(ts)
     }
 
@@ -175,7 +176,7 @@ fn filename_factor_next_record(filename: &Path) -> PathBuf {
 #[cfg(test)]
 mod test {
     use super::{DiskConfig, DiskStorageWriter};
-    use crate::StorageWriter as _;
+    use crate::{StorageWriter as _, disk::default_config};
     use anyhow::Result;
     use bytes::Bytes;
     use std::{path::PathBuf, time::Duration};
@@ -240,53 +241,19 @@ mod test {
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn store_and_next() -> Result<()> {
-    //     let store: DiskStorage = new_disk_storage();
-    //     let _store = store.clone();
-    //     let store_handle = tokio::spawn(async move {
-    //         let datas = vec![
-    //             "Apple",
-    //             "Banana",
-    //             "Cat",
-    //             "Dog",
-    //             "Elephant",
-    //             "Fish",
-    //             "Giraffe",
-    //             "Horse",
-    //             "Igloo",
-    //             "Jaguar",
-    //             "Kangaroo",
-    //             "Lion",
-    //             "Monkey",
-    //             "Nest",
-    //             "Ostrich",
-    //             "Penguin",
-    //             "Queen",
-    //             "Rabbit",
-    //             "Snake",
-    //             "Tiger",
-    //             "Umbrella",
-    //             "Violin",
-    //             "Whale",
-    //             "Xylophone",
-    //             "Yak",
-    //             "Zebra",
-    //         ];
-    //         for d in datas {
-    //             _store
-    //                 .store("topic111", 11, Bytes::copy_from_slice(d.as_bytes()))
-    //                 .await;
-    //         }
-    //     });
+    #[tokio::test]
+    async fn storage_store_bench() -> Result<()> {
+        let store = DiskStorageWriter::new(default_config()).expect("error config");
 
-    //     let _store = store.clone();
-    //     let next_handle = tokio::spawn(async move {
-    //         let data = _store.next("topic111", 11).await.unwrap();
-    //         println!("data = {:?}", data);
-    //     });
-
-    //     tokio::try_join!(store_handle, next_handle);
-    //     Ok(())
-    // }
+        let message_content = Bytes::from(vec![b'x'; 1024]);
+        for _ in 0..10 {
+            for i in 1..101 {
+                if let Err(e) = store.store("mytopic", i, message_content.clone()).await {
+                    eprintln!("e = {e:?}");
+                }
+            }
+        }
+        time::sleep(Duration::from_secs(2)).await;
+        Ok(())
+    }
 }

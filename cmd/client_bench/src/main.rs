@@ -18,6 +18,9 @@ struct Args {
 
     #[structopt(long = "message-size", short = "s", default_value = "1024")]
     message_size: usize,
+
+    #[structopt(long = "topic", short = "t")]
+    topic: String,
 }
 
 #[tokio::main]
@@ -25,47 +28,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::from_args();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     println!("Starting producer test with config: {:?}", args);
-
-    // 创建客户端和发布者
-    let cli = client::Client::new(vec![args.coo_addr.clone()]);
-    let publisher = cli.publisher("mytopic".to_string());
-
-    // 创建通道
-    let (tx, rx) = mpsc::channel(10000);
-    publisher.publish(
-        rx,
-        |res| async {
-            if let Err(e) = res {
-                eprintln!("Publish error: {:?}", e);
-            }
-        },
-        true,
-    );
-
-    // 等待发布者初始化
-    time::sleep(Duration::from_millis(500)).await;
-
     // 创建消息内容（一次性创建，避免重复分配）
     let message_content = Bytes::from(vec![b'x'; args.message_size]);
+
+    // 模拟 num_producers 个客户端
+    let mut txs = vec![];
+    for producer_id in 0..args.num_producers {
+        // 创建客户端和发布者
+        let cli = client::Client::new(vec![args.coo_addr.clone()]);
+        let publisher = cli.publisher(args.topic.clone()).await;
+
+        // 创建通道
+        let (tx, rx) = mpsc::channel(10000);
+        publisher
+            .publish(
+                rx,
+                |res| async {
+                    if let Err(e) = res {
+                        eprintln!("Publish error: {:?}", e);
+                    }
+                },
+                true,
+            )
+            .await?;
+
+        txs.push((producer_id, tx));
+    }
 
     // 创建生产者任务
     let start_time = time::Instant::now();
     let mut handles = Vec::with_capacity(args.num_producers);
-
-    for producer_id in 0..args.num_producers {
-        let tx_clone = tx.clone();
+    for tx in txs {
         let message_content = message_content.clone();
-
         handles.push(tokio::spawn(async move {
             for msg_id in 0..args.num_messages {
                 // 创建带唯一标识的键
                 // let key = format!("prod-{}-msg-{}", producer_id, msg_id);
 
-                if let Err(e) = tx_clone
-                    .send(("".to_string(), message_content.clone()))
-                    .await
-                {
-                    eprintln!("Failed to send message: {:?}", e);
+                if let Err(e) = tx.1.send(("".to_string(), message_content.clone())).await {
+                    eprintln!("Failed to send message: {e:?}");
                     break;
                 }
 
@@ -74,10 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     time::sleep(Duration::from_micros(10)).await;
                 }
             }
-            println!("Producer {} finished", producer_id);
+            println!("Producer[{}] finished", tx.0);
         }));
     }
-
     // 等待所有生产者完成
     join_all(handles).await;
 
@@ -96,7 +96,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 关闭发布者
-    drop(tx);
     time::sleep(Duration::from_secs(10)).await;
     Ok(())
 }
