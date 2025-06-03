@@ -2777,6 +2777,7 @@ dependencies = [
  "crossbeam",
  "crossbeam-channel",
  "dashmap",
+ "futures",
  "libc",
  "log",
  "lru 0.14.0",

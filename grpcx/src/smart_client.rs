@@ -42,6 +42,7 @@ impl Default for RetryPolicy {
 
 #[derive(Clone)]
 struct CooEndpoints {
+    id: String,
     // term
     term: Arc<AtomicU64>,
     // 循环次数，保证endpoints下的每个endpoint都有相同几率被轮训到
@@ -49,22 +50,24 @@ struct CooEndpoints {
     endpoints: Arc<DashMap<u32, CooEndpoint>>,
 }
 
-impl Default for CooEndpoints {
-    fn default() -> Self {
+impl CooEndpoints {
+    fn new(id: String) -> Self {
         Self {
+            id,
             term: Default::default(),
             cycle_times: Arc::new(AtomicU64::new(1)),
             endpoints: Default::default(),
         }
     }
-}
 
-impl CooEndpoints {
     fn apply(&self, resp: commonsvc::CooListResp) {
         if resp.cluster_term <= self.term.load(Ordering::Relaxed) {
             return;
         }
-        info!("[SmartClient]: refresh the coo endpoints to local...");
+        info!(
+            "[SmartClient:{}]: refresh the coo endpoints to local...",
+            self.id
+        );
         self.term.store(resp.cluster_term, Ordering::Release);
         for v in resp.list {
             self.endpoints
@@ -77,7 +80,10 @@ impl CooEndpoints {
                     self.cycle_times.load(Ordering::Relaxed),
                 ));
         }
-        debug!("[SmartClient]: apply the CooListResp: {:?}", self.endpoints);
+        debug!(
+            "[SmartClient:{}]: apply the CooListResp: {:?}",
+            self.id, self.endpoints
+        );
     }
 
     fn erase_role(&self) {
@@ -100,8 +106,8 @@ impl CooEndpoints {
 
     fn find_leader(&self) -> Option<RefMulti<'_, u32, CooEndpoint>> {
         debug!(
-            "[SmartClient]: find_leader CooEndpoints: {:?}",
-            self.endpoints
+            "[SmartClient:{}]: find_leader CooEndpoints: {:?}",
+            self.id, self.endpoints
         );
         self.endpoints
             .iter()
@@ -158,6 +164,7 @@ impl CooEndpoint {
 
 #[derive(Clone)]
 pub struct SmartClient {
+    id: String,
     initial_endpoints: Vec<String>,
     endpoints: CooEndpoints,
     channels: Arc<DashMap<String, Channel>>,
@@ -165,10 +172,11 @@ pub struct SmartClient {
 }
 
 impl SmartClient {
-    pub fn new(initial_endpoints: Vec<String>) -> Self {
+    pub fn new(id: String, initial_endpoints: Vec<String>) -> Self {
         Self {
+            id: id.clone(),
             initial_endpoints,
-            endpoints: CooEndpoints::default(),
+            endpoints: CooEndpoints::new(id),
             channels: Arc::new(DashMap::new()),
             retry_policy: RetryPolicy::default(),
         }
@@ -215,20 +223,20 @@ impl SmartClient {
                                         backoff = self.retry_policy.backoff_base;
                                         // 处理响应（若返回 false 表示需要重连）
                                         if !self.process_coo_response(resp, addr.clone()).await {
-                                            warn!("[SmartClient]->[{}]: target is not leader, switch to leader...", addr);
+                                            warn!("[SmartClient:{}]->[{}]: target is not leader, switch to leader...",self.id, addr);
                                             // self.erase_role_and_channel(&addr);
                                             break; // 退出内层循环触发重连
                                         }
                                     }
                                     Some(Err(e)) => {
                                         // 流错误：记录并重连
-                                        error!("[SmartClient]->[{}]: strm error: {:?}", addr, e);
+                                        error!("[SmartClient:{}]->[{}]: strm error: {:?}",self.id, addr, e);
                                         self.erase_role();
                                         self.handle_refresh_error(e).await;
                                         break;
                                     }
                                     None => {
-                                        error!("[SmartClient]->[{}]: strm has been closed by server", addr);
+                                        error!("[SmartClient:{}]->[{}]: strm has been closed by server",self.id, addr);
                                         self.erase_role();
                                         // 流正常关闭：主动重连
                                         break;
@@ -237,14 +245,17 @@ impl SmartClient {
                             }
                             // 心跳超时检测
                             _ = heartbeat_timeout.tick() => {
-                                info!("[SmartClient]->[{}]: Stream heartbeat timeout, monitor CooListResp continue...", addr);
+                                // info!("[SmartClient]->[{}]: Stream heartbeat timeout, monitor CooListResp continue...", addr);
                                 // break;
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    error!("[SmartClient]->[{}]: invoke closure r error: {:?}", addr, e);
+                    error!(
+                        "[SmartClient:{}]->[{}]: invoke closure r error: {:?}",
+                        self.id, addr, e
+                    );
                     self.erase_channel(&addr);
                     self.handle_refresh_error(e).await;
                 }
@@ -405,7 +416,10 @@ impl SmartClient {
                         return Ok(result);
                     }
                     Err(e) => {
-                        error!("[SmartClient]: failed connect to Leader, status: {:?}", e);
+                        error!(
+                            "[SmartClient:{}]: failed connect to Leader, status: {:?}",
+                            self.id, e
+                        );
                         if retries >= self.retry_policy.max_retries {
                             return Err(e.clone());
                         }
@@ -417,7 +431,10 @@ impl SmartClient {
                     }
                 },
                 Err(e) => {
-                    warn!("[SmartClient]: must_leader_channel failed: {:?}", e);
+                    warn!(
+                        "[SmartClient:{}]: must_leader_channel failed: {:?}",
+                        self.id, e
+                    );
                     retries += 1;
                     tokio::time::sleep(backoff).await;
                     backoff *= self.retry_policy.backoff_factor;
@@ -476,8 +493,8 @@ impl SmartClient {
                 }
                 Err(e) => {
                     error!(
-                        "[SmartClient]: create coo endpoint[{}] channel failed: {:?}",
-                        &node.coo_addr, e
+                        "[SmartClient:{}]: create coo endpoint[{}] channel failed: {:?}",
+                        self.id, &node.coo_addr, e
                     );
                     // 及时该节点创建失败，也标记一次调用，下次轮到下一个创建
                     node.rorate_cycle_times();

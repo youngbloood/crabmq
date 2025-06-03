@@ -10,6 +10,7 @@ use grpcx::{
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::{num::ParseIntError, sync::Arc};
+use tokio::sync::Mutex;
 
 const TOPIC_META_PREFIX: &str = "topic_meta/";
 const TOPIC_PARTITION_PREFIX: &str = "topic_partition/";
@@ -65,6 +66,7 @@ pub struct PartitionManager {
     // Topic -> TopicAssignment
     // Shared with ConsumerGroupManager.all_topics
     pub all_topics: Arc<DashMap<String, Vec<TopicPartitionDetail>>>,
+    new_topic_locks: Arc<DashMap<String, Mutex<()>>>,
     policy: Arc<PartitionPolicy>,
     // 与 raftx/storage.rs 使用同一个 Db
     db: Db,
@@ -76,6 +78,7 @@ impl PartitionManager {
             all_topics: Arc::new(DashMap::new()),
             policy: Arc::new(policy),
             db: sled::open(dbpath).expect("Failed to open sled DB"),
+            new_topic_locks: Arc::default(),
         };
         pm.load_all_topics().expect("load all topics error");
         pm
@@ -310,7 +313,7 @@ pub struct Allocator<'a> {
 
 impl Allocator<'_> {
     /// 为新 Topic 的 Partition 分配 broker（根据策略选择主副本）
-    pub fn assign_new_topic(
+    pub async fn assign_new_topic(
         &self,
         topic: &str,
         mut num_partitions: u32,
@@ -319,13 +322,12 @@ impl Allocator<'_> {
             return Err(anyhow!("not have brokers to assign"));
         }
 
-        if self.mngr.all_topics.contains_key(topic) {
-            let cc = self.mngr.all_topics.get(topic).unwrap();
+        if let Some(tpd) = self.mngr.all_topics.get(topic) {
             return Ok((
                 SinglePartition {
                     unique_id: chrono::Local::now().timestamp_micros().to_string(),
                     topic: topic.to_string(),
-                    partitions: cc.value().clone().iter().map(|v| v.snapshot()).collect(),
+                    partitions: tpd.value().clone().iter().map(|v| v.snapshot()).collect(),
                 },
                 true,
             ));
@@ -344,6 +346,7 @@ impl Allocator<'_> {
         let selected_brokers = self.select_available_brokers();
         // 3. 分配分区
         let mut partitions = Vec::with_capacity(num_partitions as usize);
+        let mut partition_details = Vec::with_capacity(num_partitions as usize);
         for id in 1..num_partitions + 1 {
             let (leader_id, followers) = self.select_replicas(&selected_brokers, id as usize);
 
@@ -369,17 +372,37 @@ impl Allocator<'_> {
                 pub_keys: Arc::default(),
                 sub_member_ids: vec![],
             };
-
-            self.mngr
-                .all_topics
-                .entry(topic.to_string())
-                .and_modify(|pms| {
-                    pms.push(partition.clone());
-                })
-                .or_insert(vec![partition.clone()]);
-
+            partition_details.push(partition.clone());
             partitions.push(partition.snapshot());
         }
+
+        let lock = self
+            .mngr
+            .new_topic_locks
+            .entry(topic.to_string())
+            .or_insert(Mutex::new(()));
+        let _lock = lock.value().lock().await;
+        // 获取锁之后再次优先检查是否有值
+        if let Some(tpd) = self.mngr.all_topics.get(topic) {
+            return Ok((
+                SinglePartition {
+                    unique_id: chrono::Local::now().timestamp_micros().to_string(),
+                    topic: topic.to_string(),
+                    partitions: tpd.value().clone().iter().map(|v| v.snapshot()).collect(),
+                },
+                true,
+            ));
+        }
+
+        self.mngr
+            .all_topics
+            .entry(topic.to_string())
+            .and_modify(|pms| {
+                pms.extend_from_slice(&partition_details);
+            })
+            .or_insert(partition_details);
+
+        drop(_lock);
 
         // 4. 返回新分区的副本信息
         Ok((

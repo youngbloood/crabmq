@@ -7,6 +7,11 @@ pub struct Config {
     pub flusher_period: u64,
     // 刷盘因子，内存中的消息量超过该值时刷盘，默认： 4 * 1024 * 1024（4m）
     pub flusher_factor: u64,
+    // 刷盘配置：刷分区的任务数量
+    pub flusher_partition_writer_buffer_tasks_num: usize,
+    // 刷盘配置：刷分区写指针的任务数量
+    pub flusher_partition_writer_ptr_tasks_num: usize,
+
     // 默认每个消息文件中的最大消息数量
     pub max_msg_num_per_file: u64,
     // 默认每个消息文件中的最大消息字节数
@@ -49,7 +54,9 @@ impl Config {
 pub fn default_config() -> Config {
     Config {
         storage_dir: PathBuf::from("./messages"),
-        flusher_period: 50,
+        flusher_period: 50, // 50ms
+        flusher_partition_writer_buffer_tasks_num: 10,
+        flusher_partition_writer_ptr_tasks_num: 10,
         flusher_factor: 1024 * 1024 * 4,               // 4M
         max_msg_num_per_file: 1024 * 1024 * 1024 * 15, // 15G
         max_size_per_file: 1024 * 1024 * 1024 * 15 * 5,

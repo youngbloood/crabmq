@@ -25,11 +25,11 @@ enum CooInfoAction {
 }
 
 enum CooRole {
-    Leader = 0;
-    Candidate = 1;
-    Follower = 2;
-    Learner = 3;
-    Unknown = 4;
+    Unknown = 0;
+    Leader = 1;
+    Candidate = 2;
+    Follower = 3;
+    Learner = 4;
 }
 
 message TopicPartitionResp {

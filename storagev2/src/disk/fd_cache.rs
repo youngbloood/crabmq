@@ -105,14 +105,16 @@ impl FileWriterHandlerAsync {
 
 #[derive(Clone, Debug)]
 pub struct FdWriterCacheAync {
+    prealloc_size: usize,
     inner: Arc<ShardedLock<LruCache<PathBuf, FileWriterHandlerAsync>>>,
 }
 
 impl FdWriterCacheAync {
-    pub fn new(size: usize) -> Self {
+    pub fn new(prealloc_size: usize, buffer_size: usize) -> Self {
         FdWriterCacheAync {
+            prealloc_size,
             inner: Arc::new(ShardedLock::new(LruCache::new(
-                NonZeroUsize::new(size).unwrap(),
+                NonZeroUsize::new(buffer_size).unwrap(),
             ))),
         }
     }
@@ -122,7 +124,7 @@ impl FdWriterCacheAync {
         wg.get(key).cloned()
     }
 
-    pub fn get_or_create(&self, key: &Path) -> Result<FileWriterHandlerAsync> {
+    pub fn get_or_create(&self, key: &Path, prealloc_size: bool) -> Result<FileWriterHandlerAsync> {
         // 第一次检查缓存
         {
             let mut wg = self.inner.write().expect("Failed to acquire write lock");
@@ -149,8 +151,9 @@ impl FdWriterCacheAync {
         let mut write_fd = write_opt
             .open(key)
             .map_err(|e| anyhow::anyhow!("Failed to open write file: {}", e))?;
-
-        preallocate(&write_fd, 1000)?;
+        if prealloc_size {
+            preallocate(&write_fd, 1000)?;
+        }
         write_fd.seek(std::io::SeekFrom::Start(0))?;
 
         let async_write = AsyncFile::from_std(write_fd);

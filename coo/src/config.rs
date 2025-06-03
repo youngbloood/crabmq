@@ -117,7 +117,7 @@ pub fn default_config() -> Config {
         db_path: PathBuf::from("./data"),
         check_self_is_leader_interval: 2,
         new_topic_timeout: 3,
-        new_topic_partition_factor: "100n".to_string(),
+        new_topic_partition_factor: "10n".to_string(),
         add_partition_timeout: 3,
         event_bus_buffer_size: 12,
         client_pull_buffer_size: 12,

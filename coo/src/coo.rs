@@ -705,6 +705,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         self.check_leader().await?;
 
         let req = request.into_inner();
+        println!("收到创建 topic 请求  req = {:?}", req);
         let (part, exist) = self
             .partition_manager
             .build_allocator(
@@ -712,8 +713,10 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                 Some(self.brokers.clone()),
             )
             .assign_new_topic(&req.topic, req.partitio_num)
+            .await
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
+        println!("收到创建 topic 响应 = {:?}", part);
         if exist {
             return Ok(Response::new(clientcoosvc::NewTopicResp {
                 success: true,

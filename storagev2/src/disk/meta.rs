@@ -3,7 +3,10 @@ use bincode::{Decode, Encode};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, path::PathBuf, sync::Arc};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::{fs, sync::RwLock};
+
+use super::fd_cache::FileWriterHandlerAsync;
 
 pub const WRITER_PTR_FILENAME: &str = ".writer.ptr";
 pub const TOPIC_META: &str = "meta.bin";
@@ -52,6 +55,28 @@ impl TopicMeta {
         fs::write(path, data).await?;
         Ok(())
     }
+
+    pub async fn save_to(&self, fd: FileWriterHandlerAsync) -> Result<()> {
+        // 转换为可序列化的中间结构
+        let serialized = SerializableTopicMeta {
+            keys: self
+                .keys
+                .iter()
+                .map(|entry| (entry.key().clone(), *entry.value()))
+                .collect(),
+        };
+
+        // 序列化并保存
+        let data = serde_json::to_string_pretty(&serialized)?;
+        let mut wl = fd.write().await;
+        // 截断文件，确保清除旧内容
+        wl.set_len(0).await?;
+        // 将指针移到开头
+        wl.seek(std::io::SeekFrom::Start(0)).await?;
+        wl.write_all(data.as_bytes()).await?;
+        wl.sync_all().await?;
+        Ok(())
+    }
 }
 
 // Partition 元数据
@@ -90,6 +115,11 @@ impl PartitionWriterPtr {
         self.inner.read().await.save(path).await?;
         Ok(())
     }
+
+    pub async fn save_to(&self, fd: FileWriterHandlerAsync) -> Result<()> {
+        self.inner.read().await.save_to(fd).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -123,6 +153,20 @@ impl WriterPositionPtr {
     pub async fn save(&self, path: &PathBuf) -> Result<()> {
         let json_data = serde_json::to_string_pretty(&self)?;
         tokio::fs::write(path, json_data).await?;
+
+        Ok(())
+    }
+
+    pub async fn save_to(&self, fd: FileWriterHandlerAsync) -> Result<()> {
+        let json_data = serde_json::to_string_pretty(&self)?;
+        let mut wl = fd.write().await;
+
+        // 截断文件，确保清除旧内容
+        wl.set_len(0).await?;
+        // 将指针移到开头
+        wl.seek(std::io::SeekFrom::Start(0)).await?;
+        wl.write_all(json_data.as_bytes()).await?;
+        wl.sync_all().await?;
 
         Ok(())
     }

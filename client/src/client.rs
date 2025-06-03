@@ -160,8 +160,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(coos: Vec<String>) -> Client {
-        let sc: SmartClient = SmartClient::new(coos);
+    pub fn new(id: String, coos: Vec<String>) -> Client {
+        let sc: SmartClient = SmartClient::new(id, coos);
 
         let client = Self {
             topics: TopicAssignment::default(),
@@ -337,13 +337,18 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    pub async fn new_topic(self: &Arc<Self>, topic: &str, partition_num: u32) -> Result<()> {
+    pub async fn new_topic(self: &Arc<Self>, partition_num: u32) -> Result<()> {
         if self
             .topic_created
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            let tpds = self.client.new_topic(topic, partition_num).await?;
+            let tpds = self
+                .client
+                .new_topic(&self.topic.clone(), partition_num)
+                .await?;
+
+            println!("tpds = {:?}", tpds);
             // println!("tpds = {:?}", tpds);
             for tpd in tpds {
                 let _ = self
@@ -423,7 +428,7 @@ impl Publisher {
             if !auto_create {
                 return Err(anyhow!("not found the topic"));
             }
-            self.new_topic(&self.topic, 0).await?;
+            self.new_topic(0).await?;
         }
 
         tokio::spawn(async move {

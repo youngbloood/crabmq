@@ -10,6 +10,7 @@ use std::{
     path::Path,
     time::Duration,
 };
+use tokio::fs as async_fs;
 use tokio::time::Interval;
 use tokio::{select, time::interval as async_interval};
 
@@ -176,3 +177,22 @@ pub fn dir_recursive(dir: PathBuf, exts: &[OsString]) -> Result<Vec<PathBuf>> {
 
     Ok(file_list)
 }
+
+// async fn async_dir_recursive(dir: PathBuf, extensions: &[OsString]) -> Result<Vec<PathBuf>> {
+//     let mut files = Vec::new();
+//     let mut entries = async_fs::read_dir(dir).await?;
+
+//     while let Some(entry) = entries.next_entry().await? {
+//         let path = entry.path();
+//         if path.is_dir() {
+//             let sub_files = async_dir_recursive(path, extensions).await?;
+//             files.extend(sub_files);
+//         } else if let Some(ext) = path.extension() {
+//             if extensions.contains(&ext.to_os_string()) {
+//                 files.push(path);
+//             }
+//         }
+//     }
+
+//     Ok(files)
+// }
