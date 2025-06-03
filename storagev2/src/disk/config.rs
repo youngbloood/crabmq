@@ -12,6 +12,9 @@ pub struct Config {
     // 刷盘配置：刷分区写指针的任务数量
     pub flusher_partition_writer_ptr_tasks_num: usize,
 
+    // PartitionWriter 中内存缓冲区长度，每个分区缓存写入消息的长度
+    pub partition_writer_buffer_size: usize,
+
     // 默认每个消息文件中的最大消息数量
     pub max_msg_num_per_file: u64,
     // 默认每个消息文件中的最大消息字节数
@@ -55,13 +58,14 @@ pub fn default_config() -> Config {
     Config {
         storage_dir: PathBuf::from("./messages"),
         flusher_period: 50, // 50ms
-        flusher_partition_writer_buffer_tasks_num: 10,
-        flusher_partition_writer_ptr_tasks_num: 10,
+        flusher_partition_writer_buffer_tasks_num: 32,
+        flusher_partition_writer_ptr_tasks_num: 32,
+        partition_writer_buffer_size: 100,
         flusher_factor: 1024 * 1024 * 4,               // 4M
         max_msg_num_per_file: 1024 * 1024 * 1024 * 15, // 15G
         max_size_per_file: 1024 * 1024 * 1024 * 15 * 5,
         compress_type: 0,
-        fd_cache_size: 15,
+        fd_cache_size: 256,
         create_next_record_file_threshold: 80,
     }
 }

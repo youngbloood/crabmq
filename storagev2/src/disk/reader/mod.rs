@@ -186,7 +186,7 @@ impl DiskStorageReaderSessionPartition {
         // 读取消息长度前缀
         let mut len_buf = [0u8; 8];
         wl.read_exact(&mut len_buf).await?;
-        let len = u64::from_le_bytes(len_buf);
+        let len = u64::from_be_bytes(len_buf);
         if len == 0 {
             return Ok(Bytes::new());
         }

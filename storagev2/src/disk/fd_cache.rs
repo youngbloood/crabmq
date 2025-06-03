@@ -96,10 +96,14 @@ impl Deref for FileWriterHandlerAsync {
 }
 
 impl FileWriterHandlerAsync {
-    fn new(f: AsyncFile) -> Self {
+    pub fn new(f: AsyncFile) -> Self {
         Self {
             inner: Arc::new(RwLock::new(f)),
         }
+    }
+
+    pub async fn reset(&self, f: AsyncFile) {
+        *self.inner.write().await = f
     }
 }
 
@@ -152,7 +156,8 @@ impl FdWriterCacheAync {
             .open(key)
             .map_err(|e| anyhow::anyhow!("Failed to open write file: {}", e))?;
         if prealloc_size {
-            preallocate(&write_fd, 1000)?;
+            // preallocate(&write_fd, self.prealloc_size as _)?;
+            preallocate(&write_fd, 20000)?;
         }
         write_fd.seek(std::io::SeekFrom::Start(0))?;
 
@@ -167,6 +172,21 @@ impl FdWriterCacheAync {
         wg.put(key.to_path_buf(), handler.clone());
         Ok(handler)
     }
+}
+
+pub fn create_writer_fd(p: &Path) -> Result<AsyncFile> {
+    let mut write_opt = OpenOptions::new();
+    write_opt.write(true);
+    if !check_exist(p) {
+        // 当前文件不存在，则创建
+        write_opt.create(true);
+    }
+
+    // 先创建写文件句柄，确保文件存在
+    let mut write_fd = write_opt
+        .open(p)
+        .map_err(|e| anyhow::anyhow!("Failed to open write file: {}", e))?;
+    Ok(AsyncFile::from_std(write_fd))
 }
 
 #[cfg(test)]

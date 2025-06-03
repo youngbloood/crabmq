@@ -1,28 +1,35 @@
 use super::buffer::PartitionWriterBuffer;
 use crate::disk::{
     fd_cache::FdWriterCacheAync,
-    meta::{PartitionWriterPtr, TopicMeta},
+    meta::{TopicMeta, WriterPositionPtr},
 };
 use dashmap::DashMap;
 use log::error;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{select, sync::mpsc, time};
 
 #[derive(Clone)]
 pub struct Flusher {
     fd_cache: Arc<FdWriterCacheAync>,
-    partition_writer_buffers: Arc<DashMap<PathBuf, PartitionWriterBuffer>>,
+    partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
     topic_metas: Arc<DashMap<PathBuf, TopicMeta>>,
-    partition_writer_ptrs: Arc<DashMap<PathBuf, PartitionWriterPtr>>,
+    partition_writer_ptrs: Arc<DashMap<PathBuf, Arc<WriterPositionPtr>>>,
     interval: Duration,
 
     partition_writer_buffer_tasks_num: usize,
     // 存储 PartitionWriterBuffer 异步刷盘任务的 sender
-    partition_writer_buffer_tasks: Arc<Vec<mpsc::Sender<PartitionWriterBuffer>>>,
+    partition_writer_buffer_tasks: Arc<Vec<mpsc::Sender<(bool, Arc<PartitionWriterBuffer>)>>>,
 
     partition_writer_ptr_tasks_num: usize,
     // 存储 PartitionWriterPtr 异步刷盘任务的 sender
-    partition_writer_ptr_tasks: Arc<Vec<mpsc::Sender<(PathBuf, PartitionWriterPtr)>>>,
+    partition_writer_ptr_tasks: Arc<Vec<mpsc::Sender<(bool, PathBuf, Arc<WriterPositionPtr>)>>>,
 }
 
 impl Drop for Flusher {
@@ -45,10 +52,10 @@ impl Flusher {
     ) -> Self {
         let mut buffer_tasks = vec![];
         for _ in 0..partition_writer_buffer_tasks_num {
-            let (tx, mut rx) = mpsc::channel::<PartitionWriterBuffer>(1);
+            let (tx, mut rx) = mpsc::channel::<(bool, Arc<PartitionWriterBuffer>)>(1);
             tokio::spawn(async move {
-                while let Some(pwb) = rx.recv().await {
-                    if let Err(e) = pwb.flush().await {
+                while let Some((should_sync, pwb)) = rx.recv().await {
+                    if let Err(e) = pwb.flush(should_sync).await {
                         error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}")
                     }
                 }
@@ -58,17 +65,12 @@ impl Flusher {
 
         let mut ptr_tasks = vec![];
         for _ in 0..partition_writer_ptr_tasks_num {
-            let (tx, mut rx) = mpsc::channel::<(PathBuf, PartitionWriterPtr)>(1);
+            let (tx, mut rx) = mpsc::channel::<(bool, PathBuf, Arc<WriterPositionPtr>)>(1);
             let _fd_cache = fd_cache.clone();
             tokio::spawn(async move {
-                while let Some((p, pwp)) = rx.recv().await {
-                    match _fd_cache.get_or_create(&p, false) {
-                        Ok(fd) => {
-                            if let Err(e) = pwp.save_to(fd).await {
-                                error!("pwp.save_to err: {e:?}");
-                            }
-                        }
-                        Err(e) => error!("Flusher:  _fd_cache.get_or_create err: {e:?}"),
+                while let Some((should_sync, p, pwp)) = rx.recv().await {
+                    if let Err(e) = pwp.save_to(should_sync).await {
+                        error!("pwp.save_to err: {e:?}");
                     }
                 }
             });
@@ -85,39 +87,43 @@ impl Flusher {
             partition_writer_buffer_tasks: Arc::new(buffer_tasks),
             partition_writer_ptr_tasks_num,
             partition_writer_ptr_tasks: Arc::new(ptr_tasks),
+            // partition_writer_ptr_tasks: Arc::default(),
         }
     }
 
     pub async fn run(&mut self, mut flush_signal: mpsc::Receiver<()>) {
         let mut ticker = time::interval(self.interval);
+        let mut tt = 0_u64;
         loop {
             select! {
                 _ = ticker.tick() => {
-                    self.flush_all().await;
+                    // 每 5s 必须 sync 一次
+                    self.flush_all(tt%100==0).await;
+                    tt+=1;
                 }
 
                 _ = flush_signal.recv() => {
-                    self.flush_all().await;
+                    self.flush_all(true).await;
                 }
             }
         }
     }
 
     pub fn add_partition_writer(&self, key: PathBuf, writer: PartitionWriterBuffer) {
-        self.partition_writer_buffers.insert(key, writer);
+        self.partition_writer_buffers.insert(key, Arc::new(writer));
     }
 
     pub fn add_topic_meta(&self, topic: PathBuf, meta: TopicMeta) {
         self.topic_metas.insert(topic, meta);
     }
 
-    pub fn add_partition_meta(&self, partition: PathBuf, meta: PartitionWriterPtr) {
+    pub fn add_partition_meta(&self, partition: PathBuf, meta: Arc<WriterPositionPtr>) {
         self.partition_writer_ptrs.insert(partition, meta);
     }
 
-    async fn flush_all(&self) {
+    async fn flush_all(&self, should_sync: bool) {
         // 获取所有writer的副本，避免长时间持有锁
-        let writers: Vec<PartitionWriterBuffer> = self
+        let writers: Vec<Arc<PartitionWriterBuffer>> = self
             .partition_writer_buffers
             .iter()
             .map(|e| e.value().clone())
@@ -125,7 +131,7 @@ impl Flusher {
         for (idx, writer) in writers.iter().enumerate() {
             if let Err(e) = self.partition_writer_buffer_tasks
                 [idx % self.partition_writer_buffer_tasks_num]
-                .send(writer.clone())
+                .send((should_sync, writer.clone()))
                 .await
             {
                 error!("Flusher: flush_all send PartitionWriterBuffer err: {e:?}")
@@ -134,24 +140,17 @@ impl Flusher {
 
         let topic_metas: Vec<(PathBuf, TopicMeta)> = self
             .topic_metas
-            .iter()
+            .iter_mut()
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         for (filename, meta) in topic_metas {
-            match self.fd_cache.get_or_create(&filename, false) {
-                Ok(fd) => {
-                    if let Err(e) = meta.save_to(fd).await {
-                        error!("Flush topic_metas [{filename:?}] failed: {e:?}");
-                    }
-                }
-                Err(e) => {
-                    error!("Flusher: fd_cache.get_or_create err: {e:?}");
-                }
+            if let Err(e) = meta.save().await {
+                error!("Flush topic_metas [{filename:?}] failed: {e:?}");
             }
         }
 
-        // 处理partition_metas
-        let partition_writer_ptrs: Vec<(PathBuf, PartitionWriterPtr)> = self
+        // 处理 PartitionWriterPtr
+        let partition_writer_ptrs: Vec<(PathBuf, Arc<WriterPositionPtr>)> = self
             .partition_writer_ptrs
             .iter()
             .map(|e| (e.key().clone(), e.value().clone()))
@@ -159,11 +158,42 @@ impl Flusher {
         for (idx, (filename, pwp)) in partition_writer_ptrs.iter().enumerate() {
             if let Err(e) = self.partition_writer_ptr_tasks
                 [idx % self.partition_writer_ptr_tasks_num]
-                .send((filename.clone(), pwp.clone()))
+                .send((should_sync, filename.clone(), pwp.clone()))
                 .await
             {
                 error!("Flusher: flush_all send PartitionWriterPtr err: {e:?}")
             }
         }
     }
+
+    // 添加获取分区指标的方法
+    pub fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
+        // if let Some(ts) = self.topics.get(topic) {
+        let mut result = vec![];
+        for pwb in self.partition_writer_buffers.iter() {
+            let metrics = pwb.get_metrics();
+            result.push(PartitionMetrics {
+                partition_path: pwb.key().clone(),
+                flush_offset: Arc::new(AtomicU64::new(
+                    metrics.flush_offset.load(Ordering::Relaxed),
+                )),
+                flush_count: Arc::new(AtomicU64::new(metrics.flush_count.load(Ordering::Relaxed))),
+                flush_bytes: Arc::new(AtomicU64::new(metrics.flush_bytes.load(Ordering::Relaxed))),
+                flush_latency_us: Arc::new(AtomicU64::new(
+                    metrics.flush_latency_us.load(Ordering::Relaxed),
+                )),
+            });
+        }
+        result
+    }
+}
+
+// 添加监控结构体
+#[derive(Default, Clone)]
+pub struct PartitionMetrics {
+    pub partition_path: PathBuf,
+    pub flush_offset: Arc<AtomicU64>,
+    pub flush_count: Arc<AtomicU64>,
+    pub flush_bytes: Arc<AtomicU64>,
+    pub flush_latency_us: Arc<AtomicU64>,
 }

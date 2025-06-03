@@ -3,6 +3,9 @@ name = "storagev2"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+debug = true
+
 [dependencies]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
@@ -11,9 +14,10 @@ bytes = "1.10.1"
 cfg-if = "1.0.0"
 chrono = "0.4.41"
 common = { version = "0.1.0", path = "../common" }
-crossbeam = "0.8.4"
+crossbeam = { version = "0.8.4", features = ["crossbeam-queue"] }
 crossbeam-channel = "0.5.15"
 dashmap = { version = "6.1.0", features = ["serde"] }
+defer = "0.2.1"
 futures = "0.3.31"
 libc = "0.2.172"
 log = "0.4.27"
@@ -25,6 +29,7 @@ serde = "1.0.219"
 serde_json = "1.0.140"
 tokio = { version = "1.45.1", features = ["rt-multi-thread"] }
 tokio-stream = "0.1.17"
+# tokio-uring = "0.5.0"
 tokio-util = "0.7.15"
 tracing = "0.1.41"
 winapi = { version = "0.3.9", features = ["fileapi"] }

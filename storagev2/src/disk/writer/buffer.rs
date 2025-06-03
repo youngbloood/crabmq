@@ -1,14 +1,17 @@
 use crate::disk::{
     Config,
-    fd_cache::FdWriterCacheAync,
+    fd_cache::{FdWriterCacheAync, FileWriterHandlerAsync, create_writer_fd},
     meta::{WriterPositionPtr, gen_record_filename},
+    writer::flusher::Flusher,
 };
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use common::dir_recursive;
+use crossbeam::queue::SegQueue;
+use log::error;
 use std::{
     ffi::OsString,
-    io::Read,
+    io::SeekFrom,
     path::PathBuf,
     sync::{
         Arc,
@@ -28,30 +31,33 @@ pub struct PartitionWriterBuffer {
     // 当前写的文件因子：用于构成写入的目标文件
     current_factor: Arc<AtomicU64>,
 
-    // 定期刷盘至磁盘(该分区下的磁盘文件)
-    fd_cache: Arc<FdWriterCacheAync>,
+    current_fd: FileWriterHandlerAsync,
 
     // 先将数据存入内存缓冲区
-    buffer: Arc<RwLock<BytesMut>>,
+    buffer: Arc<SegQueue<Bytes>>,
 
     // 写相关的位置指针
-    write_ptr: Arc<RwLock<WriterPositionPtr>>,
+    write_ptr: Arc<WriterPositionPtr>,
 
     // 是否已经预创建了下一个 record 文件
     has_create_next_record_file: Arc<AtomicBool>,
+
+    flusher: Flusher,
+
+    // 监控刷盘指标
+    metrics: Arc<FlushMetrics>,
 }
 
 impl PartitionWriterBuffer {
-    pub fn new(
+    pub async fn new(
         dir: PathBuf,
         config: &Config,
-        fd_cache: Arc<FdWriterCacheAync>,
-        write_ptr: Arc<RwLock<WriterPositionPtr>>,
+        write_ptr: Arc<WriterPositionPtr>,
+        flusher: Flusher,
     ) -> Result<Self> {
-        let mut files = dir_recursive(dir.clone(), &[OsString::from("record")])?;
-
+        let record_files = dir_recursive(dir.clone(), &[OsString::from("record")])?;
         // 只获取最大编号的文件
-        let max_file = files
+        let max_file = record_files
             .iter()
             .filter_map(|p| {
                 p.file_name()
@@ -60,34 +66,52 @@ impl PartitionWriterBuffer {
                     .and_then(|s| s.parse::<u64>().ok())
             })
             .max();
-        let factor = if let Some(max) = max_file {
-            AtomicU64::new(max)
+        let (factor, mut max_file) = if let Some(max) = max_file {
+            (AtomicU64::new(max), max)
         } else {
-            AtomicU64::new(0)
+            (AtomicU64::new(0), 0)
         };
 
+        let max_record_filename = dir.join(gen_record_filename(max_file));
+        // 判断 WriterPositionPtr.filename 与最大 record文件 不一致的情况
+        // 此时表示文件可能为外界条件破坏。以下一个 record 文件重新开始
+        if !write_ptr.get_filename().await.eq(&max_record_filename) {
+            max_file += 1;
+            write_ptr
+                .reset_with_filename(dir.join(gen_record_filename(max_file)))
+                .await;
+            factor.fetch_add(1, Ordering::Relaxed);
+        }
+
         Ok(Self {
-            dir,
+            dir: dir.clone(),
             current_factor: Arc::new(factor),
-            fd_cache,
+            current_fd: FileWriterHandlerAsync::new(create_writer_fd(
+                &dir.join(gen_record_filename(max_file)),
+            )?),
             conf: config.clone(),
-            buffer: Arc::new(RwLock::new(BytesMut::with_capacity(
-                (config.flusher_factor as f64 * 1.5) as usize,
-            ))),
+            buffer: Arc::new(SegQueue::new()),
             write_ptr,
             has_create_next_record_file: Arc::default(),
+            flusher,
+            metrics: Arc::default(),
         })
     }
 
     async fn rotate_file(&self) {
         self.current_factor.fetch_add(1, Ordering::Relaxed);
-        let mut writer_ptr_wl = self.write_ptr.write().await;
-        writer_ptr_wl.filename = self.dir.join(gen_record_filename(
+        let next_filename = self.dir.join(gen_record_filename(
             self.current_factor.load(Ordering::Relaxed),
         ));
-        writer_ptr_wl.offset = 0;
-        writer_ptr_wl.current_count = 0;
-        writer_ptr_wl.flush_offset = 0;
+
+        match create_writer_fd(&next_filename) {
+            Ok(async_file) => {
+                self.current_fd.reset(async_file).await;
+            }
+            Err(e) => {
+                error!("create_writer_fd err: {e:?}");
+            }
+        }
 
         // writer_ptr_wl.next_filename = PathBuf::new();
         // writer_ptr_wl.next_offset = 0;
@@ -103,105 +127,125 @@ impl PartitionWriterBuffer {
     }
 
     // 写入到 buffer 中
-    pub async fn write(&self, data: Bytes) -> Result<()> {
+    pub async fn write_batch(&self, batch: &[Bytes]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let count = batch.len();
+        let total_size: u64 = batch.iter().map(|v| v.len() as u64).sum();
         // 检查是否需要滚动文件
         let should_rotate = {
-            let writer_ptr_rl = self.write_ptr.read().await;
-            writer_ptr_rl.offset + data.len() as u64 + 8 > self.conf.max_size_per_file
-                || writer_ptr_rl.current_count >= self.conf.max_msg_num_per_file
+            self.write_ptr.get_offset() + total_size > self.conf.max_size_per_file
+                || self.write_ptr.get_current_count() >= self.conf.max_msg_num_per_file
         };
-
         if should_rotate {
-            self.flush().await?;
+            self.flush(true).await?;
             self.rotate_file().await;
         }
-        let data_len = data.len();
-        let total_size = data_len + 8;
 
-        // 快速写入缓冲区
-        {
-            let mut buffer_wl = self.buffer.write().await;
-            buffer_wl.extend((data_len as u64).to_le_bytes());
-            buffer_wl.extend_from_slice(&data[..]);
+        for data in batch {
+            self.buffer.push(data.clone());
         }
-        // 更新写入指针 - 尽量减少写锁持有时间
+
         {
-            let mut writer_ptr_wl = self.write_ptr.write().await;
-            writer_ptr_wl.current_count += 1;
-            writer_ptr_wl.offset += total_size as u64;
+            // 更新指针（减少锁次数）
+            self.write_ptr.rotate_offset(total_size);
+            self.write_ptr.rotate_current_count(count as u64);
         }
+
         // 检查是否需要立即刷盘
-        let should_flush = {
-            let buffer_rl = self.buffer.read().await;
-            self.conf.flusher_factor != 0 && buffer_rl.len() as u64 > self.conf.flusher_factor
-        };
-
-        if should_flush {
-            self.flush().await?;
+        if self.conf.flusher_factor != 0 && total_size > self.conf.flusher_factor {
+            self.flush(false).await?;
         }
 
         // 当前文件的使用率已经达到设置阈值，预创建下一个
-        let should_pre_create = {
-            let writer_ptr_rl = self.write_ptr.read().await;
-            ((writer_ptr_rl.offset as f64 / self.conf.max_size_per_file as f64) * 100.0) as u64
-                >= self.conf.create_next_record_file_threshold as u64
-                && self
-                    .has_create_next_record_file
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-        };
-        if should_pre_create {
-            let next_filename = self.get_next_filename().await;
-            let writer_ptr = self.write_ptr.clone();
-            if self.fd_cache.get(&next_filename).is_none() {
-                let _fd_cache = self.fd_cache.clone();
-                tokio::spawn(async move {
-                    if _fd_cache.get_or_create(&next_filename, true).is_ok() {
-                        // let mut wl = writer_ptr.write().await;
-                        // wl.next_filename = next_filename;
-                        // wl.offset = 0;
-                    }
-                });
-            }
-        }
+        // let should_pre_create = {
+        //     ((self.write_ptr.get_offset() as f64 / self.conf.max_size_per_file as f64) * 100.0)
+        //         as u64
+        //         >= self.conf.create_next_record_file_threshold as u64
+        //         && self
+        //             .has_create_next_record_file
+        //             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        //             .is_ok()
+        // };
+
+        // if should_pre_create {
+        //     let next_filename = self.get_next_filename().await;
+        //     let writer_ptr = self.write_ptr.clone();
+        //     if self.fd_cache.get(&next_filename).is_none() {
+        //         let _fd_cache = self.fd_cache.clone();
+        //         tokio::spawn(async move {
+        //             if _fd_cache.get_or_create(&next_filename, true).is_ok() {
+        //                 // let mut wl = writer_ptr.write().await;
+        //                 // wl.next_filename = next_filename;
+        //                 // wl.offset = 0;
+        //             }
+        //         });
+        //     }
+        // }
         Ok(())
     }
 
-    pub async fn flush(&self) -> Result<()> {
-        let buffer_len = { self.buffer.read().await.len() };
-        if buffer_len == 0 {
-            return Ok(());
-        }
+    // 仅 Flusher::new 中的 tasks 调用
+    pub async fn flush(&self, should_sync: bool) -> Result<()> {
+        let start = std::time::Instant::now();
+        let mut fd_wl = self.current_fd.write().await;
+        // 直接使用队列数据，避免拷贝
+        let mut position = self.write_ptr.get_flush_offset();
+        let mut flushed_bytes = 0_u64;
+        while let Some(data) = self.buffer.pop() {
+            let len = data.len();
 
-        let fd = self.fd_cache.get_or_create(
-            &self.dir.join(gen_record_filename(
-                self.current_factor.load(Ordering::Relaxed),
-            )),
-            true,
-        )?;
+            // 先写入长度头
+            fd_wl.seek(SeekFrom::Start(position)).await?;
+            fd_wl.write_u64(len as u64).await?;
+            position += 8;
 
-        // 直接使用缓冲区数据，避免拷贝
-        let data = {
-            let mut buffer_wl = self.buffer.write().await;
-            buffer_wl.split().freeze() // 直接获取Bytes，避免拷贝
-        };
-
-        let data_len = data.len();
-
-        {
-            let mut fd_wl = fd.write().await;
-            let mut writer_ptr_wl = self.write_ptr.write().await;
-
-            fd_wl
-                .seek(std::io::SeekFrom::Start(writer_ptr_wl.flush_offset))
-                .await?;
-
+            // 直接写入数据（零拷贝）
+            fd_wl.seek(SeekFrom::Start(position)).await?;
             fd_wl.write_all(&data).await?;
-            fd_wl.sync_data().await?;
+            position += len as u64;
+            flushed_bytes += len as u64;
 
-            writer_ptr_wl.flush_offset += data_len as u64;
+            // 更新刷盘位置
+            self.write_ptr.rotate_flush_offset(len as u64 + 8);
         }
+
+        // 批量同步
+        if should_sync {
+            let fd = self.current_fd.clone();
+            tokio::spawn(async move {
+                let _ = fd.write().await.sync_data().await;
+            });
+        }
+
+        let elapsed = start.elapsed().as_micros() as u64;
+        // 更新刷盘指标
+        self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .flush_bytes
+            .fetch_add(flushed_bytes, Ordering::Relaxed);
+        self.metrics
+            .flush_latency_us
+            .fetch_add(elapsed, Ordering::Relaxed);
+        self.metrics
+            .flush_offset
+            .store(self.write_ptr.get_flush_offset(), Ordering::Relaxed);
 
         Ok(())
     }
+
+    // 添加获取刷盘指标的方法
+    pub fn get_metrics(&self) -> Arc<FlushMetrics> {
+        self.metrics.clone()
+    }
+}
+
+// 添加监控指标
+#[derive(Default)]
+pub struct FlushMetrics {
+    pub flush_offset: AtomicU64,
+    pub flush_count: AtomicU64,
+    pub flush_bytes: AtomicU64,
+    pub flush_latency_us: AtomicU64,
 }
