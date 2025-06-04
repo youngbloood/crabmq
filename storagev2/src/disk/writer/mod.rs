@@ -6,6 +6,7 @@ use super::Config as DiskConfig;
 use super::fd_cache::FdWriterCacheAync;
 use super::meta::{TOPIC_META, TopicMeta, WRITER_PTR_FILENAME, gen_record_filename};
 use crate::StorageWriter;
+use crate::disk::StorageError;
 use crate::disk::fd_cache::create_writer_fd;
 use crate::disk::meta::WriterPositionPtr;
 use crate::disk::writer::flusher::PartitionMetrics;
@@ -21,7 +22,7 @@ use tokio::sync::{Mutex, mpsc};
 
 const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TopicStorage {
     dir: PathBuf,
     // partition_id -> PartitionWriterBuffer
@@ -40,7 +41,7 @@ pub struct DiskStorageWriter {
     fd_cache: Arc<FdWriterCacheAync>,
     flusher: Flusher,
 
-    flush_sender: mpsc::Sender<()>,
+    _flush_sender: mpsc::Sender<()>,
 }
 
 impl DiskStorageWriter {
@@ -68,8 +69,29 @@ impl DiskStorageWriter {
             topic_create_locks: Arc::default(),
             fd_cache,
             flusher,
-            flush_sender,
+            _flush_sender: flush_sender,
         })
+    }
+
+    // 单独刷盘某个 topic-partition
+    async fn flush_topic_partition_force(&self, topic: &str, partition_id: u32) -> Result<()> {
+        let ts = self.get_topic_storage(topic).await?;
+        if ts.partitions.get(&partition_id).is_none() {
+            return Err(anyhow!(
+                StorageError::PartitionNotFound("DiskStorageWriter".to_string()).to_string()
+            ));
+        }
+
+        self.flusher
+            .flush_topic_partition(
+                &self
+                    .conf
+                    .storage_dir
+                    .join(topic)
+                    .join(partition_id.to_string()),
+                true,
+            )
+            .await
     }
 
     /// get_topic_storage
@@ -194,7 +216,7 @@ impl DiskStorageWriter {
             {
                 Ok(pwb) => {
                     _flusher.add_partition_writer(dir.clone(), pwb.clone());
-                    _flusher.add_partition_meta(writer_ptr_filename, wpp.clone());
+                    _flusher.add_partition_writer_ptr(writer_ptr_filename, wpp.clone());
                     let buffer_size_half = conf.partition_writer_buffer_size / 2 + 1;
                     let mut datas: Vec<Bytes> = Vec::with_capacity(buffer_size_half);
                     loop {
@@ -212,30 +234,33 @@ impl DiskStorageWriter {
         Ok(tx_partition)
     }
 
-    pub async fn write_to_partition(
-        &self,
-        topic: &str,
-        partition_id: u32,
-        data: Bytes,
-    ) -> Result<()> {
+    async fn write_to_partition(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
         let sender = self.get_partition_writer(topic, partition_id).await?;
         sender.send(data).await?;
         Ok(())
     }
+}
 
+// metrics
+impl DiskStorageWriter {
     // 添加获取分区指标的方法
     pub fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
         self.flusher.get_partition_metrics()
+    }
+
+    pub async fn reset_metrics(&self) -> Result<()> {
+        self.flusher.reset_metrics();
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl StorageWriter for DiskStorageWriter {
-    async fn store(&self, topic: &str, partition: u32, data: Bytes) -> Result<()> {
+    async fn store(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
         if data.is_empty() {
             return Err(anyhow!("can't store empty data"));
         }
-        self.write_to_partition(topic, partition, data).await?;
+        self.write_to_partition(topic, partition_id, data).await?;
         Ok(())
     }
 }
@@ -254,20 +279,15 @@ fn filename_factor_next_record(filename: &Path) -> PathBuf {
 #[cfg(test)]
 mod test {
     use super::{DiskConfig, DiskStorageWriter};
-    use crate::{
-        StorageWriter as _,
-        disk::{default_config, writer::flusher::PartitionMetrics},
-    };
+    use crate::{StorageWriter as _, disk::default_config};
     use anyhow::Result;
     use bytes::Bytes;
-    use defer::defer;
     use futures::future::join_all;
-    use serde::Serialize;
+    use governor::{Quota, RateLimiter};
     use std::{
-        cell::RefCell,
-        fs::File,
-        io::Write,
+        num::NonZeroU32,
         path::PathBuf,
+        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
@@ -275,7 +295,7 @@ mod test {
         time::Duration,
     };
     use tokio::{
-        sync::{RwLock, mpsc},
+        sync::{Barrier, mpsc},
         time,
     };
 
@@ -292,6 +312,7 @@ mod test {
             flusher_partition_writer_buffer_tasks_num: 10,
             flusher_partition_writer_ptr_tasks_num: 10,
             partition_writer_buffer_size: 100,
+            with_metrics: false,
         })
         .expect("error config")
     }
@@ -415,357 +436,80 @@ mod test {
         Ok(())
     }
 
-    #[derive(Debug, Serialize)]
-    struct BenchResult {
-        elapsed: f32,        // 总耗时(s)
-        total_sent: u64,     // 实际发送消息量
-        total_messages: u64, // 目标发送消息量
-        errors: u64,         // 错误数
-        success_rate: f64,   // 成功率
-        tps: f64,
-        mbps: f64,
-        partition_num: u32,     // 分区数
-        concurrency_level: i32, // 并发数
-    }
-
-    async fn storage_store_bench_single_store(
-        topic_name: String,
-        partition_num: u32,     // 分区数量
-        total_messages: u64,    // 总消息量
-        message_size: usize,    // 每条消息大小(字节)
-        concurrency_level: i32, // 并发生产者数量
-        warmup_messages: i32,   // 预热消息量
-        skip_print_result: bool,
-    ) -> Result<BenchResult> {
-        // 创建存储实例
-        let store = Arc::new(DiskStorageWriter::new(default_config())?);
-
-        // 错误计数器
-        let error_count = Arc::new(AtomicU64::new(0));
-        // 消息计数器
-        let msg_counter = Arc::new(AtomicU64::new(0));
-
-        // 创建消息内容池 (避免重复分配内存)
-        let message_pool: Vec<Bytes> = (0..26)
-            .map(|i| Bytes::from(vec![b'a' + i; message_size]))
-            .collect();
-        let message_pool = Arc::new(message_pool);
-
-        println!("=== 开始性能测试 ===");
-        println!("分区数: {}", partition_num);
-        println!("总消息量: {}", total_messages);
-        println!("消息大小: {} bytes", message_size);
-        println!("并发数: {}", concurrency_level);
-
-        // 预热阶段
-        println!("[预热] 发送 {} 条消息...", warmup_messages);
-        for _ in 0..warmup_messages {
-            let seed = rand::random::<u32>();
-            let partition = seed % partition_num;
-            let msg = message_pool[seed as usize % message_pool.len()].clone();
-            store.store(&topic_name, partition, msg).await?;
-        }
-        println!("[预热] 完成");
-
-        // 创建生产者任务
-        let start_time = time::Instant::now();
-        let mut handles = Vec::new();
-
-        for _ in 0..concurrency_level {
-            let store = store.clone();
-            let message_pool = message_pool.clone();
-            let error_count = error_count.clone();
-            let msg_counter = msg_counter.clone();
-            let topic_name = topic_name.clone();
-            handles.push(tokio::spawn(async move {
-                while msg_counter.fetch_add(1, Ordering::Relaxed) < total_messages {
-                    let seed: u32 = rand::random::<u32>();
-                    let partition = seed % partition_num;
-                    let msg_idx = seed as usize % message_pool.len();
-                    let msg = message_pool[msg_idx].clone();
-
-                    if let Err(e) = store.store(&topic_name, partition, msg).await {
-                        error_count.fetch_add(1, Ordering::Relaxed);
-                        log::error!("写入错误: {:?}", e);
-                    }
-                }
-            }));
-        }
-
-        // 进度监控任务
-        let progress_handle = tokio::spawn({
-            let msg_counter = msg_counter.clone();
-            let start_time = start_time.clone();
-            let error_count = error_count.clone();
-            async move {
-                let mut last_count = 0;
-                let mut last_time = time::Instant::now();
-
-                while msg_counter.load(Ordering::Relaxed) < total_messages {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-
-                    let current_count = msg_counter.load(Ordering::Relaxed);
-                    let current_time = time::Instant::now();
-
-                    let delta_count = current_count - last_count;
-                    let delta_time = current_time.duration_since(last_time).as_secs_f64();
-
-                    if delta_time > 0.0 {
-                        let tps = delta_count as f64 / delta_time;
-                        let mbps = (tps * message_size as f64) / (1024.0 * 1024.0);
-                        let progress = (current_count as f64 / total_messages as f64) * 100.0;
-
-                        println!(
-                            "进度: {:0>4.1}% | TPS: {:0>5.0} | 吞吐量: {:0>5.2} MB/s | 错误: {}",
-                            progress,
-                            tps,
-                            mbps,
-                            error_count.load(Ordering::Relaxed)
-                        );
-                    }
-
-                    last_count = current_count;
-                    last_time = current_time;
-                }
-            }
-        });
-
-        // 等待所有任务完成
-        futures::future::join_all(handles).await;
-        progress_handle.abort(); // 停止进度监控
-
-        // 计算最终结果
-        let elapsed = start_time.elapsed();
-        let total_sent = msg_counter.load(Ordering::Relaxed).min(total_messages);
-        let errors = error_count.load(Ordering::Relaxed);
-        let success_rate = (total_sent - errors) as f64 / total_sent as f64 * 100.0;
-
-        let tps = total_sent as f64 / elapsed.as_secs_f64();
-        let mbps = (tps * message_size as f64) / (1024.0 * 1024.0);
-
-        if !skip_print_result {
-            println!("\n=== 测试结果 ===");
-            println!("总耗时: {:.2?}", elapsed);
-            println!("发送消息: {} (目标: {})", total_sent, total_messages);
-            println!("错误数: {} (成功率: {:.2}%)", errors, success_rate);
-            println!("平均吞吐量: {:.2} 条消息/秒", tps);
-            println!("数据速率: {:.2} MB/s", mbps);
-            println!("分区数: {}", partition_num);
-            println!("并发数: {}", concurrency_level);
-        }
-
-        Ok(BenchResult {
-            elapsed: elapsed.as_secs_f32(),
-            total_sent,
-            total_messages,
-            errors,
-            success_rate,
-            tps,
-            mbps,
-            partition_num,
-            concurrency_level,
-        })
-    }
-
-    #[tokio::test]
-    async fn storage_store_bench_single_store_count() -> Result<()> {
-        let args = vec![
-            // 测试次数，partition_num，total_messages，message_size，concurrency_level，warmup_messages
-            (3_u64, 100, 1_000_000, 1024, 100, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 200, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 300, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 400, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 500, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 600, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 700, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 800, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 900, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 1000, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 2000, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 3000, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 4000, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 5000, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 6000, 10_000),
-            (3_u64, 100, 1_000_000, 1024, 7000, 10_000),
-        ];
-
-        let all_result: Arc<RefCell<Vec<BenchResult>>> = Arc::default();
-
-        let _all_result = all_result.clone();
-        defer::defer!({
-            println!("\n=== 最终基准测试结果 ===");
-            for r in _all_result.borrow().iter() {
-                println!("\n=== 基准测试结果 ===");
-                println!("总耗时: {:.2?}", r.elapsed);
-                println!("发送消息: {} (目标: {})", r.total_sent, r.total_messages);
-                println!("错误数: {} (成功率: {:.2}%)", r.errors, r.success_rate);
-                println!("平均吞吐量: {:.2} 条消息/秒", r.tps);
-                println!("数据速率: {:.2} MB/s", r.mbps);
-                println!("分区数: {}", r.partition_num);
-                println!("并发数: {}", r.concurrency_level);
-            }
-        });
-
-        // let args = vec![
-        //     // 测试次数，partition_num，total_messages，message_size，concurrency_level，warmup_messages
-        //     (3_u64, 90, 1_000_000, 1024, 100, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 300, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 500, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 700, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 900, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 1000, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 3000, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 5000, 10_000),
-        //     (3_u64, 90, 1_000_000, 1024, 7000, 10_000),
-        //     //
-        //     (3_u64, 70, 1_000_000, 1024, 100, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 300, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 500, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 700, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 900, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 1000, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 3000, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 5000, 10_000),
-        //     (3_u64, 70, 1_000_000, 1024, 7000, 10_000),
-        //     //
-        //     (3_u64, 50, 1_000_000, 1024, 100, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 300, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 500, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 700, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 900, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 1000, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 3000, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 5000, 10_000),
-        //     (3_u64, 50, 1_000_000, 1024, 7000, 10_000),
-        //     //
-        //     (3_u64, 30, 1_000_000, 1024, 100, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 300, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 500, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 700, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 900, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 1000, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 3000, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 5000, 10_000),
-        //     (3_u64, 30, 1_000_000, 1024, 7000, 10_000),
-        //     //
-        //     (3_u64, 10, 1_000_000, 1024, 100, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 300, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 500, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 700, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 900, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 1000, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 3000, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 5000, 10_000),
-        //     (3_u64, 10, 1_000_000, 1024, 7000, 10_000),
-        // ];
-
-        let ts = chrono::Local::now().timestamp();
-        let mut fd = File::options()
-            .append(true)
-            .create(true)
-            .write(true)
-            .open(format!("bench_store_{}", ts))?;
-        for arg in args {
-            let mut result_p = vec![];
-
-            for i in 0..arg.0 {
-                result_p.push(
-                    storage_store_bench_single_store(
-                        format!("store_single_bench_{}_{}_{}", i, arg.1, arg.4),
-                        arg.1,
-                        arg.2,
-                        arg.3,
-                        arg.4,
-                        arg.5,
-                        false,
-                    )
-                    .await?,
-                );
-            }
-
-            let elapsed: f32 = result_p.iter().map(|v| v.elapsed).sum();
-            let total_sent: u64 = result_p.iter().map(|v| v.total_sent).sum();
-            let total_messages: u64 = result_p.iter().map(|v| v.total_messages).sum();
-            let errors: u64 = result_p.iter().map(|v| v.errors).sum();
-            let success_rate: f64 = result_p.iter().map(|v| v.success_rate).sum();
-            let tps: f64 = result_p.iter().map(|v| v.tps).sum();
-            let mbps: f64 = result_p.iter().map(|v| v.mbps).sum();
-
-            let rst = BenchResult {
-                elapsed: elapsed / arg.0 as f32,
-                total_sent: total_sent / arg.0,
-                total_messages: total_messages / arg.0,
-                errors: errors / arg.0,
-                success_rate: success_rate / arg.0 as f64,
-                tps: tps / arg.0 as f64,
-                mbps: mbps / arg.0 as f64,
-                partition_num: arg.1,
-                concurrency_level: arg.4,
-            };
-
-            let json_data = serde_json::to_string_pretty(&rst)?;
-            fd.write_all(json_data.as_bytes())?;
-
-            all_result.borrow_mut().push(rst);
-        }
-
-        // println!("\n=== 最终测试结果 ===");
-        // for r in all_result {
-        //     println!("\n=== 测试结果 ===");
-        //     println!("总耗时: {:.2?}", r.elapsed);
-        //     println!("发送消息: {} (目标: {})", r.total_sent, r.total_messages);
-        //     println!("错误数: {} (成功率: {:.2}%)", r.errors, r.success_rate);
-        //     println!("平均吞吐量: {:.2} 条消息/秒", r.tps);
-        //     println!("数据速率: {:.2} MB/s", r.mbps);
-        //     println!("并发数: {}", r.concurrency_level);
-        // }
-
-        Ok(())
-    }
-
     #[tokio::test]
     async fn run_flush_benchmark() -> Result<()> {
+        struct TestArgs {
+            partition_count: u32,      // 分区数量
+            message_size: usize,       // 10KB
+            warmup_duration: Duration, // 预热时长
+            current_rate: usize,       // 起始速率 MB/s
+            rate_step: usize,          // 速率步长 (MB/s)
+            test_duration: Duration,   // 每个速率级别的测试时长
+            max_rate_mbps: usize,      // 降低最大测试速率
+        }
+
+        let args = vec![TestArgs {
+            partition_count: 1,
+            message_size: 10 * 1024,
+            warmup_duration: Duration::from_secs(5),
+            current_rate: 50,
+            rate_step: 50,
+            test_duration: Duration::from_secs(5),
+            max_rate_mbps: 2000,
+        }];
+
         // 测试不同分区配置
-        for partition_count in &[20, 40, 70, 100] {
-            test_flush_speed_with_dynamic_rate_multi_partition(*partition_count).await?;
+        for arg in args {
+            test_flush_speed_with_dynamic_rate_multi_partition(
+                arg.partition_count,
+                arg.message_size,
+                arg.warmup_duration,
+                arg.current_rate,
+                arg.rate_step,
+                arg.test_duration,
+                arg.max_rate_mbps,
+            )
+            .await?;
         }
         Ok(())
     }
 
     async fn test_flush_speed_with_dynamic_rate_multi_partition(
-        partition_count: u32,
+        partition_count: u32,      // 分区数量
+        message_size: usize,       // 10KB
+        warmup_duration: Duration, // 预热时长
+        current_rate: usize,       // 起始速率 MB/s
+        rate_step: usize,          // 速率步长 (MB/s)
+        test_duration: Duration,   // 每个速率级别的测试时长
+        max_rate_mbps: usize,      // 降低最大测试速率
     ) -> Result<()> {
         use std::sync::atomic::{AtomicU64, Ordering};
-        use tokio::time::{self, Duration, Instant};
+        use tokio::time::{Duration, Instant};
 
         // 准备测试环境
-        let config = DiskConfig {
-            storage_dir: PathBuf::from("./flush_bench_data"),
-            flusher_period: 50,
-            flusher_factor: 1024 * 1024 * 1, // 1MB
-            max_msg_num_per_file: 4000,
-            max_size_per_file: 1024 * 1024 * 100, // 100MB
-            compress_type: 0,
-            fd_cache_size: 300,
-            create_next_record_file_threshold: 80,
-            flusher_partition_writer_buffer_tasks_num: 10,
-            flusher_partition_writer_ptr_tasks_num: 10,
-            partition_writer_buffer_size: 10000, // 大缓冲区防止阻塞
-        };
+        let mut config = default_config();
+        config.storage_dir = PathBuf::from("./flush_bench_data");
+        config.fd_cache_size = 10000;
+        config.partition_writer_buffer_size = 10000; // 大缓冲区防止阻塞
+        config.with_metrics = true;
 
         let store = Arc::new(DiskStorageWriter::new(config)?);
-
         // 测试参数
-        let topic = "flush_speed_test";
-        let message_size = 10 * 1024; // 10KB
-        let warmup_duration = Duration::from_secs(5);
-        let test_duration = Duration::from_secs(3); // 每个速率级别的测试时长
-        let max_rate_mbps = 1000; // 降低最大测试速率
-        let rate_step = 100; // 速率步长 (MB/s)
+        let topic = format!("flush_speed_test_{}", partition_count);
+        // let message_size = 10 * 1024; // 10KB
+        // let warmup_duration = Duration::from_secs(5); // 预热时长
+        // let max_rate_mbps = 1000; // 降低最大测试速率
+        // let rate_step = 50; // 速率步长 (MB/s)
+        // let current_rate = 50; // 起始速率 MB/s
+        // let test_duration = Duration::from_secs(5); // 每个速率级别的测试时长
 
+        println!(
+            "起始速度: {current_rate} MB/s, 步长增速: {rate_step} MB/s, 单步持续时长: {}s, 最大速率: {max_rate_mbps} MB/s",
+            test_duration.as_secs()
+        );
         // 创建消息内容池
-        let message_pool: Vec<Bytes> = (0..100)
-            .map(|_| Bytes::from(vec![b'a'; message_size]))
+        let message_pool: Vec<Bytes> = (0..26)
+            .map(|_| Bytes::from(vec![b'a' + 1; message_size]))
             .collect();
         let message_pool = Arc::new(message_pool);
 
@@ -777,11 +521,14 @@ mod test {
         for partition in 0..partition_count {
             let store = store.clone();
             let message_pool = message_pool.clone();
+            let topic = topic.clone();
             warmup_handles.push(tokio::spawn(async move {
                 while warmup_start.elapsed() < warmup_duration {
                     let msg =
                         message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                    let _ = store.store(topic, partition, msg).await;
+                    if let Err(e) = store.store(&topic, partition, msg).await {
+                        eprintln!("store.store err: {e:?}");
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }));
@@ -813,81 +560,111 @@ mod test {
         }
 
         // 速率测试控制
-        let mut current_rate = 100; // 起始速率 MB/s
         let mut results = vec![];
 
         println!("\n{:-^120}", " 开始动态速率测试 (多分区) ");
         println!(
-            "| {:^10} | {:^12} | {:^15} | {:^15} | {:^15} | {:^15} |",
-            "速率(MB/s)", "发送量(MB)", "落盘量(MB)", "平均延迟(ms)", "吞吐量(MB/s)", "分区数"
+            "| 速率(MB/s) | 测试时长(s) | 发送量(MB) | 落盘量(MB)(≈吞吐量*测试时长) | 平均延迟(ms) | 吞吐量(MB/s) | 分区数 |",
         );
         println!(
-            "|{:-<12}|{:-<14}|{:-<17}|{:-<17}|{:-<17}|{:-<17}|",
-            "", "", "", "", "", ""
+            "|{:-<12}|{:-<13}|{:-<12}|{:-<30}|{:-<14}|{:-<14}|{:-<8}|",
+            "", "", "", "", "", "", ""
         );
 
-        while current_rate <= max_rate_mbps {
-            // 准备测试
-            let target_rate = current_rate;
-            let messages_per_second = (target_rate * 1024 * 1024) / message_size;
-            let interval = Duration::from_secs_f64(1.0 / messages_per_second as f64);
+        for target_rate in (current_rate..=max_rate_mbps).step_by(rate_step) {
+            // println!("\n=== 测试速率: {} MB/s ===", target_rate);
+            // 系统稳定期
+            // println!("等待系统稳定 (5秒)...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
 
+            // 重置指标
+            store.reset_metrics().await?;
+
+            // 准备测试
+            let total_messages_per_second =
+                (target_rate as f64 * 1024.0 * 1024.0 / message_size as f64).ceil() as u64;
+            let total_messages = total_messages_per_second * test_duration.as_secs();
+            let messages_per_partition =
+                (total_messages as f64 / partition_count as f64).ceil() as u64;
             // 创建发送任务
             let store_clone = store.clone();
             let message_pool_clone = message_pool.clone();
             let sent_counter = Arc::new(AtomicU64::new(0));
-
             let mut send_handles = vec![];
+
+            // 获取测试开始前的刷盘指标
+
+            let start_metrics = store.get_partition_metrics();
+            // println!("start_metrics = {:?}", start_metrics);
+
+            let barrier = Arc::new(Barrier::new(partition_count as usize + 1));
+            // 循环分区写消息
             for partition in 0..partition_count {
                 let store = store_clone.clone();
                 let message_pool = message_pool_clone.clone();
                 let sent_counter = sent_counter.clone();
-                send_handles.push(tokio::spawn({
-                    async move {
-                        let start = Instant::now();
-                        while start.elapsed() < test_duration {
-                            let msg_idx = rand::random::<u32>() as usize % message_pool.len();
-                            let msg = message_pool[msg_idx].clone();
-                            if store.store(topic, partition, msg).await.is_ok() {
-                                sent_counter.fetch_add(1, Ordering::Relaxed);
-                            }
-                            tokio::time::sleep(interval).await;
+                let topic = topic.clone();
+
+                // 每个分区独立限流（总吞吐量 = 分区数 × 单分区速率）
+                let partition_rate = total_messages_per_second as f64 / partition_count as f64;
+
+                let rate_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+                    NonZeroU32::new(partition_rate.max(1.0).ceil() as u32).unwrap(),
+                )));
+                let barrier = barrier.clone();
+                send_handles.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    // 每个分区有自己的发送间隔
+                    let start = Instant::now();
+                    let mut sent = 0;
+                    while sent < messages_per_partition && start.elapsed() < test_duration {
+                        // 等待速率许可
+                        rate_limiter.until_ready().await;
+                        if sent >= messages_per_partition || start.elapsed() >= test_duration {
+                            break;
                         }
+
+                        let msg_idx = rand::random::<u32>() as usize % message_pool.len();
+                        let msg = message_pool[msg_idx].clone();
+                        if let Err(e) = store.store(&topic, partition, msg).await {
+                            eprintln!("store.store err: {e:?}");
+                            break;
+                        }
+                        sent_counter.fetch_add(1, Ordering::Relaxed);
+                        sent += 1;
                     }
                 }));
             }
 
-            // 获取测试开始前的刷盘指标
             let start_time = Instant::now();
-            let start_metrics = store.get_partition_metrics();
-
-            // 打印分区指标状态
-            // println!("开始指标状态:");
-            // for metric in &start_metrics {
-            //     println!(
-            //         "分区 {:?}: 刷盘字节={}",
-            //         metric.partition_path,
-            //         metric.flush_bytes.load(Ordering::Relaxed)
-            //     );
-            // }
-
+            barrier.wait().await;
             // 等待测试结束
             futures::future::join_all(send_handles).await;
             let elapsed = start_time.elapsed();
 
             // 获取测试结束后的刷盘指标
-            tokio::time::sleep(Duration::from_secs(1)).await; // 确保所有刷盘完成
-            let end_metrics = store.get_partition_metrics();
+            // println!("等待刷盘完成...");
+            // tokio::time::sleep(Duration::from_secs(5)).await; // 确保所有刷盘完成
+            // 手动触发一次完整刷盘
+            let end_metrics = 'BLOCK_EM: {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3)).await; // 确保所有刷盘完成
+                    let end_metrics = store.get_partition_metrics();
 
-            // 打印分区指标状态
-            // println!("结束指标状态:");
-            // for metric in &end_metrics {
-            //     println!(
-            //         "分区 {:?}: 刷盘字节={}",
-            //         metric.partition_path,
-            //         metric.flush_bytes.load(Ordering::Relaxed)
-            //     );
-            // }
+                    let has_metrics = || -> bool {
+                        for em in &end_metrics {
+                            if em.flush_bytes.load(Ordering::Relaxed) != 0 {
+                                return true;
+                            }
+                        }
+                        false
+                    };
+                    if !has_metrics() {
+                        continue;
+                    }
+                    break 'BLOCK_EM end_metrics;
+                }
+            };
 
             // 计算总指标 - 使用分区路径匹配确保正确
             let sent_count = sent_counter.load(Ordering::Relaxed);
@@ -931,6 +708,7 @@ mod test {
             let flush_throughput =
                 (total_flushed_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64();
             let avg_flush_latency = if total_flush_count > 0 {
+                // 微秒 转 毫秒
                 (total_flush_latency_us as f64 / total_flush_count as f64) / 1000.0
             } else {
                 0.0
@@ -946,17 +724,15 @@ mod test {
 
             // 打印结果
             println!(
-                "| {:>10.1} | {:>12.1} | {:>15.1} | {:>15.1} | {:>15.1} | {:>15} |",
+                "|{:>12.1}|{:>13.1}|{:>12.1}|{:>30.1}|{:>14.1}|{:>14.1}|{:>8}|",
                 target_rate as f64,
+                test_duration.as_secs_f64(),
                 sent_bytes as f64 / 1024.0 / 1024.0,
                 total_flushed_bytes as f64 / 1024.0 / 1024.0,
                 avg_flush_latency,
                 flush_throughput,
                 partition_count
             );
-
-            // 增加发送速率继续测试
-            current_rate += rate_step;
         }
 
         // 分析结果找到瓶颈点
@@ -984,9 +760,26 @@ mod test {
             println!("{:>5} MB/s: {:.1} MB/s |{}", target_rate, throughput, bar);
         }
 
+        println!("\n清除测试数据...");
         // 清理测试数据
         tokio::fs::remove_dir_all("./flush_bench_data").await?;
 
         Ok(())
+    }
+
+    #[test]
+    fn format_form() {
+        println!(
+            "| 速率(MB/s) | 测试时长(s) | 发送量(MB) | 落盘量(MB)(≈吞吐量*测试时长) | 平均延迟(ms) | 吞吐量(MB/s) | 分区数 |",
+        );
+        println!(
+            "|{:-<12}|{:-<13}|{:-<12}|{:-<30}|{:-<14}|{:-<14}|{:-<8}|",
+            "", "", "", "", "", "", ""
+        );
+
+        println!(
+            "|{:>12.1}|{:>13.1}|{:>12.1}|{:>30.1}|{:>14.1}|{:>14.1}|{:>8}|",
+            50.0, 5.0, 250.0, 300.2, 53.1, 60.0, 1
+        );
     }
 }

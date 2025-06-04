@@ -81,7 +81,9 @@ impl StorageReaderSession for DiskStorageReaderSession {
         {
             let partition_dir = self.dir.join(topic).join(partition_id.to_string());
             if !check_exist(&partition_dir) {
-                return Err(anyhow!(StorageError::PathNotExist.to_string()));
+                return Err(anyhow!(
+                    StorageError::PathNotExist(format!("{:?}", partition_dir)).to_string()
+                ));
             }
 
             let mut partition =

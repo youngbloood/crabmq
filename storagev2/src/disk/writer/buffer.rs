@@ -2,7 +2,7 @@ use crate::disk::{
     Config,
     fd_cache::{FdWriterCacheAync, FileWriterHandlerAsync, create_writer_fd},
     meta::{WriterPositionPtr, gen_record_filename},
-    writer::flusher::Flusher,
+    writer::flusher::{FlushState, Flusher},
 };
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -17,6 +17,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncSeekExt as _, AsyncWriteExt as _},
@@ -107,6 +108,7 @@ impl PartitionWriterBuffer {
         match create_writer_fd(&next_filename) {
             Ok(async_file) => {
                 self.current_fd.reset(async_file).await;
+                self.write_ptr.reset_with_filename(next_filename).await;
             }
             Err(e) => {
                 error!("create_writer_fd err: {e:?}");
@@ -131,8 +133,10 @@ impl PartitionWriterBuffer {
         if batch.is_empty() {
             return Ok(());
         }
+        self.update_partition_state(batch.len());
         let count = batch.len();
-        let total_size: u64 = batch.iter().map(|v| v.len() as u64).sum();
+        // 要加入每个消息的 8 bytes 长度头
+        let total_size: u64 = batch.iter().map(|v| v.len() as u64 + 8).sum();
         // 检查是否需要滚动文件
         let should_rotate = {
             self.write_ptr.get_offset() + total_size > self.conf.max_size_per_file
@@ -193,9 +197,10 @@ impl PartitionWriterBuffer {
         // 直接使用队列数据，避免拷贝
         let mut position = self.write_ptr.get_flush_offset();
         let mut flushed_bytes = 0_u64;
+        let mut flush_count = 0;
         while let Some(data) = self.buffer.pop() {
             let len = data.len();
-
+            flush_count += 1;
             // 先写入长度头
             fd_wl.seek(SeekFrom::Start(position)).await?;
             fd_wl.write_u64(len as u64).await?;
@@ -205,11 +210,13 @@ impl PartitionWriterBuffer {
             fd_wl.seek(SeekFrom::Start(position)).await?;
             fd_wl.write_all(&data).await?;
             position += len as u64;
-            flushed_bytes += len as u64;
-
-            // 更新刷盘位置
-            self.write_ptr.rotate_flush_offset(len as u64 + 8);
+            flushed_bytes += len as u64 + 8;
         }
+        if flushed_bytes == 0 || flush_count == 0 {
+            return Ok(());
+        }
+        // 更新刷盘位置
+        self.write_ptr.rotate_flush_offset(flushed_bytes);
 
         // 批量同步
         if should_sync {
@@ -219,33 +226,44 @@ impl PartitionWriterBuffer {
             });
         }
 
-        let elapsed = start.elapsed().as_micros() as u64;
         // 更新刷盘指标
-        self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .flush_bytes
-            .fetch_add(flushed_bytes, Ordering::Relaxed);
-        self.metrics
-            .flush_latency_us
-            .fetch_add(elapsed, Ordering::Relaxed);
-        self.metrics
-            .flush_offset
-            .store(self.write_ptr.get_flush_offset(), Ordering::Relaxed);
+        if self.conf.with_metrics {
+            let elapsed = start.elapsed().as_micros() as u64;
+            self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .flush_bytes
+                .fetch_add(flushed_bytes, Ordering::Relaxed);
+            self.metrics
+                .flush_latency_us
+                .fetch_add(elapsed, Ordering::Relaxed);
+        }
 
         Ok(())
     }
 
+    fn update_partition_state(&self, batch_size: usize) {
+        self.flusher
+            .update_partition_write_count(&self.dir, batch_size as _);
+    }
+}
+
+impl PartitionWriterBuffer {
     // 添加获取刷盘指标的方法
     pub fn get_metrics(&self) -> Arc<FlushMetrics> {
         self.metrics.clone()
+    }
+
+    pub fn reset_metrics(&self) {
+        self.metrics.flush_count.store(0, Ordering::Relaxed);
+        self.metrics.flush_bytes.store(0, Ordering::Relaxed);
+        self.metrics.flush_latency_us.store(0, Ordering::Relaxed);
     }
 }
 
 // 添加监控指标
 #[derive(Default)]
 pub struct FlushMetrics {
-    pub flush_offset: AtomicU64,
-    pub flush_count: AtomicU64,
-    pub flush_bytes: AtomicU64,
-    pub flush_latency_us: AtomicU64,
+    pub flush_count: AtomicU64,      // 刷盘次数
+    pub flush_bytes: AtomicU64,      // 刷盘消息字节数
+    pub flush_latency_us: AtomicU64, // 刷盘耗时微秒数
 }

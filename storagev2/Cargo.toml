@@ -19,6 +19,7 @@ crossbeam-channel = "0.5.15"
 dashmap = { version = "6.1.0", features = ["serde"] }
 defer = "0.2.1"
 futures = "0.3.31"
+governor = "0.10.0"
 libc = "0.2.172"
 log = "0.4.27"
 lru = "0.14.0"

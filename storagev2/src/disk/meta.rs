@@ -3,6 +3,7 @@ use bincode::{Decode, Encode};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::{fs, fs::File as AsyncFile, sync::RwLock};
@@ -38,9 +39,14 @@ impl TopicMeta {
     pub async fn load(path: &PathBuf) -> Result<Self> {
         // 读取并解析为中间结构
         let data = fs::read_to_string(path).await?;
-        let serialized: SerializableTopicMeta = serde_json::from_str(&data)?;
         let fd = FileWriterHandlerAsync::new(create_writer_fd(path)?);
-
+        if data.is_empty() {
+            return Ok(Self {
+                fd,
+                keys: Arc::default(),
+            });
+        }
+        let serialized: SerializableTopicMeta = serde_json::from_str(&data)?;
         // 转换为目标结构
         let dashmap = DashMap::new();
         for (k, v) in serialized.keys {
@@ -121,19 +127,23 @@ impl TopicMeta {
 
 #[derive(Debug, Clone)]
 pub struct WriterPositionPtr {
-    fd: FileWriterHandlerAsync,     // 存放该 ptr 信息的文件
-    filename: Arc<RwLock<PathBuf>>, // 当前写的文件
-    offset: Arc<AtomicU64>,         // 当前文件的写位置
-    current_count: Arc<AtomicU64>,  // 当前文件消息数量
-    flush_offset: Arc<AtomicU64>,   // 刷盘写的偏移量
+    fd: FileWriterHandlerAsync, // 存放该 ptr 信息的文件
+    // 写入指针文件：当前写的 record 文件
+    filename: Arc<RwLock<PathBuf>>,
+    // 写入指针文件：当前文件的写位置
+    offset: Arc<AtomicU64>,
+    // 写入指针文件：当前文件消息数量
+    current_count: Arc<AtomicU64>,
 
-                                    //  预创建的下一个文件的信息
-                                    // pub next_filename: PathBuf, // 下一个文件名
-                                    // pub next_offset: u64,       // 写一个文件的写偏移量
+    // 刷盘写的偏移量
+    flush_offset: Arc<AtomicU64>,
+    //  预创建的下一个文件的信息
+    // pub next_filename: PathBuf, // 下一个文件名
+    // pub next_offset: u64,       // 写一个文件的写偏移量
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct WriterPositionPtrSnapshot {
+pub struct WriterPositionPtrSnapshot {
     pub filename: PathBuf,  // 当前写的文件
     pub offset: u64,        // 当前文件的写位置
     pub current_count: u64, // 当前文件消息数量
@@ -168,7 +178,7 @@ impl WriterPositionPtr {
 
     #[inline]
     pub fn rotate_flush_offset(&self, num: u64) {
-        self.flush_offset.load(Ordering::Relaxed);
+        self.flush_offset.fetch_add(num, Ordering::Relaxed);
     }
 
     #[inline]
@@ -203,9 +213,20 @@ impl WriterPositionPtr {
 
     pub async fn load(path: &PathBuf) -> Result<Self> {
         let data = tokio::fs::read_to_string(path).await?;
-        let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)?;
-
         let fd = FileWriterHandlerAsync::new(create_writer_fd(path)?);
+        if data.is_empty() {
+            return Ok(WriterPositionPtr {
+                filename: Arc::new(RwLock::new(
+                    path.parent().unwrap().join(gen_record_filename(0)),
+                )),
+                fd,
+                offset: Arc::default(),
+                current_count: Arc::default(),
+                flush_offset: Arc::default(),
+            });
+        }
+
+        let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)?;
         Ok(WriterPositionPtr {
             filename: Arc::new(RwLock::new(sp.filename)),
             fd,

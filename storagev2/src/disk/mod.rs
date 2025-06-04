@@ -6,7 +6,6 @@ mod prealloc;
 pub mod reader;
 pub mod writer;
 
-use anyhow::Error;
 pub use config::*;
 pub use reader::*;
 pub use writer::*;
@@ -15,19 +14,19 @@ const READER_PTR_FILENAME: &str = ".reader.ptr.group.";
 const COMMIT_PTR_FILENAME: &str = ".commit.ptr.group.";
 
 pub enum StorageError {
-    TopicNotFound,
-    PartitionNotFound,
-    RecordNotFound,
-    PathNotExist,
+    TopicNotFound(String),
+    PartitionNotFound(String),
+    RecordNotFound(String),
+    PathNotExist(String),
 }
 
 impl ToString for StorageError {
     fn to_string(&self) -> String {
         match self {
-            StorageError::TopicNotFound => "topic not found".to_string(),
-            StorageError::PartitionNotFound => "partition not found".to_string(),
-            StorageError::RecordNotFound => "record not found".to_string(),
-            StorageError::PathNotExist => "path not exist".to_string(),
+            StorageError::TopicNotFound(key) => format!("[{}]: topic not found", key),
+            StorageError::PartitionNotFound(key) => format!("[{}]: partition not found", key),
+            StorageError::RecordNotFound(key) => format!("[{}]: record not found", key),
+            StorageError::PathNotExist(key) => format!("[{}]: path not exist", key),
         }
     }
 }

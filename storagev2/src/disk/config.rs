@@ -25,6 +25,9 @@ pub struct Config {
 
     // 预创建下一个消息文件的阈值，默认: 80，即当前文件已写了80%，开启下一个文件的预创建
     pub create_next_record_file_threshold: u8,
+
+    // 开 metrics 统计
+    pub with_metrics: bool,
 }
 
 impl Config {
@@ -58,8 +61,8 @@ pub fn default_config() -> Config {
     Config {
         storage_dir: PathBuf::from("./messages"),
         flusher_period: 50, // 50ms
-        flusher_partition_writer_buffer_tasks_num: 32,
-        flusher_partition_writer_ptr_tasks_num: 32,
+        flusher_partition_writer_buffer_tasks_num: 64,
+        flusher_partition_writer_ptr_tasks_num: 64,
         partition_writer_buffer_size: 100,
         flusher_factor: 1024 * 1024 * 4,               // 4M
         max_msg_num_per_file: 1024 * 1024 * 1024 * 15, // 15G
@@ -67,5 +70,6 @@ pub fn default_config() -> Config {
         compress_type: 0,
         fd_cache_size: 256,
         create_next_record_file_threshold: 80,
+        with_metrics: false,
     }
 }

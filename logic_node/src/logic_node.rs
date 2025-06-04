@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use broker::Broker;
+use common::random_str;
 use coo::coo::Coordinator;
 use grpcx::{
     brokercoosvc::{self, broker_coo_service_client::BrokerCooServiceClient},
@@ -307,7 +308,7 @@ where
         // 如果当前 ln 中的 coo 不是leader，需要先获取 coo:leader 节点并链接，然后汇报状态
         // 使用 grpc 链接 coo:leader, 并进行交互
         if self.coo_leader_client.is_none() {
-            let coo_client = SmartClient::new(vec![coo_leader.lock().await.clone()]);
+            let coo_client = SmartClient::new(random_str(6), vec![coo_leader.lock().await.clone()]);
             self.coo_leader_client = Some(coo_client.clone());
         }
         let refresh_coo_client = self.coo_leader_client.as_ref().unwrap().clone();
