@@ -17,7 +17,8 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    u64,
 };
 use tokio::{
     io::{AsyncSeekExt as _, AsyncWriteExt as _},
@@ -46,7 +47,7 @@ pub struct PartitionWriterBuffer {
     flusher: Flusher,
 
     // 监控刷盘指标
-    metrics: Arc<FlushMetrics>,
+    metrics: Arc<BufferFlushMetrics>,
 }
 
 impl PartitionWriterBuffer {
@@ -95,7 +96,10 @@ impl PartitionWriterBuffer {
             write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
-            metrics: Arc::default(),
+            metrics: Arc::new(BufferFlushMetrics {
+                min_start_timestamp: Arc::new(AtomicU64::new(u64::MAX)),
+                ..Default::default()
+            }),
         })
     }
 
@@ -193,6 +197,11 @@ impl PartitionWriterBuffer {
     // 仅 Flusher::new 中的 tasks 调用
     pub async fn flush(&self, should_sync: bool) -> Result<()> {
         let start = std::time::Instant::now();
+        let start_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
         let mut fd_wl = self.current_fd.write().await;
         // 直接使用队列数据，避免拷贝
         let mut position = self.write_ptr.get_flush_offset();
@@ -229,6 +238,11 @@ impl PartitionWriterBuffer {
         // 更新刷盘指标
         if self.conf.with_metrics {
             let elapsed = start.elapsed().as_micros() as u64;
+            let end_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as u64;
+
             self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .flush_bytes
@@ -236,6 +250,34 @@ impl PartitionWriterBuffer {
             self.metrics
                 .flush_latency_us
                 .fetch_add(elapsed, Ordering::Relaxed);
+
+            // 记录最早的刷盘时间
+            let current_min = self.metrics.min_start_timestamp.load(Ordering::Relaxed);
+            if start_timestamp < current_min {
+                self.metrics
+                    .min_start_timestamp
+                    .compare_exchange(
+                        current_min,
+                        start_timestamp,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
+            }
+
+            // 记录最晚的刷盘时间
+            let current_max = self.metrics.max_end_timestamp.load(Ordering::Relaxed);
+            if end_timestamp > current_max {
+                self.metrics
+                    .max_end_timestamp
+                    .compare_exchange(
+                        current_max,
+                        end_timestamp,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
+            }
         }
 
         Ok(())
@@ -249,7 +291,7 @@ impl PartitionWriterBuffer {
 
 impl PartitionWriterBuffer {
     // 添加获取刷盘指标的方法
-    pub fn get_metrics(&self) -> Arc<FlushMetrics> {
+    pub fn get_metrics(&self) -> Arc<BufferFlushMetrics> {
         self.metrics.clone()
     }
 
@@ -257,13 +299,19 @@ impl PartitionWriterBuffer {
         self.metrics.flush_count.store(0, Ordering::Relaxed);
         self.metrics.flush_bytes.store(0, Ordering::Relaxed);
         self.metrics.flush_latency_us.store(0, Ordering::Relaxed);
+        self.metrics
+            .min_start_timestamp
+            .store(u64::MAX, Ordering::Relaxed);
+        self.metrics.max_end_timestamp.store(0, Ordering::Relaxed);
     }
 }
 
 // 添加监控指标
 #[derive(Default)]
-pub struct FlushMetrics {
-    pub flush_count: AtomicU64,      // 刷盘次数
-    pub flush_bytes: AtomicU64,      // 刷盘消息字节数
-    pub flush_latency_us: AtomicU64, // 刷盘耗时微秒数
+pub struct BufferFlushMetrics {
+    pub flush_count: AtomicU64,              // 刷盘次数
+    pub flush_bytes: AtomicU64,              // 刷盘消息字节数
+    pub flush_latency_us: AtomicU64,         // 刷盘耗时微秒数
+    pub min_start_timestamp: Arc<AtomicU64>, // 刷盘期间最早开始时间戳（微秒）
+    pub max_end_timestamp: Arc<AtomicU64>,   // 刷盘期间最晚结束时间戳（微秒）
 }

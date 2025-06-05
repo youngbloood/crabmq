@@ -6,7 +6,7 @@ use crate::disk::{
 };
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
-use log::error;
+use log::{error, warn};
 use std::{
     path::PathBuf,
     sync::{
@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{select, sync::mpsc, time};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub struct PartitionState {
@@ -34,6 +35,7 @@ pub enum FlushState {
 
 #[derive(Clone)]
 pub struct Flusher {
+    stop: CancellationToken,
     fd_cache: Arc<FdWriterCacheAync>,
 
     partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
@@ -65,6 +67,7 @@ impl Drop for Flusher {
 
 impl Flusher {
     pub fn new(
+        stop: CancellationToken,
         partition_writer_buffer_tasks_num: usize,
         partition_writer_ptr_tasks_num: usize,
         interval: Duration,
@@ -72,11 +75,28 @@ impl Flusher {
     ) -> Self {
         let mut buffer_tasks = vec![];
         for _ in 0..partition_writer_buffer_tasks_num {
+            let _stop = stop.clone();
             let (tx, mut rx) = mpsc::channel::<(bool, Arc<PartitionWriterBuffer>)>(1);
             tokio::spawn(async move {
-                while let Some((should_sync, pwb)) = rx.recv().await {
-                    if let Err(e) = pwb.flush(should_sync).await {
-                        error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}")
+                loop {
+                    if rx.is_closed() {
+                        break;
+                    }
+                    select! {
+                        _ = _stop.cancelled() => {
+                            warn!("Flusher: partition_writer_ptr_tasks receive stop signal, exit.");
+                            break;
+                        }
+
+                        res = rx.recv() => {
+                            if res.is_none(){
+                                continue;
+                            }
+                            let (should_sync, pwb) = res.unwrap();
+                            if let Err(e) = pwb.flush(should_sync).await {
+                                error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}")
+                            }
+                        }
                     }
                 }
             });
@@ -85,12 +105,30 @@ impl Flusher {
 
         let mut ptr_tasks = vec![];
         for _ in 0..partition_writer_ptr_tasks_num {
+            let _stop = stop.clone();
             let (tx, mut rx) = mpsc::channel::<(bool, PathBuf, Arc<WriterPositionPtr>)>(1);
             let _fd_cache = fd_cache.clone();
+
             tokio::spawn(async move {
-                while let Some((should_sync, p, pwp)) = rx.recv().await {
-                    if let Err(e) = pwp.save_to(should_sync).await {
-                        error!("pwp.save_to err: {e:?}");
+                loop {
+                    if rx.is_closed() {
+                        break;
+                    }
+                    select! {
+                        _ = _stop.cancelled() => {
+                            warn!("Flusher: partition_writer_ptr_tasks receive stop signal, exit.");
+                            break;
+                        }
+
+                        res = rx.recv() => {
+                            if res.is_none(){
+                                continue;
+                            }
+                            let (should_sync, _p, pwp) = res.unwrap();
+                            if let Err(e) = pwp.save_to(should_sync).await {
+                                error!("pwp.save_to err: {e:?}");
+                            }
+                        }
                     }
                 }
             });
@@ -98,6 +136,7 @@ impl Flusher {
         }
 
         Self {
+            stop,
             fd_cache,
             partition_writer_buffers: Arc::new(DashMap::new()),
             partition_states: Arc::default(),
@@ -115,8 +154,8 @@ impl Flusher {
     pub async fn run(&mut self, mut flush_signal: mpsc::Receiver<()>) {
         let mut state_updater = tokio::time::interval(Duration::from_secs(5));
         let mut hot_ticker = time::interval(self.interval);
-        let mut warm_ticker = time::interval(self.interval * 10);
-        let mut cold_ticker = time::interval(self.interval * 10 * 10);
+        let mut warm_ticker = time::interval(self.interval * 10 * 10);
+        let mut cold_ticker = time::interval(self.interval * 10 * 10 * 10);
         loop {
             select! {
                 _ = hot_ticker.tick() => {
@@ -139,6 +178,11 @@ impl Flusher {
                 // 状态更新
                 _ = state_updater.tick() => {
                     self.update_partition_states();
+                }
+
+                _ = self.stop.cancelled() => {
+                    warn!("Flusher: receive stop signal, exit.");
+                    break;
                 }
             }
         }
@@ -298,6 +342,12 @@ impl Flusher {
                 flush_latency_us: Arc::new(AtomicU64::new(
                     metrics.flush_latency_us.load(Ordering::Relaxed),
                 )),
+                min_start_timestamp: Arc::new(AtomicU64::new(
+                    metrics.min_start_timestamp.load(Ordering::Relaxed),
+                )),
+                max_end_timestamp: Arc::new(AtomicU64::new(
+                    metrics.max_end_timestamp.load(Ordering::Relaxed),
+                )),
             });
         }
         result
@@ -315,7 +365,9 @@ impl Flusher {
 #[derive(Default, Clone, Debug)]
 pub struct PartitionMetrics {
     pub partition_path: PathBuf,
-    pub flush_count: Arc<AtomicU64>,      // 刷盘次数
-    pub flush_bytes: Arc<AtomicU64>,      // 刷盘字节数
-    pub flush_latency_us: Arc<AtomicU64>, // 刷盘耗时微秒数
+    pub flush_count: Arc<AtomicU64>,         // 刷盘次数
+    pub flush_bytes: Arc<AtomicU64>,         // 刷盘字节数
+    pub flush_latency_us: Arc<AtomicU64>,    // 刷盘耗时微秒数
+    pub min_start_timestamp: Arc<AtomicU64>, // 刷盘期间最早开始时间戳（微秒）
+    pub max_end_timestamp: Arc<AtomicU64>,   // 刷盘期间最晚结束时间戳（微秒）
 }

@@ -2842,6 +2842,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage_bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "governor",
+ "rand 0.9.1",
+ "storagev2",
+ "tokio",
+]
+
+[[package]]
 name = "storagev2"
 version = "0.1.0"
 dependencies = [

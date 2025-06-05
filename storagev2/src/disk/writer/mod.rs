@@ -15,10 +15,12 @@ use buffer::PartitionWriterBuffer;
 use bytes::Bytes;
 use dashmap::DashMap;
 use flusher::Flusher;
-use log::error;
+use log::{error, warn};
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::select;
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 
@@ -40,8 +42,17 @@ pub struct DiskStorageWriter {
     topic_create_locks: Arc<DashMap<String, Mutex<()>>>,
     fd_cache: Arc<FdWriterCacheAync>,
     flusher: Flusher,
+    stop: CancellationToken,
 
+    // NOTE: 会导致所有分区刷盘，慎用
     _flush_sender: mpsc::Sender<()>,
+}
+
+impl Drop for DiskStorageWriter {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        println!("xxxxxxxx  DiskStorageWriter Dropped, stop cancel xxxxxxxxxxx");
+    }
 }
 
 impl DiskStorageWriter {
@@ -52,8 +63,10 @@ impl DiskStorageWriter {
             cfg.fd_cache_size as usize,
         ));
 
+        let stop = CancellationToken::new();
         // 启动刷盘守护任务
         let flusher = Flusher::new(
+            stop.clone(),
             cfg.flusher_partition_writer_buffer_tasks_num,
             cfg.flusher_partition_writer_ptr_tasks_num,
             Duration::from_millis(cfg.flusher_period),
@@ -69,6 +82,7 @@ impl DiskStorageWriter {
             topic_create_locks: Arc::default(),
             fd_cache,
             flusher,
+            stop,
             _flush_sender: flush_sender,
         })
     }
@@ -175,6 +189,7 @@ impl DiskStorageWriter {
         let conf = self.conf.clone();
         let max_size_per_file = self.conf.max_size_per_file;
         let _fd_cache = self.fd_cache.clone();
+        let _stop = self.stop.clone();
         tokio::spawn(async move {
             // 先加载/创建 PartitionWriterPtr
             let dir = ts.dir.join(format!("{}", partition_id));
@@ -220,8 +235,16 @@ impl DiskStorageWriter {
                     let buffer_size_half = conf.partition_writer_buffer_size / 2 + 1;
                     let mut datas: Vec<Bytes> = Vec::with_capacity(buffer_size_half);
                     loop {
-                        let s = rx_partition.recv_many(&mut datas, buffer_size_half).await;
-                        let _ = pwb.write_batch(&datas[..s]).await;
+                        select! {
+                            _ = _stop.cancelled() => {
+                                warn!("DiskStorageWriter: get_partition_writer receive stop signal, exit");
+                                break;
+                            }
+
+                            s = rx_partition.recv_many(&mut datas, buffer_size_half) => {
+                                let _ = pwb.write_batch(&datas[..s]).await;
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -448,15 +471,54 @@ mod test {
             max_rate_mbps: usize,      // 降低最大测试速率
         }
 
-        let args = vec![TestArgs {
-            partition_count: 1,
-            message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(5),
-            current_rate: 50,
-            rate_step: 50,
-            test_duration: Duration::from_secs(5),
-            max_rate_mbps: 2000,
-        }];
+        // 测试时修改参数
+        let args = vec![
+            // TestArgs {
+            //     partition_count: 1,
+            //     message_size: 10 * 1024,
+            //     warmup_duration: Duration::from_secs(5),
+            //     current_rate: 50,
+            //     rate_step: 50,
+            //     test_duration: Duration::from_secs(5),
+            //     max_rate_mbps: 300,
+            // },
+            // TestArgs {
+            //     partition_count: 10,
+            //     message_size: 10 * 1024,
+            //     warmup_duration: Duration::from_secs(5),
+            //     current_rate: 50,
+            //     rate_step: 50,
+            //     test_duration: Duration::from_secs(5),
+            //     max_rate_mbps: 1000,
+            // },
+            // TestArgs {
+            //     partition_count: 30,
+            //     message_size: 10 * 1024,
+            //     warmup_duration: Duration::from_secs(5),
+            //     current_rate: 50,
+            //     rate_step: 50,
+            //     test_duration: Duration::from_secs(5),
+            //     max_rate_mbps: 1000,
+            // },
+            TestArgs {
+                partition_count: 50,
+                message_size: 10 * 1024,
+                warmup_duration: Duration::from_secs(5),
+                current_rate: 50,
+                rate_step: 50,
+                test_duration: Duration::from_secs(5),
+                max_rate_mbps: 1000,
+            },
+            TestArgs {
+                partition_count: 100,
+                message_size: 10 * 1024,
+                warmup_duration: Duration::from_secs(5),
+                current_rate: 50,
+                rate_step: 50,
+                test_duration: Duration::from_secs(5),
+                max_rate_mbps: 1000,
+            },
+        ];
 
         // 测试不同分区配置
         for arg in args {
@@ -562,13 +624,13 @@ mod test {
         // 速率测试控制
         let mut results = vec![];
 
-        println!("\n{:-^120}", " 开始动态速率测试 (多分区) ");
+        println!("\n{:-^94}", " 开始动态速率测试 (多分区) ");
         println!(
-            "| 速率(MB/s) | 测试时长(s) | 发送量(MB) | 落盘量(MB)(≈吞吐量*测试时长) | 平均延迟(ms) | 吞吐量(MB/s) | 分区数 |",
+            "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|平均每分区吞吐量(MB/s)|分区数|",
         );
         println!(
-            "|{:-<12}|{:-<13}|{:-<12}|{:-<30}|{:-<14}|{:-<14}|{:-<8}|",
-            "", "", "", "", "", "", ""
+            "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<22}|{:-<6}|",
+            "", "", "", "", "", "", "", "",
         );
 
         for target_rate in (current_rate..=max_rate_mbps).step_by(rate_step) {
@@ -637,6 +699,7 @@ mod test {
             }
 
             let start_time = Instant::now();
+            store.reset_metrics().await?;
             barrier.wait().await;
             // 等待测试结束
             futures::future::join_all(send_handles).await;
@@ -674,6 +737,10 @@ mod test {
             let mut total_flush_count = 0;
             let mut total_flush_latency_us = 0;
 
+            // 墙钟时间(wall-clock time)
+            let mut min_start_timestamp = u64::MAX;
+            let mut max_end_timestamp = 0;
+
             for end_metric in &end_metrics {
                 if let Some(start_metric) = start_metrics
                     .iter()
@@ -691,10 +758,14 @@ mod test {
                         - start_metric.flush_latency_us.load(Ordering::Relaxed);
                     total_flush_latency_us += flush_latency_us;
 
-                    // println!(
-                    //     "分区 {:?}: 刷盘量={}字节",
-                    //     end_metric.partition_path, flushed_bytes
-                    // );
+                    let start_ts = end_metric.min_start_timestamp.load(Ordering::Relaxed);
+                    let end_ts = end_metric.max_end_timestamp.load(Ordering::Relaxed);
+                    if start_ts > 0 {
+                        min_start_timestamp = min_start_timestamp.min(start_ts);
+                    }
+                    if end_ts > 0 {
+                        max_end_timestamp = max_end_timestamp.max(end_ts);
+                    }
                 } else {
                     println!(
                         "警告: 找不到分区 {:?} 的起始指标",
@@ -705,11 +776,23 @@ mod test {
 
             // 计算性能指标
             let actual_rate = (sent_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64();
-            let flush_throughput =
-                (total_flushed_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64();
+            // NOTE: 单分区平均吞吐量 = 总落盘字节数 / 总的落盘耗时
+            // NOTE: 如果公式：总吞吐量 = 单分区平均吞吐量 * 分区数 : 这种计算方式不准确。因为墙钟时间原因: 即1个分区刷盘耗时1s, 10个分区刷盘可能还是1s
+            let avg_partition_flush_throughput = (total_flushed_bytes as f64 / 1024.0 / 1024.0)
+                / Duration::from_micros(total_flush_latency_us).as_secs_f64();
             let avg_flush_latency = if total_flush_count > 0 {
                 // 微秒 转 毫秒
                 (total_flush_latency_us as f64 / total_flush_count as f64) / 1000.0
+            } else {
+                0.0
+            };
+
+            // 计算基于墙钟时间的吞吐量（该吞吐量才是真实的数据落盘吞吐量）
+            // wall_clock_time_us: 墙钟耗时，单位：微秒
+            let wall_clock_time_us = max_end_timestamp.saturating_sub(min_start_timestamp);
+            let wall_clock_throughput = if wall_clock_time_us > 0 {
+                (total_flushed_bytes as f64 / 1024.0 / 1024.0)
+                    / (wall_clock_time_us as f64 / 1_000_000.0)
             } else {
                 0.0
             };
@@ -718,46 +801,50 @@ mod test {
             results.push((
                 target_rate,
                 actual_rate,
-                flush_throughput,
+                wall_clock_throughput,
                 avg_flush_latency,
             ));
 
             // 打印结果
             println!(
-                "|{:>12.1}|{:>13.1}|{:>12.1}|{:>30.1}|{:>14.1}|{:>14.1}|{:>8}|",
+                "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>22.1}|{:>6}|",
                 target_rate as f64,
                 test_duration.as_secs_f64(),
                 sent_bytes as f64 / 1024.0 / 1024.0,
                 total_flushed_bytes as f64 / 1024.0 / 1024.0,
-                avg_flush_latency,
-                flush_throughput,
+                wall_clock_time_us as f64 / 1_000.0,
+                wall_clock_throughput,
+                avg_partition_flush_throughput,
                 partition_count
             );
         }
 
         // 分析结果找到瓶颈点
-        let mut max_throughput = 0.0;
+        let mut max_wall_clock_throughput = 0.0;
         let mut optimal_rate = 0.0;
 
         for (target_rate, _, throughput, _) in &results {
-            if *throughput > max_throughput {
-                max_throughput = *throughput;
+            if *throughput > max_wall_clock_throughput {
+                max_wall_clock_throughput = *throughput;
                 optimal_rate = *target_rate as f64;
             }
         }
 
-        println!("\n{:-^120}", " 测试结果摘要 ");
-        println!("最大落盘吞吐量: {:.2} MB/s", max_throughput);
+        println!("\n{:-^94}", " 测试结果摘要 ");
+        println!("最大落盘吞吐量: {:.2} MB/s", max_wall_clock_throughput);
         println!("最佳发送速率: {:.2} MB/s", optimal_rate);
         println!("分区数量: {}", partition_count);
         println!("消息大小: {} KB", message_size / 1024);
 
         // 可视化结果
         println!("\n速率与吞吐量关系:");
-        for (target_rate, _, throughput, _) in &results {
-            let bar_len = (throughput / 50.0).round() as usize;
+        for (target_rate, _, wall_clock_throughput, _) in &results {
+            let bar_len = (wall_clock_throughput / 50.0).round() as usize;
             let bar = "█".repeat(bar_len);
-            println!("{:>5} MB/s: {:.1} MB/s |{}", target_rate, throughput, bar);
+            println!(
+                "{:>5} MB/s: {:.1} MB/s |{}",
+                target_rate, wall_clock_throughput, bar
+            );
         }
 
         println!("\n清除测试数据...");
@@ -769,17 +856,18 @@ mod test {
 
     #[test]
     fn format_form() {
+        println!("\n{:-^94}", " 开始动态速率测试 (多分区) ");
         println!(
-            "| 速率(MB/s) | 测试时长(s) | 发送量(MB) | 落盘量(MB)(≈吞吐量*测试时长) | 平均延迟(ms) | 吞吐量(MB/s) | 分区数 |",
+            "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|平均每分区吞吐量(MB/s)|分区数|",
         );
         println!(
-            "|{:-<12}|{:-<13}|{:-<12}|{:-<30}|{:-<14}|{:-<14}|{:-<8}|",
-            "", "", "", "", "", "", ""
+            "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<22}|{:-<6}|",
+            "", "", "", "", "", "", "", "",
         );
-
         println!(
-            "|{:>12.1}|{:>13.1}|{:>12.1}|{:>30.1}|{:>14.1}|{:>14.1}|{:>8}|",
-            50.0, 5.0, 250.0, 300.2, 53.1, 60.0, 1
+            "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>22.1}|{:>6}|",
+            50.0, 5.0, 250.0, 300.2, 53.1, 60.0, 60.0, 1
         );
+        println!("\n{:-^100}", " 测试结果摘要 ");
     }
 }
