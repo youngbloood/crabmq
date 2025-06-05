@@ -1,11 +1,11 @@
 use crate::disk::{
     Config,
-    fd_cache::{FdWriterCacheAync, FileWriterHandlerAsync, create_writer_fd},
+    fd_cache::{FileWriterHandlerAsync, create_writer_fd_with_prealloc},
     meta::{WriterPositionPtr, gen_record_filename},
-    writer::flusher::{FlushState, Flusher},
+    writer::flusher::Flusher,
 };
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use common::dir_recursive;
 use crossbeam::queue::SegQueue;
 use log::error;
@@ -17,13 +17,9 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-    u64,
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    io::{AsyncSeekExt as _, AsyncWriteExt as _},
-    sync::RwLock,
-};
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 
 #[derive(Clone)]
 pub struct PartitionWriterBuffer {
@@ -53,7 +49,7 @@ pub struct PartitionWriterBuffer {
 impl PartitionWriterBuffer {
     pub async fn new(
         dir: PathBuf,
-        config: &Config,
+        conf: &Config,
         write_ptr: Arc<WriterPositionPtr>,
         flusher: Flusher,
     ) -> Result<Self> {
@@ -88,10 +84,11 @@ impl PartitionWriterBuffer {
         Ok(Self {
             dir: dir.clone(),
             current_factor: Arc::new(factor),
-            current_fd: FileWriterHandlerAsync::new(create_writer_fd(
+            current_fd: FileWriterHandlerAsync::new(create_writer_fd_with_prealloc(
                 &dir.join(gen_record_filename(max_file)),
+                conf.max_size_per_file,
             )?),
-            conf: config.clone(),
+            conf: conf.clone(),
             buffer: Arc::new(SegQueue::new()),
             write_ptr,
             has_create_next_record_file: Arc::default(),
@@ -109,7 +106,7 @@ impl PartitionWriterBuffer {
             self.current_factor.load(Ordering::Relaxed),
         ));
 
-        match create_writer_fd(&next_filename) {
+        match create_writer_fd_with_prealloc(&next_filename, self.conf.max_size_per_file) {
             Ok(async_file) => {
                 self.current_fd.reset(async_file).await;
                 self.write_ptr.reset_with_filename(next_filename).await;
@@ -205,18 +202,17 @@ impl PartitionWriterBuffer {
         let mut fd_wl = self.current_fd.write().await;
         // 直接使用队列数据，避免拷贝
         let mut position = self.write_ptr.get_flush_offset();
+        fd_wl.seek(SeekFrom::Start(position)).await?;
         let mut flushed_bytes = 0_u64;
         let mut flush_count = 0;
         while let Some(data) = self.buffer.pop() {
             let len = data.len();
             flush_count += 1;
             // 先写入长度头
-            fd_wl.seek(SeekFrom::Start(position)).await?;
             fd_wl.write_u64(len as u64).await?;
             position += 8;
 
             // 直接写入数据（零拷贝）
-            fd_wl.seek(SeekFrom::Start(position)).await?;
             fd_wl.write_all(&data).await?;
             position += len as u64;
             flushed_bytes += len as u64 + 8;

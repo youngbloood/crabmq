@@ -60,13 +60,14 @@ impl Config {
 pub fn default_config() -> Config {
     Config {
         storage_dir: PathBuf::from("./messages"),
-        flusher_period: 50, // 50ms
+        flusher_period: 50,              // 50ms
+        flusher_factor: 1024 * 1024 * 4, // 4M
         flusher_partition_writer_buffer_tasks_num: 64,
         flusher_partition_writer_ptr_tasks_num: 64,
         partition_writer_buffer_size: 100,
-        flusher_factor: 1024 * 1024 * 4,               // 4M
-        max_msg_num_per_file: 1024 * 1024 * 1024 * 15, // 15G
-        max_size_per_file: 1024 * 1024 * 1024 * 15 * 5,
+
+        max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
+        max_size_per_file: 1024 * 1024 * 1024, // 1G
         compress_type: 0,
         fd_cache_size: 256,
         create_next_record_file_threshold: 80,

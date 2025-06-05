@@ -5,7 +5,7 @@ use crossbeam::sync::ShardedLock;
 use lru::LruCache;
 use std::{
     fs::OpenOptions,
-    io::Seek,
+    io::{Seek, SeekFrom},
     num::NonZeroUsize,
     ops::Deref,
     path::{Path, PathBuf},
@@ -183,9 +183,30 @@ pub fn create_writer_fd(p: &Path) -> Result<AsyncFile> {
     }
 
     // 先创建写文件句柄，确保文件存在
+    let write_fd = write_opt
+        .open(p)
+        .map_err(|e| anyhow::anyhow!("Failed to open write file: {}", e))?;
+    Ok(AsyncFile::from_std(write_fd))
+}
+
+pub fn create_writer_fd_with_prealloc(p: &Path, alloc_size: u64) -> Result<AsyncFile> {
+    let mut write_opt = OpenOptions::new();
+    write_opt.write(true);
+    let mut create = false;
+    if !check_exist(p) {
+        // 当前文件不存在，则创建
+        write_opt.create(true);
+        create = true;
+    }
+
+    // 先创建写文件句柄，确保文件存在
     let mut write_fd = write_opt
         .open(p)
         .map_err(|e| anyhow::anyhow!("Failed to open write file: {}", e))?;
+    if create && alloc_size > 0 {
+        preallocate(&write_fd, alloc_size)?;
+        write_fd.seek(SeekFrom::Start(0))?;
+    }
     Ok(AsyncFile::from_std(write_fd))
 }
 

@@ -249,6 +249,7 @@ impl DiskStorageWriter {
                 }
                 Err(e) => {
                     error!("get_partition_writer PartitionWriterBuffer new err: {e:?}");
+                    println!("get_partition_writer PartitionWriterBuffer new err: {e:?}");
                     rx_partition.close();
                 }
             };
@@ -473,33 +474,33 @@ mod test {
 
         // 测试时修改参数
         let args = vec![
-            // TestArgs {
-            //     partition_count: 1,
-            //     message_size: 10 * 1024,
-            //     warmup_duration: Duration::from_secs(5),
-            //     current_rate: 50,
-            //     rate_step: 50,
-            //     test_duration: Duration::from_secs(5),
-            //     max_rate_mbps: 300,
-            // },
-            // TestArgs {
-            //     partition_count: 10,
-            //     message_size: 10 * 1024,
-            //     warmup_duration: Duration::from_secs(5),
-            //     current_rate: 50,
-            //     rate_step: 50,
-            //     test_duration: Duration::from_secs(5),
-            //     max_rate_mbps: 1000,
-            // },
-            // TestArgs {
-            //     partition_count: 30,
-            //     message_size: 10 * 1024,
-            //     warmup_duration: Duration::from_secs(5),
-            //     current_rate: 50,
-            //     rate_step: 50,
-            //     test_duration: Duration::from_secs(5),
-            //     max_rate_mbps: 1000,
-            // },
+            TestArgs {
+                partition_count: 1,
+                message_size: 10 * 1024,
+                warmup_duration: Duration::from_secs(5),
+                current_rate: 50,
+                rate_step: 50,
+                test_duration: Duration::from_secs(5),
+                max_rate_mbps: 300,
+            },
+            TestArgs {
+                partition_count: 10,
+                message_size: 10 * 1024,
+                warmup_duration: Duration::from_secs(5),
+                current_rate: 50,
+                rate_step: 50,
+                test_duration: Duration::from_secs(5),
+                max_rate_mbps: 1000,
+            },
+            TestArgs {
+                partition_count: 30,
+                message_size: 10 * 1024,
+                warmup_duration: Duration::from_secs(5),
+                current_rate: 50,
+                rate_step: 50,
+                test_duration: Duration::from_secs(5),
+                max_rate_mbps: 1000,
+            },
             TestArgs {
                 partition_count: 50,
                 message_size: 10 * 1024,
