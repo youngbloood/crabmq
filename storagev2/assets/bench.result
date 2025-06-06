@@ -1,9 +1,40 @@
-测试环境: MacOS: 14.7.6 (23H626), 500G SSD.
+测试环境: 
+MacOS: 14.7.6 (23H626)
+CPU: 2.3 GHz 四核Intel Core i5
+Memory: 16 GB 2133 MHz LPDDR3
+Disk: 
+NVMExpress:
+    Apple SSD Controller:
+        APPLE SSD AP0512M:
+          Capacity: 500.28 GB (500,277,792,768 bytes)
+          TRIM Support: Yes
+          Model: APPLE SSD AP0512M
+          Revision: 1310
+          Serial Number: C029153008JJJ5913
+          Link Width: x4
+          Link Speed: 8.0 GT/s
+          Detachable Drive: No
+          BSD Name: disk0
+          Partition Map Type: GPT (GUID Partition Table)
+          Removable Media: No
+          S.M.A.R.T. status: Verified
+          Volumes:
+            EFI:
+              Capacity: 314.6 MB (314,572,800 bytes)
+              File System: MS-DOS FAT32
+              BSD Name: disk0s1
+              Content: EFI
+              Volume UUID: E783267B-A4C3-3556-B751-DBED770EB996
+            macos - 数据:
+              Capacity: 499.96 GB (499,963,174,912 bytes)
+              BSD Name: disk0s2
+              Content: Apple_APFS
+              
 
 执行`cargo test format_form -- --show-output --nocapture`得出结果:
 
 
-起始速度: 200 MB/s, 步长增速: 150 MB/s, 单步持续时长: 20s, 最大速率: 1200 MB/s
+1. 起始速度: 200 MB/s, 步长增速: 150 MB/s, 单步持续时长: 20s, 最大速率: 1200 MB/s
 [预热] 开始预热 10000 个分区...
 [预热] 完成
 等待分区初始化...
@@ -36,7 +67,9 @@
  1100 MB/s: 504.0 MB/s |██████████
 
 清除测试数据...
-起始速度: 200 MB/s, 步长增速: 100 MB/s, 单步持续时长: 17s, 最大速率: 1200 MB/s
+
+
+2. 起始速度: 200 MB/s, 步长增速: 100 MB/s, 单步持续时长: 17s, 最大速率: 1200 MB/s
 [预热] 开始预热 5000 个分区...
 [预热] 完成
 等待分区初始化...
@@ -76,8 +109,10 @@
  1100 MB/s: 807.0 MB/s |████████████████
  1200 MB/s: 364.0 MB/s |███████
 
+清除测试数据...
 
-起始速度: 200 MB/s, 步长增速: 100 MB/s, 单步持续时长: 15s, 最大速率: 1200 MB/s
+
+3. 起始速度: 200 MB/s, 步长增速: 100 MB/s, 单步持续时长: 15s, 最大速率: 1200 MB/s
 [预热] 开始预热 2000 个分区...
 [预热] 完成
 等待分区初始化...
@@ -119,7 +154,9 @@ test disk::writer::test::run_flush_benchmark has been running for over 60 second
  1200 MB/s: 979.2 MB/s |████████████████████
 
 清除测试数据...
-起始速度: 200 MB/s, 步长增速: 100 MB/s, 单步持续时长: 12s, 最大速率: 1200 MB/s
+
+
+4. 起始速度: 200 MB/s, 步长增速: 100 MB/s, 单步持续时长: 12s, 最大速率: 1200 MB/s
 [预热] 开始预热 1000 个分区...
 [预热] 完成
 等待分区初始化...
@@ -160,7 +197,9 @@ test disk::writer::test::run_flush_benchmark has been running for over 60 second
  1200 MB/s: 717.6 MB/s |██████████████
 
 清除测试数据...
-起始速度: 100 MB/s, 步长增速: 100 MB/s, 单步持续时长: 7s, 最大速率: 1000 MB/s
+
+
+5. 起始速度: 100 MB/s, 步长增速: 100 MB/s, 单步持续时长: 7s, 最大速率: 1000 MB/s
 [预热] 开始预热 500 个分区...
 [预热] 完成
 等待分区初始化...
