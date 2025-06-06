@@ -10,7 +10,7 @@ use tokio::{fs, fs::File as AsyncFile, sync::RwLock};
 
 use crate::disk::fd_cache::create_writer_fd;
 
-use super::fd_cache::FileWriterHandlerAsync;
+use super::fd_cache::FileHandlerWriterAsync;
 
 pub const WRITER_PTR_FILENAME: &str = ".writer.ptr";
 pub const TOPIC_META: &str = "meta.bin";
@@ -24,14 +24,14 @@ struct SerializableTopicMeta {
 // Topic 元数据
 #[derive(Debug, Clone)]
 pub struct TopicMeta {
-    fd: FileWriterHandlerAsync,
+    fd: FileHandlerWriterAsync,
     pub keys: Arc<DashMap<String, u32>>, // key -> partition_id
 }
 
 impl TopicMeta {
     pub fn with(f: AsyncFile) -> Self {
         Self {
-            fd: FileWriterHandlerAsync::new(f),
+            fd: FileHandlerWriterAsync::new(f),
             keys: Arc::default(),
         }
     }
@@ -39,7 +39,7 @@ impl TopicMeta {
     pub async fn load(path: &PathBuf) -> Result<Self> {
         // 读取并解析为中间结构
         let data = fs::read_to_string(path).await?;
-        let fd = FileWriterHandlerAsync::new(create_writer_fd(path)?);
+        let fd = FileHandlerWriterAsync::new(create_writer_fd(path)?);
         if data.is_empty() {
             return Ok(Self {
                 fd,
@@ -127,12 +127,12 @@ impl TopicMeta {
 
 #[derive(Debug, Clone)]
 pub struct WriterPositionPtr {
-    fd: FileWriterHandlerAsync, // 存放该 ptr 信息的文件
+    fd: FileHandlerWriterAsync, // 存放该 ptr 信息的文件
     // 写入指针文件：当前写的 record 文件
     filename: Arc<RwLock<PathBuf>>,
     // 写入指针文件：当前文件的写位置
     offset: Arc<AtomicU64>,
-    // 写入指针文件：当前文件消息数量
+    // 写入指针文件：当前文件含有的消息数量
     current_count: Arc<AtomicU64>,
 
     // 刷盘写的偏移量
@@ -151,7 +151,7 @@ pub struct WriterPositionPtrSnapshot {
 
 impl WriterPositionPtr {
     pub fn new(ptr_filename: PathBuf, record_filename: PathBuf) -> Result<Self> {
-        let fd = FileWriterHandlerAsync::new(create_writer_fd(&ptr_filename)?);
+        let fd = FileHandlerWriterAsync::new(create_writer_fd(&ptr_filename)?);
         Ok(Self {
             fd,
             filename: Arc::new(RwLock::new(record_filename)),
@@ -213,7 +213,7 @@ impl WriterPositionPtr {
 
     pub async fn load(path: &PathBuf) -> Result<Self> {
         let data = tokio::fs::read_to_string(path).await?;
-        let fd = FileWriterHandlerAsync::new(create_writer_fd(path)?);
+        let fd = FileHandlerWriterAsync::new(create_writer_fd(path)?);
         if data.is_empty() {
             return Ok(WriterPositionPtr {
                 filename: Arc::new(RwLock::new(
@@ -232,18 +232,12 @@ impl WriterPositionPtr {
             fd,
             offset: Arc::new(AtomicU64::new(sp.offset)),
             current_count: Arc::new(AtomicU64::new(sp.current_count)),
+            // 初始化为 offset
             flush_offset: Arc::new(AtomicU64::new(sp.offset)),
         })
     }
 
-    // pub async fn save(&self, path: &PathBuf) -> Result<()> {
-    //     let json_data = serde_json::to_string_pretty(&self.snapshot().await)?;
-    //     tokio::fs::write(path, json_data).await?;
-
-    //     Ok(())
-    // }
-
-    pub async fn save_to(&self, should_sync: bool) -> Result<()> {
+    pub async fn save(&self, fsync: bool) -> Result<()> {
         let json_data = serde_json::to_string_pretty(&self.snapshot().await)?;
         let mut wl = self.fd.write().await;
         // 截断文件，确保清除旧内容
@@ -251,7 +245,7 @@ impl WriterPositionPtr {
         // 将指针移到开头
         wl.seek(std::io::SeekFrom::Start(0)).await?;
         wl.write_all(json_data.as_bytes()).await?;
-        if should_sync {
+        if fsync {
             let _fd = self.fd.clone();
             tokio::spawn(async move {
                 let _ = _fd.write().await.sync_data().await;

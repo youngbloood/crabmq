@@ -2874,6 +2874,7 @@ dependencies = [
  "libc",
  "log",
  "lru 0.14.0",
+ "murmur3",
  "notify",
  "rand 0.9.1",
  "regex",

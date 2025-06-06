@@ -18,6 +18,8 @@ use std::{
 use tokio::{select, sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 
+const FLUSH_CHUNK_SIZE: usize = 50;
+
 #[derive(Clone, Debug)]
 pub struct PartitionState {
     pub last_write_time: Instant,
@@ -33,6 +35,9 @@ pub enum FlushState {
     Stale, // 需要强制刷盘的分区
 }
 
+type FlushUnitPartitionWriterBuffer = (bool, Vec<Arc<PartitionWriterBuffer>>);
+type FlushUnitWriterPositionPtr = (bool, Vec<Arc<WriterPositionPtr>>);
+
 #[derive(Clone)]
 pub struct Flusher {
     stop: CancellationToken,
@@ -47,11 +52,11 @@ pub struct Flusher {
 
     partition_writer_buffer_tasks_num: usize,
     // 存储 PartitionWriterBuffer 异步刷盘任务的 sender
-    partition_writer_buffer_tasks: Arc<Vec<mpsc::Sender<(bool, Arc<PartitionWriterBuffer>)>>>,
+    partition_writer_buffer_tasks: Arc<Vec<mpsc::Sender<FlushUnitPartitionWriterBuffer>>>,
 
     partition_writer_ptr_tasks_num: usize,
     // 存储 PartitionWriterPtr 异步刷盘任务的 sender
-    partition_writer_ptr_tasks: Arc<Vec<mpsc::Sender<(bool, PathBuf, Arc<WriterPositionPtr>)>>>,
+    partition_writer_ptr_tasks: Arc<Vec<mpsc::Sender<FlushUnitWriterPositionPtr>>>,
 }
 
 impl Drop for Flusher {
@@ -76,7 +81,7 @@ impl Flusher {
         let mut buffer_tasks = vec![];
         for _ in 0..partition_writer_buffer_tasks_num {
             let _stop = stop.clone();
-            let (tx, mut rx) = mpsc::channel::<(bool, Arc<PartitionWriterBuffer>)>(1);
+            let (tx, mut rx) = mpsc::channel::<(bool, Vec<Arc<PartitionWriterBuffer>>)>(1);
             tokio::spawn(async move {
                 loop {
                     if rx.is_closed() {
@@ -92,9 +97,11 @@ impl Flusher {
                             if res.is_none(){
                                 continue;
                             }
-                            let (should_sync, pwb) = res.unwrap();
-                            if let Err(e) = pwb.flush(should_sync).await {
-                                error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}")
+                            let (fsync, pwbs) = res.unwrap();
+                            for pwb in pwbs {
+                                if let Err(e) = pwb.flush(fsync).await {
+                                    error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}")
+                                }
                             }
                         }
                     }
@@ -106,7 +113,7 @@ impl Flusher {
         let mut ptr_tasks = vec![];
         for _ in 0..partition_writer_ptr_tasks_num {
             let _stop = stop.clone();
-            let (tx, mut rx) = mpsc::channel::<(bool, PathBuf, Arc<WriterPositionPtr>)>(1);
+            let (tx, mut rx) = mpsc::channel::<(bool, Vec<Arc<WriterPositionPtr>>)>(1);
             let _fd_cache = fd_cache.clone();
 
             tokio::spawn(async move {
@@ -124,9 +131,11 @@ impl Flusher {
                             if res.is_none(){
                                 continue;
                             }
-                            let (should_sync, _p, pwp) = res.unwrap();
-                            if let Err(e) = pwp.save_to(should_sync).await {
-                                error!("pwp.save_to err: {e:?}");
+                            let (fsync, pwps) = res.unwrap();
+                            for pwp in pwps {
+                                if let Err(e) = pwp.save(fsync).await {
+                                    error!("pwp.save_to err: {e:?}");
+                                }
                             }
                         }
                     }
@@ -155,7 +164,7 @@ impl Flusher {
         let mut state_updater = tokio::time::interval(Duration::from_secs(5));
         let mut hot_ticker = time::interval(self.interval);
         let mut warm_ticker = time::interval(self.interval * 10 * 10);
-        let mut cold_ticker = time::interval(self.interval * 10 * 10 * 10);
+        let mut cold_ticker = time::interval(self.interval * 10 * 10 * 2);
         loop {
             select! {
                 _ = hot_ticker.tick() => {
@@ -245,7 +254,7 @@ impl Flusher {
         }
     }
 
-    pub async fn flush_topic_partition(&self, p: &PathBuf, should_sync: bool) -> Result<()> {
+    pub async fn flush_topic_partition(&self, p: &PathBuf, fsync: bool) -> Result<()> {
         let pwb = self.partition_writer_buffers.get(p);
         if pwb.is_none() {
             return Err(anyhow!(
@@ -255,13 +264,13 @@ impl Flusher {
         let pwb = pwb.unwrap();
         let idx = rand::random::<u32>() as usize;
         self.partition_writer_buffer_tasks[idx % self.partition_writer_buffer_tasks_num]
-            .send((should_sync, pwb.value().clone()))
+            .send((fsync, vec![pwb.value().clone()]))
             .await?;
         Ok(())
     }
 
-    // should_sync = false 时，交给操作系统刷脏页落盘
-    async fn flush_topic_meta_and_partition_writer_ptr(&self, should_sync: bool) {
+    // fsync = false 时，交给操作系统刷脏页落盘
+    async fn flush_topic_meta_and_partition_writer_ptr(&self, fsync: bool) {
         let topic_metas: Vec<(PathBuf, TopicMeta)> = self
             .topic_metas
             .iter_mut()
@@ -274,36 +283,39 @@ impl Flusher {
         }
 
         // 处理 PartitionWriterPtr
-        let partition_writer_ptrs: Vec<(PathBuf, Arc<WriterPositionPtr>)> = self
+        let partition_writer_ptrs: Vec<Arc<WriterPositionPtr>> = self
             .partition_writer_ptrs
             .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
+            .map(|e| e.value().clone())
             .collect();
-        for (idx, (filename, pwp)) in partition_writer_ptrs.iter().enumerate() {
+
+        let chunks = partition_writer_ptrs.chunks(FLUSH_CHUNK_SIZE);
+        for chunk in chunks {
+            let idx = rand::random::<u32>() as usize;
             if let Err(e) = self.partition_writer_ptr_tasks
                 [idx % self.partition_writer_ptr_tasks_num]
-                .try_send((should_sync, filename.clone(), pwp.clone()))
+                .try_send((fsync, chunk.to_vec()))
             {
                 error!("Flusher: flush_all send PartitionWriterPtr err: {e:?}")
             }
         }
     }
 
-    // should_sync = false 时，交给操作系统刷脏页落盘
-    async fn graceful_flush_all(&self, should_sync: bool) {
+    // fsync = false 时，交给操作系统刷脏页落盘
+    async fn graceful_flush_all(&self, fsync: bool) {
         // 第一级：刷热点分区 (最近10秒内有写入)
-        self.flush_by_state(FlushState::Hot, should_sync);
+        self.flush_by_state(FlushState::Hot, fsync);
 
         // 第二级：刷温分区 (最近60秒内有写入)
-        self.flush_by_state(FlushState::Warm, should_sync);
+        self.flush_by_state(FlushState::Warm, fsync);
 
         // 第三级：刷过期分区 (超过60秒未刷)
-        self.flush_by_state(FlushState::Stale, should_sync);
+        self.flush_by_state(FlushState::Stale, fsync);
     }
 
-    // should_sync = false 时，交给操作系统刷脏页落盘
-    fn flush_by_state(&self, state: FlushState, should_sync: bool) {
-        let writers: Vec<_> = self
+    // fsync = false 时，交给操作系统刷脏页落盘
+    fn flush_by_state(&self, state: FlushState, fsync: bool) {
+        let writers: Vec<Arc<PartitionWriterBuffer>> = self
             .partition_writer_buffers
             .iter()
             .filter(|entry| {
@@ -313,12 +325,15 @@ impl Flusher {
             .map(|entry| entry.value().clone())
             .collect();
 
-        for (idx, writer) in writers.iter().enumerate() {
+        // 每个task最大批次处理 FLUSH_CHUNK_SIZE 大小的刷盘任务
+        let chunks = writers.chunks(FLUSH_CHUNK_SIZE);
+        for chunk in chunks {
             // 使用现有任务分发机制
             // let idx = /* 计算任务索引 */;
+            let idx = rand::random::<u32>() as usize;
             if let Err(e) = self.partition_writer_buffer_tasks
                 [idx % self.partition_writer_buffer_tasks_num]
-                .try_send((should_sync, writer.clone()))
+                .try_send((fsync, chunk.to_vec()))
             // 发送不成功就进入下次循环发送，不阻塞
             {
                 error!("Flush error: {:?}", e);

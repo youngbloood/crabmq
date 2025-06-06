@@ -1,25 +1,27 @@
 use crate::disk::{
     Config,
-    fd_cache::{FileWriterHandlerAsync, create_writer_fd_with_prealloc},
+    fd_cache::{FileHandlerWriterAsync, create_writer_fd_with_prealloc},
     meta::{WriterPositionPtr, gen_record_filename},
     writer::flusher::Flusher,
 };
-use anyhow::Result;
-use bytes::Bytes;
+use anyhow::{Result, anyhow};
+use bytes::{BufMut as _, Bytes, BytesMut};
 use common::dir_recursive;
 use crossbeam::queue::SegQueue;
 use log::error;
 use std::{
     ffi::OsString,
-    io::SeekFrom,
+    io::{IoSlice, SeekFrom},
+    os::fd,
     path::PathBuf,
+    ptr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 
 #[derive(Clone)]
 pub struct PartitionWriterBuffer {
@@ -29,13 +31,13 @@ pub struct PartitionWriterBuffer {
     // 当前写的文件因子：用于构成写入的目标文件
     current_factor: Arc<AtomicU64>,
 
-    current_fd: FileWriterHandlerAsync,
+    pub current_fd: FileHandlerWriterAsync,
 
     // 先将数据存入内存缓冲区
-    buffer: Arc<SegQueue<Bytes>>,
+    pub buffer: Arc<SegQueue<Bytes>>,
 
     // 写相关的位置指针
-    write_ptr: Arc<WriterPositionPtr>,
+    pub write_ptr: Arc<WriterPositionPtr>,
 
     // 是否已经预创建了下一个 record 文件
     has_create_next_record_file: Arc<AtomicBool>,
@@ -81,13 +83,28 @@ impl PartitionWriterBuffer {
             factor.fetch_add(1, Ordering::Relaxed);
         }
 
+        let max_size_per_file = if conf.partition_writer_prealloc {
+            conf.max_size_per_file
+        } else {
+            0
+        };
+
+        let current_fd = FileHandlerWriterAsync::new(create_writer_fd_with_prealloc(
+            &dir.join(gen_record_filename(max_file)),
+            max_size_per_file,
+        )?);
+
+        // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
+        current_fd
+            .write()
+            .await
+            .seek(SeekFrom::Start(write_ptr.get_flush_offset()))
+            .await?;
+
         Ok(Self {
             dir: dir.clone(),
             current_factor: Arc::new(factor),
-            current_fd: FileWriterHandlerAsync::new(create_writer_fd_with_prealloc(
-                &dir.join(gen_record_filename(max_file)),
-                conf.max_size_per_file,
-            )?),
+            current_fd,
             conf: conf.clone(),
             buffer: Arc::new(SegQueue::new()),
             write_ptr,
@@ -106,7 +123,13 @@ impl PartitionWriterBuffer {
             self.current_factor.load(Ordering::Relaxed),
         ));
 
-        match create_writer_fd_with_prealloc(&next_filename, self.conf.max_size_per_file) {
+        let max_size_per_file = if self.conf.partition_writer_prealloc {
+            self.conf.max_size_per_file
+        } else {
+            0
+        };
+
+        match create_writer_fd_with_prealloc(&next_filename, max_size_per_file) {
             Ok(async_file) => {
                 self.current_fd.reset(async_file).await;
                 self.write_ptr.reset_with_filename(next_filename).await;
@@ -149,9 +172,12 @@ impl PartitionWriterBuffer {
         }
 
         for data in batch {
+            // 写入消息长度
+            self.buffer
+                .push(Bytes::from_owner(data.len().to_be_bytes()));
+            // 写入消息
             self.buffer.push(data.clone());
         }
-
         {
             // 更新指针（减少锁次数）
             self.write_ptr.rotate_offset(total_size);
@@ -191,40 +217,34 @@ impl PartitionWriterBuffer {
         Ok(())
     }
 
-    // 仅 Flusher::new 中的 tasks 调用
-    pub async fn flush(&self, should_sync: bool) -> Result<()> {
+    // 将数据从内存刷盘
+    pub async fn flush(&self, fsync: bool) -> Result<()> {
         let start = std::time::Instant::now();
         let start_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_micros() as u64;
 
-        let mut fd_wl = self.current_fd.write().await;
-        // 直接使用队列数据，避免拷贝
-        let mut position = self.write_ptr.get_flush_offset();
-        fd_wl.seek(SeekFrom::Start(position)).await?;
         let mut flushed_bytes = 0_u64;
-        let mut flush_count = 0;
+        let mut datas = Vec::with_capacity(self.buffer.len());
+        // 数据零拷贝
         while let Some(data) = self.buffer.pop() {
-            let len = data.len();
-            flush_count += 1;
-            // 先写入长度头
-            fd_wl.write_u64(len as u64).await?;
-            position += 8;
-
-            // 直接写入数据（零拷贝）
-            fd_wl.write_all(&data).await?;
-            position += len as u64;
-            flushed_bytes += len as u64 + 8;
+            flushed_bytes += data.len() as u64;
+            datas.push(data);
         }
-        if flushed_bytes == 0 || flush_count == 0 {
+        if flushed_bytes == 0 {
             return Ok(());
+        }
+
+        let slices: Vec<IoSlice> = datas.iter().map(|v| IoSlice::new(v.as_ref())).collect();
+        let mut fd_wl = self.current_fd.write().await;
+        if let Err(e) = fd_wl.write_vectored(&slices).await {
+            return Err(anyhow!(e));
         }
         // 更新刷盘位置
         self.write_ptr.rotate_flush_offset(flushed_bytes);
-
         // 批量同步
-        if should_sync {
+        if fsync {
             let fd = self.current_fd.clone();
             tokio::spawn(async move {
                 let _ = fd.write().await.sync_data().await;

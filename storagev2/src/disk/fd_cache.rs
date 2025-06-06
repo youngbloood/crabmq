@@ -15,11 +15,11 @@ use tokio::{fs::File as AsyncFile, sync::RwLock};
 
 // 读文件句柄
 #[derive(Clone, Debug)]
-pub struct FileReaderHandlerAsync {
+pub struct FileHandlerReaderAsync {
     inner: Arc<RwLock<AsyncFile>>,
 }
 
-impl Deref for FileReaderHandlerAsync {
+impl Deref for FileHandlerReaderAsync {
     type Target = Arc<RwLock<AsyncFile>>;
 
     fn deref(&self) -> &Self::Target {
@@ -29,7 +29,7 @@ impl Deref for FileReaderHandlerAsync {
 
 #[derive(Clone, Debug)]
 pub struct FdReaderCacheAync {
-    inner: Arc<ShardedLock<LruCache<PathBuf, FileReaderHandlerAsync>>>,
+    inner: Arc<ShardedLock<LruCache<PathBuf, FileHandlerReaderAsync>>>,
 }
 
 impl FdReaderCacheAync {
@@ -41,12 +41,12 @@ impl FdReaderCacheAync {
         }
     }
 
-    pub fn get(&self, key: &Path) -> Option<FileReaderHandlerAsync> {
+    pub fn get(&self, key: &Path) -> Option<FileHandlerReaderAsync> {
         let mut wg = self.inner.write().expect("Failed to acquire write lock");
         wg.get(key).cloned()
     }
 
-    pub fn get_or_create(&self, key: &Path) -> Result<FileReaderHandlerAsync> {
+    pub fn get_or_create(&self, key: &Path) -> Result<FileHandlerReaderAsync> {
         // 第一次检查缓存
         {
             let mut wg = self.inner.write().expect("Failed to acquire write lock");
@@ -69,7 +69,7 @@ impl FdReaderCacheAync {
             .map_err(|e| anyhow::anyhow!("Failed to open read file: {}", e))?;
 
         let async_read = Arc::new(RwLock::new(AsyncFile::from_std(read_fd)));
-        let handler = FileReaderHandlerAsync { inner: async_read };
+        let handler = FileHandlerReaderAsync { inner: async_read };
 
         // 再次检查并插入缓存
         let mut wg = self.inner.write().expect("Failed to acquire write lock");
@@ -83,11 +83,11 @@ impl FdReaderCacheAync {
 
 // 写文件句柄
 #[derive(Clone, Debug)]
-pub struct FileWriterHandlerAsync {
+pub struct FileHandlerWriterAsync {
     inner: Arc<RwLock<AsyncFile>>,
 }
 
-impl Deref for FileWriterHandlerAsync {
+impl Deref for FileHandlerWriterAsync {
     type Target = Arc<RwLock<AsyncFile>>;
 
     fn deref(&self) -> &Self::Target {
@@ -95,7 +95,7 @@ impl Deref for FileWriterHandlerAsync {
     }
 }
 
-impl FileWriterHandlerAsync {
+impl FileHandlerWriterAsync {
     pub fn new(f: AsyncFile) -> Self {
         Self {
             inner: Arc::new(RwLock::new(f)),
@@ -110,7 +110,7 @@ impl FileWriterHandlerAsync {
 #[derive(Clone, Debug)]
 pub struct FdWriterCacheAync {
     prealloc_size: usize,
-    inner: Arc<ShardedLock<LruCache<PathBuf, FileWriterHandlerAsync>>>,
+    inner: Arc<ShardedLock<LruCache<PathBuf, FileHandlerWriterAsync>>>,
 }
 
 impl FdWriterCacheAync {
@@ -123,12 +123,12 @@ impl FdWriterCacheAync {
         }
     }
 
-    pub fn get(&self, key: &Path) -> Option<FileWriterHandlerAsync> {
+    pub fn get(&self, key: &Path) -> Option<FileHandlerWriterAsync> {
         let mut wg = self.inner.write().expect("Failed to acquire write lock");
         wg.get(key).cloned()
     }
 
-    pub fn get_or_create(&self, key: &Path, prealloc_size: bool) -> Result<FileWriterHandlerAsync> {
+    pub fn get_or_create(&self, key: &Path, prealloc_size: bool) -> Result<FileHandlerWriterAsync> {
         // 第一次检查缓存
         {
             let mut wg = self.inner.write().expect("Failed to acquire write lock");
@@ -162,7 +162,7 @@ impl FdWriterCacheAync {
         write_fd.seek(std::io::SeekFrom::Start(0))?;
 
         let async_write = AsyncFile::from_std(write_fd);
-        let handler = FileWriterHandlerAsync::new(async_write);
+        let handler = FileHandlerWriterAsync::new(async_write);
 
         // 再次检查并插入缓存
         let mut wg = self.inner.write().expect("Failed to acquire write lock");

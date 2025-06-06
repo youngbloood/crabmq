@@ -15,7 +15,10 @@ use buffer::PartitionWriterBuffer;
 use bytes::Bytes;
 use dashmap::DashMap;
 use flusher::Flusher;
-use log::{error, warn};
+use log::error;
+use murmur3::murmur3_32;
+use std::io::Cursor;
+use std::ops::Deref;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::select;
@@ -24,34 +27,176 @@ use tokio_util::sync::CancellationToken;
 
 const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 
-#[derive(Clone, Debug)]
+// Worker 结构
+#[derive(Clone)]
+struct Worker {
+    tx: mpsc::Sender<(String, u32, Bytes)>,
+}
+
+impl Deref for Worker {
+    type Target = mpsc::Sender<(String, u32, Bytes)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+#[derive(Clone)]
 struct TopicStorage {
     dir: PathBuf,
+    conf: DiskConfig,
+    fluhser: Flusher,
     // partition_id -> PartitionWriterBuffer
     // partition_id -> Sender
-    partitions: Arc<DashMap<u32, mpsc::Sender<Bytes>>>,
+    partitions: Arc<DashMap<u32, PartitionWriterBuffer>>,
     // 创建分区的互斥锁
     partition_create_locks: Arc<DashMap<u32, Mutex<()>>>,
     meta: TopicMeta,
 }
 
+impl TopicStorage {
+    async fn send(&self, partition_id: u32, data: Bytes) -> Result<()> {
+        let pwb = self.get_partition(partition_id).await?;
+        pwb.write_batch(&[data]).await?;
+        Ok(())
+    }
+
+    async fn get_partition(&self, partition_id: u32) -> Result<PartitionWriterBuffer> {
+        // 第一重检查：快速路径
+        if let Some(pwb) = self.partitions.get(&partition_id) {
+            return Ok(pwb.value().clone());
+        }
+
+        // 先加载/创建 PartitionWriterPtr，必须放到 _partition_lock 之外
+        let dir = self.dir.join(format!("{}", partition_id));
+        tokio::fs::create_dir_all(&dir).await?;
+
+        // 加载写指针文件
+        let writer_ptr_filename = dir.join(WRITER_PTR_FILENAME);
+        let wpp = if writer_ptr_filename.exists() {
+            WriterPositionPtr::load(&writer_ptr_filename).await?
+        } else {
+            WriterPositionPtr::new(
+                writer_ptr_filename.clone(),
+                dir.join(gen_record_filename(0)),
+            )?
+        };
+
+        // 加载
+        let wpp = Arc::new(wpp);
+        let conf = self.conf.clone();
+        let pwb = PartitionWriterBuffer::new(dir.clone(), &conf, wpp.clone(), self.fluhser.clone())
+            .await?;
+
+        // 获取或创建partition级别的锁
+        let partition_lock = self
+            .partition_create_locks
+            .entry(partition_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _partition_lock = partition_lock.value().lock().await;
+        // 第二重检查：在持有锁后再次检查
+        if let Some(pwb) = self.partitions.get(&partition_id) {
+            return Ok(pwb.value().clone());
+        }
+        self.fluhser.add_partition_writer(dir.clone(), pwb.clone());
+        self.fluhser
+            .add_partition_writer_ptr(dir.clone(), wpp.clone());
+        self.partitions.insert(partition_id, pwb.clone());
+        Ok(pwb)
+    }
+}
+
+#[derive(Clone)]
+struct TopicManager {
+    dir: PathBuf,
+    conf: DiskConfig,
+    flusher: Flusher,
+    topics: Arc<DashMap<String, TopicStorage>>,
+    topic_create_locks: Arc<DashMap<String, Mutex<()>>>,
+}
+
+impl TopicManager {
+    fn new(dir: PathBuf, conf: DiskConfig, flusher: Flusher) -> Self {
+        Self {
+            dir,
+            conf,
+            flusher,
+            topics: Arc::new(DashMap::new()),
+            topic_create_locks: Arc::default(),
+        }
+    }
+
+    /// get_topic_storage
+    ///
+    /// 先从内存 DashMap 中获取是否有该 topic
+    ///
+    /// 在检查本地存储中是否有 topic
+    ///
+    /// 都无，初始化 topic
+    async fn get_topic_storage(&self, topic: &str) -> Result<TopicStorage> {
+        // 第一重检查：快速路径
+        if let Some(ts) = self.topics.get(topic) {
+            return Ok(ts.value().clone());
+        }
+
+        // 先获取/创建 topic_meta，必须放到 _topic_lock 锁外
+        let dir = self.dir.join(topic);
+        tokio::fs::create_dir_all(&dir).await?;
+        let meta_path = dir.join(TOPIC_META);
+        let topic_meta = if meta_path.exists() {
+            TopicMeta::load(&meta_path).await?
+        } else {
+            let fd = create_writer_fd(&meta_path)?;
+            TopicMeta::with(fd)
+        };
+
+        let topic_lock = self
+            .topic_create_locks
+            .entry(topic.to_string())
+            .or_insert(Mutex::new(()));
+        // 获取或创建topic级别的锁
+        let _topic_lock = topic_lock.value().lock().await;
+
+        // 第二重检查：在持有锁后再次检查
+        if let Some(ts) = self.topics.get(topic) {
+            return Ok(ts.value().clone());
+        }
+        let ts = TopicStorage {
+            dir: dir.clone(),
+            partitions: Arc::new(DashMap::new()),
+            meta: topic_meta,
+            partition_create_locks: Arc::new(DashMap::new()),
+            conf: self.conf.clone(),
+            fluhser: self.flusher.clone(),
+        };
+        self.topics.insert(topic.to_string(), ts.clone());
+        self.flusher.add_topic_meta(meta_path, ts.meta.clone());
+        // 释放锁
+        drop(_topic_lock);
+
+        Ok(ts)
+    }
+}
+
 #[derive(Clone)]
 pub struct DiskStorageWriter {
     conf: DiskConfig,
-    topics: Arc<DashMap<String, TopicStorage>>,
-    topic_create_locks: Arc<DashMap<String, Mutex<()>>>,
+
+    topic_manager: TopicManager,
     fd_cache: Arc<FdWriterCacheAync>,
     flusher: Flusher,
     stop: CancellationToken,
 
     // NOTE: 会导致所有分区刷盘，慎用
     _flush_sender: mpsc::Sender<()>,
+
+    workers: Arc<DashMap<usize, Worker>>, // worker 池
+    worker_locks: Arc<DashMap<usize, Mutex<()>>>,
 }
 
 impl Drop for DiskStorageWriter {
     fn drop(&mut self) {
         self.stop.cancel();
-        println!("xxxxxxxx  DiskStorageWriter Dropped, stop cancel xxxxxxxxxxx");
     }
 }
 
@@ -76,20 +221,54 @@ impl DiskStorageWriter {
         let (flush_sender, flusher_signal) = mpsc::channel(1);
         tokio::spawn(async move { _flusher.run(flusher_signal).await });
 
-        Ok(Self {
-            conf: cfg,
-            topics: Arc::new(DashMap::new()),
-            topic_create_locks: Arc::default(),
+        let worker_tasks_num = cfg.worker_tasks_num;
+        let dsw = Self {
+            topic_manager: TopicManager::new(cfg.storage_dir.clone(), cfg.clone(), flusher.clone()),
             fd_cache,
             flusher,
             stop,
             _flush_sender: flush_sender,
-        })
+            workers: Arc::new(DashMap::new()),
+            worker_locks: Arc::default(),
+            conf: cfg,
+        };
+
+        for work_id in 0..worker_tasks_num {
+            let _stop = dsw.stop.clone();
+            let (tx_worker, mut rx_worker) = mpsc::channel::<(String, u32, Bytes)>(100);
+            let tm = dsw.topic_manager.clone();
+            tokio::spawn(async move {
+                loop {
+                    if rx_worker.is_closed() {
+                        break;
+                    }
+                    select! {
+                        _ = _stop.cancelled() => {
+                            break;
+                        }
+
+                        res = rx_worker.recv() => {
+                            if res.is_none(){
+                                continue;
+                            }
+                            let (topic, partition_id, data) = res.unwrap();
+                            let ts = tm.get_topic_storage(&topic).await.unwrap();
+                            if let Err(e) = ts.send(partition_id, data).await{
+                                error!("send data to topic[{topic}]-partition[{partition_id}] err: {e:?}");
+                            }
+                        }
+                    }
+                }
+            });
+            dsw.workers.insert(work_id, Worker { tx: tx_worker });
+        }
+
+        Ok(dsw)
     }
 
     // 单独刷盘某个 topic-partition
     async fn flush_topic_partition_force(&self, topic: &str, partition_id: u32) -> Result<()> {
-        let ts = self.get_topic_storage(topic).await?;
+        let ts = self.topic_manager.get_topic_storage(topic).await?;
         if ts.partitions.get(&partition_id).is_none() {
             return Err(anyhow!(
                 StorageError::PartitionNotFound("DiskStorageWriter".to_string()).to_string()
@@ -108,159 +287,120 @@ impl DiskStorageWriter {
             .await
     }
 
-    /// get_topic_storage
-    ///
-    /// 先从内存 DashMap 中获取是否有该 topic
-    ///
-    /// 在检查本地存储中是否有 topic
-    ///
-    /// 都无，初始化 topic
-    async fn get_topic_storage(&self, topic: &str) -> Result<TopicStorage> {
-        // 第一重检查：快速路径
-        if let Some(ts) = self.topics.get(topic) {
-            return Ok(ts.clone());
+    async fn get_worker(&self, worker_id: usize) -> Worker {
+        if let Some(worker) = self.workers.get(&worker_id) {
+            return worker.value().clone();
         }
-
-        // 先获取/创建 topic_meta
-        let dir = self.conf.storage_dir.join(topic);
-        tokio::fs::create_dir_all(&dir).await?;
-        let meta_path = dir.join(TOPIC_META);
-        let topic_meta = if meta_path.exists() {
-            TopicMeta::load(&meta_path).await?
-        } else {
-            let fd = create_writer_fd(&meta_path)?;
-            TopicMeta::with(fd)
-        };
-
-        let topic_lock = self
-            .topic_create_locks
-            .entry(topic.to_string())
-            .or_insert_with(|| Mutex::new(()));
-        // 获取或创建topic级别的锁
-        let _topic_lock = topic_lock.value().lock().await;
-
-        // 第二重检查：在持有锁后再次检查
-        if let Some(ts) = self.topics.get(topic) {
-            return Ok(ts.clone());
-        }
-
-        let ts = TopicStorage {
-            dir: dir.clone(),
-            partitions: Arc::new(DashMap::new()),
-            meta: topic_meta,
-            partition_create_locks: Arc::new(DashMap::new()),
-        };
-        self.topics.insert(topic.to_string(), ts.clone());
-        self.flusher.add_topic_meta(meta_path, ts.meta.clone());
-        // 释放锁
-        drop(_topic_lock);
-
-        Ok(ts)
+        self.workers.iter().find(|_| true).unwrap().value().clone()
     }
 
-    async fn get_partition_writer(
-        &self,
-        topic: &str,
-        partition_id: u32,
-    ) -> Result<mpsc::Sender<Bytes>> {
-        let ts = self.get_topic_storage(topic).await?;
+    // async fn get_partition_writer(
+    //     &self,
+    //     topic: &str,
+    //     partition_id: u32,
+    // ) -> Result<mpsc::Sender<Bytes>> {
+    //     let ts = self.get_topic_storage(topic).await?;
 
-        // 第一重检查：快速路径
-        if let Some(pwb) = ts.partitions.get(&partition_id) {
-            return Ok(pwb.value().clone());
-        }
+    //     // 第一重检查：快速路径
+    //     if let Some(pwb) = ts.partitions.get(&partition_id) {
+    //         return Ok(pwb.value().clone());
+    //     }
 
-        // 获取或创建partition级别的锁
-        let partition_lock = ts
-            .partition_create_locks
-            .entry(partition_id)
-            .or_insert_with(|| Mutex::new(()));
-        let _partition_lock = partition_lock.value().lock().await;
+    //     // 获取或创建partition级别的锁
+    //     let partition_lock = ts
+    //         .partition_create_locks
+    //         .entry(partition_id)
+    //         .or_insert_with(|| Mutex::new(()));
+    //     let _partition_lock = partition_lock.value().lock().await;
 
-        // 第二重检查：在持有锁后再次检查
-        if let Some(pwb) = ts.partitions.get(&partition_id) {
-            return Ok(pwb.value().clone());
-        }
+    //     // 第二重检查：在持有锁后再次检查
+    //     if let Some(pwb) = ts.partitions.get(&partition_id) {
+    //         return Ok(pwb.value().clone());
+    //     }
 
-        let (tx_partition, mut rx_partition) =
-            mpsc::channel(self.conf.partition_writer_buffer_size);
+    //     let (tx_partition, mut rx_partition) =
+    //         mpsc::channel(self.conf.partition_writer_buffer_size);
 
-        let _flusher = self.flusher.clone();
-        let conf = self.conf.clone();
-        let max_size_per_file = self.conf.max_size_per_file;
-        let _fd_cache = self.fd_cache.clone();
-        let _stop = self.stop.clone();
-        tokio::spawn(async move {
-            // 先加载/创建 PartitionWriterPtr
-            let dir = ts.dir.join(format!("{}", partition_id));
-            if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-                error!("get_partition_writer create_dir_all err: {e:?}");
-                rx_partition.close();
-                return;
-            }
+    //     let _flusher = self.flusher.clone();
+    //     let conf = self.conf.clone();
+    //     let max_size_per_file = self.conf.max_size_per_file;
+    //     let _fd_cache = self.fd_cache.clone();
+    //     let _stop = self.stop.clone();
+    //     tokio::spawn(async move {
+    //         // 先加载/创建 PartitionWriterPtr
+    //         let dir = ts.dir.join(format!("{}", partition_id));
+    //         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+    //             error!("get_partition_writer create_dir_all err: {e:?}");
+    //             rx_partition.close();
+    //             return;
+    //         }
 
-            // 加载写指针文件
-            let writer_ptr_filename = dir.join(WRITER_PTR_FILENAME);
-            let wpp = if writer_ptr_filename.exists() {
-                match WriterPositionPtr::load(&writer_ptr_filename).await {
-                    Ok(pwp) => pwp,
-                    Err(e) => {
-                        error!("get_partition_writer WriterPositionPtr load err: {e:?}");
-                        rx_partition.close();
-                        return;
-                    }
-                }
-            } else {
-                match WriterPositionPtr::new(
-                    writer_ptr_filename.clone(),
-                    dir.join(gen_record_filename(0)),
-                ) {
-                    Ok(ptr) => ptr,
-                    Err(e) => {
-                        error!("get_partition_writer WriterPositionPtr new err: {e:?}");
-                        rx_partition.close();
-                        return;
-                    }
-                }
-            };
+    //         // 加载写指针文件
+    //         let writer_ptr_filename = dir.join(WRITER_PTR_FILENAME);
+    //         let wpp = if writer_ptr_filename.exists() {
+    //             match WriterPositionPtr::load(&writer_ptr_filename).await {
+    //                 Ok(pwp) => pwp,
+    //                 Err(e) => {
+    //                     error!("get_partition_writer WriterPositionPtr load err: {e:?}");
+    //                     rx_partition.close();
+    //                     return;
+    //                 }
+    //             }
+    //         } else {
+    //             match WriterPositionPtr::new(
+    //                 writer_ptr_filename.clone(),
+    //                 dir.join(gen_record_filename(0)),
+    //             ) {
+    //                 Ok(ptr) => ptr,
+    //                 Err(e) => {
+    //                     error!("get_partition_writer WriterPositionPtr new err: {e:?}");
+    //                     rx_partition.close();
+    //                     return;
+    //                 }
+    //             }
+    //         };
 
-            // 加载
-            let wpp = Arc::new(wpp);
-            match PartitionWriterBuffer::new(dir.clone(), &conf, wpp.clone(), _flusher.clone())
-                .await
-            {
-                Ok(pwb) => {
-                    _flusher.add_partition_writer(dir.clone(), pwb.clone());
-                    _flusher.add_partition_writer_ptr(writer_ptr_filename, wpp.clone());
-                    let buffer_size_half = conf.partition_writer_buffer_size / 2 + 1;
-                    let mut datas: Vec<Bytes> = Vec::with_capacity(buffer_size_half);
-                    loop {
-                        select! {
-                            _ = _stop.cancelled() => {
-                                warn!("DiskStorageWriter: get_partition_writer receive stop signal, exit");
-                                break;
-                            }
+    //         // 加载
+    //         let wpp = Arc::new(wpp);
+    //         match PartitionWriterBuffer::new(dir.clone(), &conf, wpp.clone(), _flusher.clone())
+    //             .await
+    //         {
+    //             Ok(pwb) => {
+    //                 _flusher.add_partition_writer(dir.clone(), pwb.clone());
+    //                 _flusher.add_partition_writer_ptr(writer_ptr_filename, wpp.clone());
+    //                 let buffer_size_half = conf.partition_writer_buffer_size / 2 + 1;
+    //                 let mut datas: Vec<Bytes> = Vec::with_capacity(buffer_size_half);
+    //                 loop {
+    //                     if rx_partition.is_closed() {
+    //                         break;
+    //                     }
+    //                     select! {
+    //                         _ = _stop.cancelled() => {
+    //                             warn!("DiskStorageWriter: get_partition_writer receive stop signal, exit");
+    //                             break;
+    //                         }
 
-                            s = rx_partition.recv_many(&mut datas, buffer_size_half) => {
-                                let _ = pwb.write_batch(&datas[..s]).await;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("get_partition_writer PartitionWriterBuffer new err: {e:?}");
-                    println!("get_partition_writer PartitionWriterBuffer new err: {e:?}");
-                    rx_partition.close();
-                }
-            };
-        });
-        ts.partitions.insert(partition_id, tx_partition.clone());
-        Ok(tx_partition)
-    }
+    //                         s = rx_partition.recv_many(&mut datas, buffer_size_half) => {
+    //                             let _ = pwb.write_batch(&datas[..s]).await;
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             Err(e) => {
+    //                 error!("get_partition_writer PartitionWriterBuffer new err: {e:?}");
+    //                 rx_partition.close();
+    //             }
+    //         };
+    //     });
+    //     ts.partitions.insert(partition_id, tx_partition.clone());
+    //     Ok(tx_partition)
+    // }
 
-    async fn write_to_partition(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
-        let sender = self.get_partition_writer(topic, partition_id).await?;
-        sender.send(data).await?;
+    async fn write(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
+        let worker_id =
+            partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
+        let worker = self.get_worker(worker_id as _).await;
+        worker.send((topic.to_string(), partition_id, data)).await?;
         Ok(())
     }
 }
@@ -284,7 +424,7 @@ impl StorageWriter for DiskStorageWriter {
         if data.is_empty() {
             return Err(anyhow!("can't store empty data"));
         }
-        self.write_to_partition(topic, partition_id, data).await?;
+        self.write(topic, partition_id, data).await?;
         Ok(())
     }
 }
@@ -300,6 +440,11 @@ fn filename_factor_next_record(filename: &Path) -> PathBuf {
     PathBuf::from(gen_record_filename(filename_factor + 1))
 }
 
+fn partition_to_worker(topic: &str, partition_id: u32, worker_num: u32) -> Result<u32> {
+    let hash = murmur3_32(&mut Cursor::new(format!("{}{}", topic, partition_id)), 0)?; // 种子为 0，与 Kafka 一致
+    Ok((hash % worker_num) as u32)
+}
+
 #[cfg(test)]
 mod test {
     use super::{DiskConfig, DiskStorageWriter};
@@ -311,7 +456,6 @@ mod test {
     use std::{
         num::NonZeroU32,
         path::PathBuf,
-        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
@@ -337,6 +481,8 @@ mod test {
             flusher_partition_writer_ptr_tasks_num: 10,
             partition_writer_buffer_size: 100,
             with_metrics: false,
+            partition_writer_prealloc: false,
+            worker_tasks_num: 100,
         })
         .expect("error config")
     }
@@ -464,59 +610,59 @@ mod test {
     async fn run_flush_benchmark() -> Result<()> {
         struct TestArgs {
             partition_count: u32,      // 分区数量
-            message_size: usize,       // 10KB
+            message_size: usize,       // 单个消息大小
             warmup_duration: Duration, // 预热时长
-            current_rate: usize,       // 起始速率 MB/s
+            current_rate: usize,       // 起始速率 (MB/s)
             rate_step: usize,          // 速率步长 (MB/s)
             test_duration: Duration,   // 每个速率级别的测试时长
-            max_rate_mbps: usize,      // 降低最大测试速率
+            max_rate_mbps: usize,      // 最大测试速率
         }
 
         // 测试时修改参数
         let args = vec![
             TestArgs {
-                partition_count: 1,
+                partition_count: 10000,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(5),
-                current_rate: 50,
-                rate_step: 50,
-                test_duration: Duration::from_secs(5),
-                max_rate_mbps: 300,
+                warmup_duration: Duration::from_secs(20),
+                current_rate: 200,
+                rate_step: 150,
+                test_duration: Duration::from_secs(20),
+                max_rate_mbps: 1200,
             },
             TestArgs {
-                partition_count: 10,
+                partition_count: 5000,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(5),
-                current_rate: 50,
-                rate_step: 50,
-                test_duration: Duration::from_secs(5),
-                max_rate_mbps: 1000,
+                warmup_duration: Duration::from_secs(17),
+                current_rate: 200,
+                rate_step: 100,
+                test_duration: Duration::from_secs(17),
+                max_rate_mbps: 1200,
             },
             TestArgs {
-                partition_count: 30,
+                partition_count: 2000,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(5),
-                current_rate: 50,
-                rate_step: 50,
-                test_duration: Duration::from_secs(5),
-                max_rate_mbps: 1000,
+                warmup_duration: Duration::from_secs(15),
+                current_rate: 200,
+                rate_step: 100,
+                test_duration: Duration::from_secs(15),
+                max_rate_mbps: 1200,
             },
             TestArgs {
-                partition_count: 50,
+                partition_count: 1000,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(5),
-                current_rate: 50,
-                rate_step: 50,
-                test_duration: Duration::from_secs(5),
-                max_rate_mbps: 1000,
+                warmup_duration: Duration::from_secs(12),
+                current_rate: 200,
+                rate_step: 100,
+                test_duration: Duration::from_secs(12),
+                max_rate_mbps: 1200,
             },
             TestArgs {
-                partition_count: 100,
+                partition_count: 500,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(5),
-                current_rate: 50,
-                rate_step: 50,
-                test_duration: Duration::from_secs(5),
+                warmup_duration: Duration::from_secs(7),
+                current_rate: 100,
+                rate_step: 100,
+                test_duration: Duration::from_secs(7),
                 max_rate_mbps: 1000,
             },
         ];
@@ -539,12 +685,12 @@ mod test {
 
     async fn test_flush_speed_with_dynamic_rate_multi_partition(
         partition_count: u32,      // 分区数量
-        message_size: usize,       // 10KB
+        message_size: usize,       // 单个消息大小
         warmup_duration: Duration, // 预热时长
-        current_rate: usize,       // 起始速率 MB/s
+        current_rate: usize,       // 起始速率 (MB/s)
         rate_step: usize,          // 速率步长 (MB/s)
         test_duration: Duration,   // 每个速率级别的测试时长
-        max_rate_mbps: usize,      // 降低最大测试速率
+        max_rate_mbps: usize,      // 最大测试速率
     ) -> Result<()> {
         use std::sync::atomic::{AtomicU64, Ordering};
         use tokio::time::{Duration, Instant};
@@ -559,12 +705,6 @@ mod test {
         let store = Arc::new(DiskStorageWriter::new(config)?);
         // 测试参数
         let topic = format!("flush_speed_test_{}", partition_count);
-        // let message_size = 10 * 1024; // 10KB
-        // let warmup_duration = Duration::from_secs(5); // 预热时长
-        // let max_rate_mbps = 1000; // 降低最大测试速率
-        // let rate_step = 50; // 速率步长 (MB/s)
-        // let current_rate = 50; // 起始速率 MB/s
-        // let test_duration = Duration::from_secs(5); // 每个速率级别的测试时长
 
         println!(
             "起始速度: {current_rate} MB/s, 步长增速: {rate_step} MB/s, 单步持续时长: {}s, 最大速率: {max_rate_mbps} MB/s",
@@ -602,36 +742,40 @@ mod test {
 
         // 获取初始刷盘指标 - 确保分区已初始化
         println!("等待分区初始化...");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         let mut initial_metrics = store.get_partition_metrics();
         println!("初始指标数量: {}", initial_metrics.len());
 
         // 如果指标数量不足，尝试重新获取
         if initial_metrics.len() < partition_count as usize {
-            println!("检测到分区指标缺失，重新获取...");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            initial_metrics = store.get_partition_metrics();
-        }
-
-        // 确保所有分区都有指标
-        if initial_metrics.len() != partition_count as usize {
-            println!(
-                "警告: 初始化分区指标数量 ({}) 不等于分区数量 ({})",
-                initial_metrics.len(),
-                partition_count
-            );
+            loop {
+                println!("检测到分区指标缺失，重新获取...");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                initial_metrics = store.get_partition_metrics();
+                if (initial_metrics.len() as f64 / partition_count as f64) < 0.85 {
+                    println!(
+                        "警告: 初始化分区指标数量丢失严重: 初始化分区数量/分区数量 = {:.1}/{:.1}*100% = {:2}%",
+                        initial_metrics.len(),
+                        partition_count,
+                        (initial_metrics.len() as f64 / partition_count as f64) * 100.0
+                    );
+                    println!("注意: 'ulimit -n' 查看可打开的最大文件描述符数量");
+                    continue;
+                }
+                break;
+            }
         }
 
         // 速率测试控制
         let mut results = vec![];
 
-        println!("\n{:-^94}", " 开始动态速率测试 (多分区) ");
+        println!("\n{:-^72}", " 开始动态速率测试 (多分区) ");
         println!(
-            "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|平均每分区吞吐量(MB/s)|分区数|",
+            "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|分区数|",
         );
         println!(
-            "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<22}|{:-<6}|",
-            "", "", "", "", "", "", "", "",
+            "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<6}|",
+            "", "", "", "", "", "", "",
         );
 
         for target_rate in (current_rate..=max_rate_mbps).step_by(rate_step) {
@@ -808,14 +952,14 @@ mod test {
 
             // 打印结果
             println!(
-                "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>22.1}|{:>6}|",
+                "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>6}|",
                 target_rate as f64,
                 test_duration.as_secs_f64(),
                 sent_bytes as f64 / 1024.0 / 1024.0,
                 total_flushed_bytes as f64 / 1024.0 / 1024.0,
                 wall_clock_time_us as f64 / 1_000.0,
                 wall_clock_throughput,
-                avg_partition_flush_throughput,
+                // avg_partition_flush_throughput,
                 partition_count
             );
         }
@@ -831,7 +975,7 @@ mod test {
             }
         }
 
-        println!("\n{:-^94}", " 测试结果摘要 ");
+        println!("\n{:-^78}", " 测试结果摘要 ");
         println!("最大落盘吞吐量: {:.2} MB/s", max_wall_clock_throughput);
         println!("最佳发送速率: {:.2} MB/s", optimal_rate);
         println!("分区数量: {}", partition_count);
@@ -857,18 +1001,18 @@ mod test {
 
     #[test]
     fn format_form() {
-        println!("\n{:-^94}", " 开始动态速率测试 (多分区) ");
+        println!("\n{:-^72}", " 开始动态速率测试 (多分区) ");
         println!(
-            "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|平均每分区吞吐量(MB/s)|分区数|",
+            "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|分区数|",
         );
         println!(
-            "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<22}|{:-<6}|",
-            "", "", "", "", "", "", "", "",
+            "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<6}|",
+            "", "", "", "", "", "", "",
         );
         println!(
-            "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>22.1}|{:>6}|",
-            50.0, 5.0, 250.0, 300.2, 53.1, 60.0, 60.0, 1
+            "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>6}|",
+            50.0, 5.0, 250.0, 300.2, 53.1, 60.0, 1
         );
-        println!("\n{:-^100}", " 测试结果摘要 ");
+        println!("\n{:-^78}", " 测试结果摘要 ");
     }
 }

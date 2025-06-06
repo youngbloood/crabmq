@@ -14,7 +14,9 @@ pub struct Config {
 
     // PartitionWriter 中内存缓冲区长度，每个分区缓存写入消息的长度
     pub partition_writer_buffer_size: usize,
+    pub partition_writer_prealloc: bool,
 
+    pub worker_tasks_num: usize,
     // 默认每个消息文件中的最大消息数量
     pub max_msg_num_per_file: u64,
     // 默认每个消息文件中的最大消息字节数
@@ -65,10 +67,11 @@ pub fn default_config() -> Config {
         flusher_partition_writer_buffer_tasks_num: 64,
         flusher_partition_writer_ptr_tasks_num: 64,
         partition_writer_buffer_size: 100,
-
+        partition_writer_prealloc: false,
         max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
         max_size_per_file: 1024 * 1024 * 1024, // 1G
         compress_type: 0,
+        worker_tasks_num: 100,
         fd_cache_size: 256,
         create_next_record_file_threshold: 80,
         with_metrics: false,
