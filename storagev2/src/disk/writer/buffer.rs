@@ -1,5 +1,5 @@
 use crate::disk::{
-    Config,
+    Config as DiskConfig,
     fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
     meta::{WriterPositionPtr, gen_record_filename},
     writer::flusher::Flusher,
@@ -25,7 +25,7 @@ use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 #[derive(Clone)]
 pub(crate) struct PartitionWriterBuffer {
     dir: PathBuf,
-    conf: Config,
+    conf: Arc<DiskConfig>,
 
     // 当前写的文件因子：用于构成写入的目标文件
     current_factor: Arc<AtomicU64>,
@@ -45,7 +45,7 @@ pub(crate) struct PartitionWriterBuffer {
     // 是否已经预创建了下一个 record 文件
     has_create_next_record_file: Arc<AtomicBool>,
 
-    flusher: Flusher,
+    flusher: Arc<Flusher>,
 
     // 监控刷盘指标
     metrics: Arc<BufferFlushMetrics>,
@@ -54,9 +54,9 @@ pub(crate) struct PartitionWriterBuffer {
 impl PartitionWriterBuffer {
     pub(crate) async fn new(
         dir: PathBuf,
-        conf: &Config,
+        conf: Arc<DiskConfig>,
         write_ptr: Arc<WriterPositionPtr>,
-        flusher: Flusher,
+        flusher: Arc<Flusher>,
     ) -> Result<Self> {
         let record_files = dir_recursive(dir.clone(), &[OsString::from("record")])?;
         // 只获取最大编号的文件

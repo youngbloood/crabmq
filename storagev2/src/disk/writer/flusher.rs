@@ -41,7 +41,6 @@ type FlushUnitWriterPositionPtr = (bool, Vec<Arc<WriterPositionPtr>>);
 #[derive(Clone)]
 pub(crate) struct Flusher {
     stop: CancellationToken,
-    fd_cache: Arc<FdWriterCacheAync>,
 
     partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
     pub partition_states: Arc<DashMap<PathBuf, PartitionState>>,
@@ -146,7 +145,6 @@ impl Flusher {
 
         Self {
             stop,
-            fd_cache,
             partition_writer_buffers: Arc::new(DashMap::new()),
             partition_states: Arc::default(),
             interval,
@@ -160,7 +158,7 @@ impl Flusher {
         }
     }
 
-    pub(crate) async fn run(&mut self, mut flush_signal: mpsc::Receiver<()>) {
+    pub(crate) async fn run(&self, mut flush_signal: mpsc::Receiver<()>) {
         let mut state_updater = tokio::time::interval(Duration::from_secs(5));
         let mut hot_ticker = time::interval(self.interval);
         let mut warm_ticker = time::interval(self.interval * 10 * 10);

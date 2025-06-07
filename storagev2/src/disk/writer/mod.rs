@@ -4,10 +4,9 @@ mod flusher;
 
 use super::Config as DiskConfig;
 use super::fd_cache::FdWriterCacheAync;
-use super::meta::{TOPIC_META, TopicMeta, WRITER_PTR_FILENAME, gen_record_filename};
+use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
 use crate::StorageWriter;
 use crate::disk::StorageError;
-use crate::disk::fd_cache::create_writer_fd;
 use crate::disk::meta::WriterPositionPtr;
 use crate::disk::writer::flusher::PartitionMetrics;
 use anyhow::{Result, anyhow};
@@ -42,33 +41,63 @@ impl Deref for Worker {
 }
 
 #[derive(Clone)]
-struct TopicStorage {
-    dir: PathBuf,
-    conf: DiskConfig,
-    fluhser: Flusher,
-    // partition_id -> PartitionWriterBuffer
-    // partition_id -> Sender
-    partitions: Arc<DashMap<u32, PartitionWriterBuffer>>,
+struct TopicPartitionManager {
+    dir: Arc<PathBuf>,
+    conf: Arc<DiskConfig>,
+    flusher: Arc<Flusher>,
+    // (topic, partition_id) -> PartitionWriterBuffer
+    partitions: Arc<DashMap<(String, u32), PartitionWriterBuffer>>,
     // 创建分区的互斥锁
     partition_create_locks: Arc<DashMap<u32, Mutex<()>>>,
-    meta: TopicMeta,
 }
 
-impl TopicStorage {
-    async fn send(&self, partition_id: u32, data: Bytes) -> Result<()> {
-        let pwb = self.get_partition(partition_id).await?;
+impl TopicPartitionManager {
+    fn new(dir: Arc<PathBuf>, conf: Arc<DiskConfig>, flusher: Arc<Flusher>) -> Self {
+        Self {
+            dir,
+            conf,
+            flusher,
+            partitions: Arc::default(),
+            partition_create_locks: Arc::default(),
+        }
+    }
+
+    #[inline]
+    async fn send(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
+        let pwb = self
+            .get_or_create_topic_partition(topic, partition_id)
+            .await?;
         pwb.write_batch(&[data]).await?;
         Ok(())
     }
 
-    async fn get_partition(&self, partition_id: u32) -> Result<PartitionWriterBuffer> {
+    #[inline]
+    fn get_cached_topic_partition(
+        &self,
+        topic: &str,
+        partition_id: u32,
+    ) -> Option<PartitionWriterBuffer> {
+        let key = (topic.to_string(), partition_id);
         // 第一重检查：快速路径
-        if let Some(pwb) = self.partitions.get(&partition_id) {
+        if let Some(pwb) = self.partitions.get(&key) {
+            return Some(pwb.value().clone());
+        }
+        None
+    }
+
+    async fn get_or_create_topic_partition(
+        &self,
+        topic: &str,
+        partition_id: u32,
+    ) -> Result<PartitionWriterBuffer> {
+        let key = (topic.to_string(), partition_id);
+        // 第一重检查：快速路径
+        if let Some(pwb) = self.partitions.get(&key) {
             return Ok(pwb.value().clone());
         }
 
         // 先加载/创建 PartitionWriterPtr，必须放到 _partition_lock 之外
-        let dir = self.dir.join(format!("{}", partition_id));
+        let dir = self.dir.join(topic).join(partition_id.to_string());
         tokio::fs::create_dir_all(&dir).await?;
 
         // 加载写指针文件
@@ -84,114 +113,45 @@ impl TopicStorage {
 
         // 加载
         let wpp = Arc::new(wpp);
-        let conf = self.conf.clone();
-        let pwb = PartitionWriterBuffer::new(dir.clone(), &conf, wpp.clone(), self.fluhser.clone())
-            .await?;
+        let pwb = PartitionWriterBuffer::new(
+            dir.clone(),
+            self.conf.clone(),
+            wpp.clone(),
+            self.flusher.clone(),
+        )
+        .await?;
 
         // 获取或创建partition级别的锁
-        let partition_lock = self
+        let topic_partition_lock = self
             .partition_create_locks
             .entry(partition_id)
             .or_insert_with(|| Mutex::new(()));
-        let _partition_lock = partition_lock.value().lock().await;
+        let _topic_partition_lock = topic_partition_lock.value().lock().await;
         // 第二重检查：在持有锁后再次检查
-        if let Some(pwb) = self.partitions.get(&partition_id) {
+        if let Some(pwb) = self.partitions.get(&key) {
             return Ok(pwb.value().clone());
         }
-        self.fluhser.add_partition_writer(dir.clone(), pwb.clone());
-        self.fluhser
+        self.flusher.add_partition_writer(dir.clone(), pwb.clone());
+        self.flusher
             .add_partition_writer_ptr(dir.clone(), wpp.clone());
-        self.partitions.insert(partition_id, pwb.clone());
+        self.partitions.insert(key, pwb.clone());
         Ok(pwb)
     }
 }
 
 #[derive(Clone)]
-struct TopicManager {
-    dir: PathBuf,
-    conf: DiskConfig,
-    flusher: Flusher,
-    topics: Arc<DashMap<String, TopicStorage>>,
-    topic_create_locks: Arc<DashMap<String, Mutex<()>>>,
-}
-
-impl TopicManager {
-    fn new(dir: PathBuf, conf: DiskConfig, flusher: Flusher) -> Self {
-        Self {
-            dir,
-            conf,
-            flusher,
-            topics: Arc::new(DashMap::new()),
-            topic_create_locks: Arc::default(),
-        }
-    }
-
-    /// get_topic_storage
-    ///
-    /// 先从内存 DashMap 中获取是否有该 topic
-    ///
-    /// 在检查本地存储中是否有 topic
-    ///
-    /// 都无，初始化 topic
-    async fn get_topic_storage(&self, topic: &str) -> Result<TopicStorage> {
-        // 第一重检查：快速路径
-        if let Some(ts) = self.topics.get(topic) {
-            return Ok(ts.value().clone());
-        }
-
-        // 先获取/创建 topic_meta，必须放到 _topic_lock 锁外
-        let dir = self.dir.join(topic);
-        tokio::fs::create_dir_all(&dir).await?;
-        let meta_path = dir.join(TOPIC_META);
-        let topic_meta = if meta_path.exists() {
-            TopicMeta::load(&meta_path).await?
-        } else {
-            let fd = create_writer_fd(&meta_path)?;
-            TopicMeta::with(fd)
-        };
-
-        let topic_lock = self
-            .topic_create_locks
-            .entry(topic.to_string())
-            .or_insert(Mutex::new(()));
-        // 获取或创建topic级别的锁
-        let _topic_lock = topic_lock.value().lock().await;
-
-        // 第二重检查：在持有锁后再次检查
-        if let Some(ts) = self.topics.get(topic) {
-            return Ok(ts.value().clone());
-        }
-        let ts = TopicStorage {
-            dir: dir.clone(),
-            partitions: Arc::new(DashMap::new()),
-            meta: topic_meta,
-            partition_create_locks: Arc::new(DashMap::new()),
-            conf: self.conf.clone(),
-            fluhser: self.flusher.clone(),
-        };
-        self.topics.insert(topic.to_string(), ts.clone());
-        self.flusher.add_topic_meta(meta_path, ts.meta.clone());
-        // 释放锁
-        drop(_topic_lock);
-
-        Ok(ts)
-    }
-}
-
-#[derive(Clone)]
 pub struct DiskStorageWriter {
-    conf: DiskConfig,
+    conf: Arc<DiskConfig>,
+    topic_partition_manager: TopicPartitionManager,
 
-    topic_manager: TopicManager,
-    fd_cache: Arc<FdWriterCacheAync>,
-    flusher: Flusher,
-    stop: CancellationToken,
-
+    flusher: Arc<Flusher>,
     // NOTE: 会导致所有分区刷盘，慎用
     _flush_sender: mpsc::Sender<()>,
 
     workers: Arc<DashMap<usize, Worker>>, // worker 池
     worker_locks: Arc<DashMap<usize, Mutex<()>>>,
+
+    stop: CancellationToken,
 }
 
 impl Drop for DiskStorageWriter {
@@ -207,24 +167,28 @@ impl DiskStorageWriter {
             cfg.max_size_per_file as usize,
             cfg.fd_cache_size as usize,
         ));
+        let cfg = Arc::new(cfg);
 
         let stop = CancellationToken::new();
         // 启动刷盘守护任务
-        let flusher = Flusher::new(
+        let flusher = Arc::new(Flusher::new(
             stop.clone(),
             cfg.flusher_partition_writer_buffer_tasks_num,
             cfg.flusher_partition_writer_ptr_tasks_num,
             Duration::from_millis(cfg.flusher_period),
             fd_cache.clone(),
-        );
+        ));
         let mut _flusher = flusher.clone();
         let (flush_sender, flusher_signal) = mpsc::channel(1);
         tokio::spawn(async move { _flusher.run(flusher_signal).await });
 
         let worker_tasks_num = cfg.worker_tasks_num;
         let dsw = Self {
-            topic_manager: TopicManager::new(cfg.storage_dir.clone(), cfg.clone(), flusher.clone()),
-            fd_cache,
+            topic_partition_manager: TopicPartitionManager::new(
+                Arc::new(cfg.storage_dir.clone()),
+                cfg.clone(),
+                flusher.clone(),
+            ),
             flusher,
             stop,
             _flush_sender: flush_sender,
@@ -236,7 +200,7 @@ impl DiskStorageWriter {
         for work_id in 0..worker_tasks_num {
             let _stop = dsw.stop.clone();
             let (tx_worker, mut rx_worker) = mpsc::channel::<(String, u32, Bytes)>(100);
-            let tm = dsw.topic_manager.clone();
+            let tpm = dsw.topic_partition_manager.clone();
             tokio::spawn(async move {
                 loop {
                     if rx_worker.is_closed() {
@@ -253,8 +217,7 @@ impl DiskStorageWriter {
                                 continue;
                             }
                             let (topic, partition_id, data) = res.unwrap();
-                            let ts = tm.get_topic_storage(&topic).await.unwrap();
-                            if let Err(e) = ts.send(partition_id, data).await{
+                            if let Err(e) = tpm.send(&topic, partition_id, data).await{
                                 error!("send data to topic[{topic}]-partition[{partition_id}] err: {e:?}");
                             }
                         }
@@ -269,8 +232,11 @@ impl DiskStorageWriter {
 
     // 单独刷盘某个 topic-partition
     async fn flush_topic_partition_force(&self, topic: &str, partition_id: u32) -> Result<()> {
-        let ts = self.topic_manager.get_topic_storage(topic).await?;
-        if ts.partitions.get(&partition_id).is_none() {
+        if self
+            .topic_partition_manager
+            .get_cached_topic_partition(topic, partition_id)
+            .is_none()
+        {
             return Err(anyhow!(
                 StorageError::PartitionNotFound("DiskStorageWriter".to_string()).to_string()
             ));
@@ -288,6 +254,7 @@ impl DiskStorageWriter {
             .await
     }
 
+    #[inline]
     async fn get_worker(&self, worker_id: usize) -> Worker {
         if let Some(worker) = self.workers.get(&worker_id) {
             return worker.value().clone();
@@ -303,15 +270,14 @@ impl DiskStorageWriter {
         Ok(())
     }
 
-    fn get_cached_partition(&self, topic: &str, pid: u32) -> Option<PartitionWriterBuffer> {
-        // 基于DashMap的原子查询
-        let ts = self.topic_manager.topics.get(topic);
-        ts.as_ref()?;
-        let ts = ts.unwrap();
-        let pwb = ts.partitions.get(&pid);
-        pwb.as_ref()?;
-        let pwb = pwb.unwrap();
-        Some(pwb.value().clone())
+    #[inline]
+    fn get_cached_partition(
+        &self,
+        topic: &str,
+        partition_id: u32,
+    ) -> Option<PartitionWriterBuffer> {
+        self.topic_partition_manager
+            .get_cached_topic_partition(topic, partition_id)
     }
 }
 
@@ -539,46 +505,46 @@ mod test {
                 partition_count: 10000,
                 message_size: 10 * 1024,
                 warmup_duration: Duration::from_secs(20),
-                current_rate: 200,
+                current_rate: 300,
                 rate_step: 150,
                 test_duration: Duration::from_secs(20),
-                max_rate_mbps: 1200,
+                max_rate_mbps: 1500,
             },
             TestArgs {
                 partition_count: 5000,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(17),
-                current_rate: 200,
-                rate_step: 100,
-                test_duration: Duration::from_secs(17),
-                max_rate_mbps: 1200,
+                warmup_duration: Duration::from_secs(20),
+                current_rate: 300,
+                rate_step: 150,
+                test_duration: Duration::from_secs(20),
+                max_rate_mbps: 1500,
             },
             TestArgs {
                 partition_count: 2000,
                 message_size: 10 * 1024,
                 warmup_duration: Duration::from_secs(15),
-                current_rate: 200,
-                rate_step: 100,
+                current_rate: 300,
+                rate_step: 150,
                 test_duration: Duration::from_secs(15),
-                max_rate_mbps: 1200,
+                max_rate_mbps: 1500,
             },
             TestArgs {
                 partition_count: 1000,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(12),
-                current_rate: 200,
-                rate_step: 100,
-                test_duration: Duration::from_secs(12),
-                max_rate_mbps: 1200,
+                warmup_duration: Duration::from_secs(15),
+                current_rate: 300,
+                rate_step: 150,
+                test_duration: Duration::from_secs(15),
+                max_rate_mbps: 1500,
             },
             TestArgs {
                 partition_count: 500,
                 message_size: 10 * 1024,
-                warmup_duration: Duration::from_secs(7),
-                current_rate: 100,
-                rate_step: 100,
-                test_duration: Duration::from_secs(7),
-                max_rate_mbps: 1000,
+                warmup_duration: Duration::from_secs(15),
+                current_rate: 300,
+                rate_step: 150,
+                test_duration: Duration::from_secs(15),
+                max_rate_mbps: 1500,
             },
         ];
 
