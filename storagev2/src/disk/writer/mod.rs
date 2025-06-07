@@ -29,11 +29,11 @@ const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 // Worker 结构
 #[derive(Clone)]
 struct Worker {
-    tx: mpsc::Sender<(String, u32, Bytes)>,
+    tx: mpsc::Sender<(String, u32, Vec<Bytes>)>,
 }
 
 impl Deref for Worker {
-    type Target = mpsc::Sender<(String, u32, Bytes)>;
+    type Target = mpsc::Sender<(String, u32, Vec<Bytes>)>;
 
     fn deref(&self) -> &Self::Target {
         &self.tx
@@ -63,11 +63,11 @@ impl TopicPartitionManager {
     }
 
     #[inline]
-    async fn send(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
+    async fn send(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
         let pwb = self
             .get_or_create_topic_partition(topic, partition_id)
             .await?;
-        pwb.write_batch(&[data]).await?;
+        pwb.write_batch(datas).await?;
         Ok(())
     }
 
@@ -199,7 +199,7 @@ impl DiskStorageWriter {
 
         for work_id in 0..worker_tasks_num {
             let _stop = dsw.stop.clone();
-            let (tx_worker, mut rx_worker) = mpsc::channel::<(String, u32, Bytes)>(100);
+            let (tx_worker, mut rx_worker) = mpsc::channel::<(String, u32, Vec<Bytes>)>(100);
             let tpm = dsw.topic_partition_manager.clone();
             tokio::spawn(async move {
                 loop {
@@ -216,8 +216,8 @@ impl DiskStorageWriter {
                             if res.is_none(){
                                 continue;
                             }
-                            let (topic, partition_id, data) = res.unwrap();
-                            if let Err(e) = tpm.send(&topic, partition_id, data).await{
+                            let (topic, partition_id, datas) = res.unwrap();
+                            if let Err(e) = tpm.send(&topic, partition_id, &datas).await{
                                 error!("send data to topic[{topic}]-partition[{partition_id}] err: {e:?}");
                             }
                         }
@@ -262,11 +262,13 @@ impl DiskStorageWriter {
         self.workers.iter().find(|_| true).unwrap().value().clone()
     }
 
-    async fn write_to_worker(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
+    async fn write_to_worker(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
         let worker_id =
             partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
         let worker = self.get_worker(worker_id as _).await;
-        worker.send((topic.to_string(), partition_id, data)).await?;
+        worker
+            .send((topic.to_string(), partition_id, datas.to_vec()))
+            .await?;
         Ok(())
     }
 
@@ -296,14 +298,14 @@ impl DiskStorageWriter {
 
 #[async_trait::async_trait]
 impl StorageWriter for DiskStorageWriter {
-    async fn store(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
-        if data.is_empty() {
+    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
+        if datas.is_empty() {
             return Err(anyhow!("can't store empty data"));
         }
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
-            pwb.write_batch(&[data]).await?;
+            pwb.write_batch(datas).await?;
         } else {
-            self.write_to_worker(topic, partition_id, data).await?;
+            self.write_to_worker(topic, partition_id, datas).await?;
         }
 
         Ok(())
@@ -402,7 +404,7 @@ mod test {
         // for _ in 0..1000 {
         for d in &datas {
             if let Err(e) = store
-                .store("topic111", 11, Bytes::copy_from_slice(d.as_bytes()))
+                .store("topic111", 11, &[Bytes::copy_from_slice(d.as_bytes())])
                 .await
             {
                 eprintln!("e = {e:?}");
@@ -449,7 +451,7 @@ mod test {
                         .store(
                             &format!("mytopic_{}", p),
                             partition,
-                            _message_content[i as usize % _message_content.len()].clone(),
+                            &[_message_content[i as usize % _message_content.len()].clone()],
                         )
                         .await
                     {
@@ -610,7 +612,7 @@ mod test {
                 while warmup_start.elapsed() < warmup_duration {
                     let msg =
                         message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                    if let Err(e) = store.store(&topic, partition, msg).await {
+                    if let Err(e) = store.store(&topic, partition, &[msg]).await {
                         eprintln!("store.store err: {e:?}");
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -714,7 +716,7 @@ mod test {
 
                         let msg_idx = rand::random::<u32>() as usize % message_pool.len();
                         let msg = message_pool[msg_idx].clone();
-                        if let Err(e) = store.store(&topic, partition, msg).await {
+                        if let Err(e) = store.store(&topic, partition, &[msg]).await {
                             eprintln!("store.store err: {e:?}");
                             break;
                         }
