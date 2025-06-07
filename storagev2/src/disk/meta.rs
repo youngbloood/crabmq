@@ -128,12 +128,14 @@ impl TopicMeta {
 #[derive(Debug, Clone)]
 pub struct WriterPositionPtr {
     fd: FileHandlerWriterAsync, // 存放该 ptr 信息的文件
+    // ============== 写入文件内容 ===============
     // 写入指针文件：当前写的 record 文件
     filename: Arc<RwLock<PathBuf>>,
     // 写入指针文件：当前文件的写位置
     offset: Arc<AtomicU64>,
     // 写入指针文件：当前文件含有的消息数量
     current_count: Arc<AtomicU64>,
+    // ============== 写入文件内容结束 ===============
 
     // 刷盘写的偏移量
     flush_offset: Arc<AtomicU64>,

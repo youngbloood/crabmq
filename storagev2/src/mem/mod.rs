@@ -3,17 +3,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use tokio::select;
-use tokio::sync::Semaphore;
+use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{StorageReader, StorageReaderSession, StorageWriter};
 
 struct PartitionQueue {
     sema: Arc<Semaphore>,
-    messages: Arc<Mutex<VecDeque<Bytes>>>,
+    messages: Arc<RwLock<VecDeque<Bytes>>>,
     read_pos: Arc<AtomicUsize>, // 当前读取位置
 }
 
@@ -60,11 +60,11 @@ impl MemStorage {
         let _ = partition_queue.sema.acquire().await?;
 
         let msg = {
-            let messages = partition_queue.messages.lock().unwrap();
-            if partition_queue.read_pos.load(Ordering::Relaxed) >= messages.len() {
+            let messages_rl = partition_queue.messages.read().await;
+            if partition_queue.read_pos.load(Ordering::Relaxed) >= messages_rl.len() {
                 return Err(anyhow!("No more messages in {}/{}", topic, partition));
             }
-            messages[partition_queue.read_pos.load(Ordering::Relaxed)].clone()
+            messages_rl[partition_queue.read_pos.load(Ordering::Relaxed)].clone()
         };
         partition_queue.read_pos.fetch_add(1, Ordering::Relaxed); // 移动读取指针
 
@@ -84,9 +84,9 @@ impl MemStorage {
             .ok_or_else(|| anyhow!("Partition {} not found", partition))?;
 
         {
-            let mut messages = partition_queue.messages.lock().unwrap();
+            let mut messages_wl = partition_queue.messages.write().await;
             // 移除已提交的消息
-            messages.pop_front();
+            messages_wl.pop_front();
         }
 
         // 调整指针位置
@@ -101,7 +101,7 @@ impl MemStorage {
 #[async_trait]
 impl StorageWriter for MemStorage {
     /// 存储消息到指定 topic 和 partition
-    async fn store(&self, topic: &str, partition: u32, data: Bytes) -> Result<()> {
+    async fn store(&self, topic: &str, partition: u32, datas: &[Bytes]) -> Result<()> {
         let topic_storage =
             self.topics
                 .entry(topic.to_string())
@@ -114,11 +114,14 @@ impl StorageWriter for MemStorage {
             .entry(partition)
             .or_insert_with(|| PartitionQueue {
                 sema: Arc::new(Semaphore::new(0)),
-                messages: Arc::new(Mutex::new(VecDeque::new())),
+                messages: Arc::new(RwLock::new(VecDeque::new())),
                 read_pos: Arc::new(AtomicUsize::new(0)),
             });
 
-        partition_queue.messages.lock().unwrap().push_back(data);
+        let mut wl = partition_queue.messages.write().await;
+        for data in datas {
+            wl.push_back(data.clone());
+        }
         partition_queue.sema.add_permits(1);
         Ok(())
     }

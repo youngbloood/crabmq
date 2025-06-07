@@ -29,9 +29,13 @@ NVMExpress:
               Capacity: 499.96 GB (499,963,174,912 bytes)
               BSD Name: disk0s2
               Content: Apple_APFS
-              
 
-执行`cargo test --release run_flush_benchmark -- --show-output --nocapture`得出结果:
+fdesetup status:                                                                                                                                     
+FileVault is On.
+
+              
+测试方式:
+编译 ./cmd/storage_bench 并执行。
 
 
 1. 起始速度: 300 MB/s, 步长增速: 150 MB/s, 单步持续时长: 20s, 最大速率: 1500 MB/s

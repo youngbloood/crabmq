@@ -270,7 +270,7 @@ where
         let payload = Bytes::from_owner(req.payload);
         // 存储消息
         self.storage_writer
-            .store(&req.topic, req.partition, payload.clone())
+            .store(&req.topic, req.partition, &[payload.clone()])
             .await
             .map_err(|e| {
                 error!(

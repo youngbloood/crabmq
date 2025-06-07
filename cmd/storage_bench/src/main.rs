@@ -26,46 +26,46 @@ async fn main() -> Result<()> {
             partition_count: 10000,
             message_size: 10 * 1024,
             warmup_duration: Duration::from_secs(20),
-            current_rate: 200,
+            current_rate: 300,
             rate_step: 150,
             test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1200,
+            max_rate_mbps: 1500,
         },
         TestArgs {
             partition_count: 5000,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(17),
-            current_rate: 200,
-            rate_step: 100,
-            test_duration: Duration::from_secs(17),
-            max_rate_mbps: 1200,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
         },
         TestArgs {
             partition_count: 2000,
             message_size: 10 * 1024,
             warmup_duration: Duration::from_secs(15),
-            current_rate: 200,
-            rate_step: 100,
+            current_rate: 300,
+            rate_step: 150,
             test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1200,
+            max_rate_mbps: 1500,
         },
         TestArgs {
             partition_count: 1000,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(12),
-            current_rate: 200,
-            rate_step: 100,
-            test_duration: Duration::from_secs(12),
-            max_rate_mbps: 1200,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
         },
         TestArgs {
             partition_count: 500,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(7),
-            current_rate: 100,
-            rate_step: 100,
-            test_duration: Duration::from_secs(7),
-            max_rate_mbps: 1000,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
         },
     ];
 
@@ -130,7 +130,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         warmup_handles.push(tokio::spawn(async move {
             while warmup_start.elapsed() < warmup_duration {
                 let msg = message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                if let Err(e) = store.store(&topic, partition, msg).await {
+                if let Err(e) = store.store(&topic, partition, &[msg]).await {
                     eprintln!("store.store err: {e:?}");
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -231,7 +231,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
                     let msg_idx = rand::random::<u32>() as usize % message_pool.len();
                     let msg = message_pool[msg_idx].clone();
-                    if let Err(e) = store.store(&topic, partition, msg).await {
+                    if let Err(e) = store.store(&topic, partition, &[msg]).await {
                         eprintln!("store.store err: {e:?}");
                         break;
                     }
