@@ -1,6 +1,6 @@
 use crate::disk::{
     Config,
-    fd_cache::{FileHandlerWriterAsync, create_writer_fd_with_prealloc},
+    fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
     meta::{WriterPositionPtr, gen_record_filename},
     writer::flusher::Flusher,
 };
@@ -11,7 +11,7 @@ use crossbeam::queue::SegQueue;
 use log::error;
 use std::{
     ffi::OsString,
-    io::{IoSlice, SeekFrom},
+    io::{IoSlice, Seek, SeekFrom},
     os::fd,
     path::PathBuf,
     ptr,
@@ -22,22 +22,29 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
+#[cfg(target_os = "linux")]
+use tokio::sync::RwLock;
+use tokio_uring::fs::File as UringFile;
 
 #[derive(Clone)]
-pub struct PartitionWriterBuffer {
+pub(crate) struct PartitionWriterBuffer {
     dir: PathBuf,
     conf: Config,
 
     // 当前写的文件因子：用于构成写入的目标文件
     current_factor: Arc<AtomicU64>,
 
-    pub current_fd: FileHandlerWriterAsync,
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) current_fd: FileHandlerWriterAsync,
+
+    #[cfg(target_os = "linux")]
+    pub(crate) current_fd: Arc<RwLock<UringFile>>,
 
     // 先将数据存入内存缓冲区
-    pub buffer: Arc<SegQueue<Bytes>>,
+    pub(crate) buffer: Arc<SegQueue<Bytes>>,
 
     // 写相关的位置指针
-    pub write_ptr: Arc<WriterPositionPtr>,
+    pub(crate) write_ptr: Arc<WriterPositionPtr>,
 
     // 是否已经预创建了下一个 record 文件
     has_create_next_record_file: Arc<AtomicBool>,
@@ -49,7 +56,7 @@ pub struct PartitionWriterBuffer {
 }
 
 impl PartitionWriterBuffer {
-    pub async fn new(
+    pub(crate) async fn new(
         dir: PathBuf,
         conf: &Config,
         write_ptr: Arc<WriterPositionPtr>,
@@ -89,21 +96,12 @@ impl PartitionWriterBuffer {
             0
         };
 
-        let current_fd = FileHandlerWriterAsync::new(create_writer_fd_with_prealloc(
-            &dir.join(gen_record_filename(max_file)),
-            max_size_per_file,
-        )?);
-
-        // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
-        current_fd
-            .write()
-            .await
-            .seek(SeekFrom::Start(write_ptr.get_flush_offset()))
-            .await?;
+        let current_fd = get_current_fd(&dir, max_file, write_ptr.get_flush_offset()).await?;
 
         Ok(Self {
             dir: dir.clone(),
             current_factor: Arc::new(factor),
+            #[cfg(not(target_os = "linux"))]
             current_fd,
             conf: conf.clone(),
             buffer: Arc::new(SegQueue::new()),
@@ -115,6 +113,35 @@ impl PartitionWriterBuffer {
                 ..Default::default()
             }),
         })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn get_current_fd(
+        dir: &PathBuf,
+        max_file: u64,
+        offset: u64,
+    ) -> Result<FileHandlerWriterAsync> {
+        let current_fd = FileHandlerWriterAsync::new(create_writer_fd_with_prealloc(
+            &dir.join(gen_record_filename(max_file)),
+            max_size_per_file,
+        )?);
+
+        // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
+        current_fd
+            .write()
+            .await
+            .seek(SeekFrom::Start(offset))
+            .await?;
+    }
+
+    // #[cfg(target_os = "linux")]
+    async fn get_current_fd(dir: &PathBuf, max_file: u64, offset: u64) -> Result<UringFile> {
+        let mut std_fd = create_writer_fd(&dir.join(gen_record_filename(max_file)))?
+            .into_std()
+            .await;
+        std_fd.seek(SeekFrom::Start(offset))?;
+        let uring_fd = UringFile::from_std(std_fd);
+        Ok(Arc::new(RwLock::new(uring_fd)))
     }
 
     async fn rotate_file(&self) {
@@ -153,7 +180,7 @@ impl PartitionWriterBuffer {
     }
 
     // 写入到 buffer 中
-    pub async fn write_batch(&self, batch: &[Bytes]) -> Result<()> {
+    pub(crate) async fn write_batch(&self, batch: &[Bytes]) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -218,7 +245,8 @@ impl PartitionWriterBuffer {
     }
 
     // 将数据从内存刷盘
-    pub async fn flush(&self, fsync: bool) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) async fn flush(&self, fsync: bool) -> Result<()> {
         let start = std::time::Instant::now();
         let start_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -241,6 +269,92 @@ impl PartitionWriterBuffer {
         if let Err(e) = fd_wl.write_vectored(&slices).await {
             return Err(anyhow!(e));
         }
+        // 更新刷盘位置
+        self.write_ptr.rotate_flush_offset(flushed_bytes);
+        // 批量同步
+        if fsync {
+            let fd = self.current_fd.clone();
+            tokio::spawn(async move {
+                let _ = fd.write().await.sync_data().await;
+            });
+        }
+
+        // 更新刷盘指标
+        if self.conf.with_metrics {
+            let elapsed = start.elapsed().as_micros() as u64;
+            let end_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as u64;
+
+            self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .flush_bytes
+                .fetch_add(flushed_bytes, Ordering::Relaxed);
+            self.metrics
+                .flush_latency_us
+                .fetch_add(elapsed, Ordering::Relaxed);
+
+            // 记录最早的刷盘时间
+            let current_min = self.metrics.min_start_timestamp.load(Ordering::Relaxed);
+            if start_timestamp < current_min {
+                self.metrics
+                    .min_start_timestamp
+                    .compare_exchange(
+                        current_min,
+                        start_timestamp,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
+            }
+
+            // 记录最晚的刷盘时间
+            let current_max = self.metrics.max_end_timestamp.load(Ordering::Relaxed);
+            if end_timestamp > current_max {
+                self.metrics
+                    .max_end_timestamp
+                    .compare_exchange(
+                        current_max,
+                        end_timestamp,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
+            }
+        }
+
+        Ok(())
+    }
+
+    // 将数据从内存刷盘
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn flush(&self, fsync: bool) -> Result<()> {
+        let start = std::time::Instant::now();
+        let start_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        let mut flushed_bytes = 0_u64;
+        let mut datas = Vec::with_capacity(self.buffer.len());
+        // 数据零拷贝
+        while let Some(data) = self.buffer.pop() {
+            flushed_bytes += data.len() as u64;
+            datas.push(data);
+        }
+        if flushed_bytes == 0 {
+            return Ok(());
+        }
+
+        let slices: Vec<IoSlice> = datas.iter().map(|v| IoSlice::new(v.as_ref())).collect();
+
+        let pos: u64 = self.write_ptr.get_flush_offset();
+        self.current_fd
+            .write()
+            .await
+            .writev_at_all(slices, Some(pos))
+            .await;
         // 更新刷盘位置
         self.write_ptr.rotate_flush_offset(flushed_bytes);
         // 批量同步

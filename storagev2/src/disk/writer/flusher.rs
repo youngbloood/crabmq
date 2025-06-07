@@ -21,14 +21,14 @@ use tokio_util::sync::CancellationToken;
 const FLUSH_CHUNK_SIZE: usize = 50;
 
 #[derive(Clone, Debug)]
-pub struct PartitionState {
+pub(crate) struct PartitionState {
     pub last_write_time: Instant,
     pub write_count: u32,
     pub flush_state: FlushState,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum FlushState {
+pub(crate) enum FlushState {
     Hot,   // 高频写入分区
     Warm,  // 近期写入分区
     Cold,  // 空闲分区
@@ -39,7 +39,7 @@ type FlushUnitPartitionWriterBuffer = (bool, Vec<Arc<PartitionWriterBuffer>>);
 type FlushUnitWriterPositionPtr = (bool, Vec<Arc<WriterPositionPtr>>);
 
 #[derive(Clone)]
-pub struct Flusher {
+pub(crate) struct Flusher {
     stop: CancellationToken,
     fd_cache: Arc<FdWriterCacheAync>,
 
@@ -71,7 +71,7 @@ impl Drop for Flusher {
 }
 
 impl Flusher {
-    pub fn new(
+    pub(crate) fn new(
         stop: CancellationToken,
         partition_writer_buffer_tasks_num: usize,
         partition_writer_ptr_tasks_num: usize,
@@ -160,7 +160,7 @@ impl Flusher {
         }
     }
 
-    pub async fn run(&mut self, mut flush_signal: mpsc::Receiver<()>) {
+    pub(crate) async fn run(&mut self, mut flush_signal: mpsc::Receiver<()>) {
         let mut state_updater = tokio::time::interval(Duration::from_secs(5));
         let mut hot_ticker = time::interval(self.interval);
         let mut warm_ticker = time::interval(self.interval * 10 * 10);
@@ -198,7 +198,7 @@ impl Flusher {
     }
 
     #[inline]
-    pub fn add_partition_writer(&self, key: PathBuf, writer: PartitionWriterBuffer) {
+    pub(crate) fn add_partition_writer(&self, key: PathBuf, writer: PartitionWriterBuffer) {
         self.partition_writer_buffers
             .insert(key.clone(), Arc::new(writer));
         self.partition_states.insert(
@@ -212,12 +212,12 @@ impl Flusher {
     }
 
     #[inline]
-    pub fn add_topic_meta(&self, topic: PathBuf, meta: TopicMeta) {
+    pub(crate) fn add_topic_meta(&self, topic: PathBuf, meta: TopicMeta) {
         self.topic_metas.insert(topic, meta);
     }
 
     #[inline]
-    pub fn add_partition_writer_ptr(&self, partition: PathBuf, ptr: Arc<WriterPositionPtr>) {
+    pub(crate) fn add_partition_writer_ptr(&self, partition: PathBuf, ptr: Arc<WriterPositionPtr>) {
         self.partition_writer_ptrs.insert(partition, ptr);
     }
 
@@ -233,7 +233,7 @@ impl Flusher {
     }
 
     // 更新指定的 partition_states 的所有信息
-    pub fn update_partition_write_count(&self, p: &PathBuf, write_count: u32) {
+    pub(crate) fn update_partition_write_count(&self, p: &PathBuf, write_count: u32) {
         if let Some(mut state) = self.partition_states.get_mut(p) {
             state.last_write_time = Instant::now();
             state.write_count += write_count;
@@ -241,7 +241,7 @@ impl Flusher {
         }
     }
 
-    pub fn calculate_flush_state(last_write_time: Instant) -> FlushState {
+    pub(crate) fn calculate_flush_state(last_write_time: Instant) -> FlushState {
         let now = Instant::now();
         if now.duration_since(last_write_time) < Duration::from_secs(10) {
             FlushState::Hot
@@ -254,7 +254,7 @@ impl Flusher {
         }
     }
 
-    pub async fn flush_topic_partition(&self, p: &PathBuf, fsync: bool) -> Result<()> {
+    pub(crate) async fn flush_topic_partition(&self, p: &PathBuf, fsync: bool) -> Result<()> {
         let pwb = self.partition_writer_buffers.get(p);
         if pwb.is_none() {
             return Err(anyhow!(
@@ -345,7 +345,7 @@ impl Flusher {
 // metrics
 impl Flusher {
     // 添加获取分区指标的方法
-    pub fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
+    pub(crate) fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
         // if let Some(ts) = self.topics.get(topic) {
         let mut result = vec![];
         for pwb in self.partition_writer_buffers.iter() {
@@ -368,7 +368,7 @@ impl Flusher {
         result
     }
 
-    pub fn reset_metrics(&self) {
+    pub(crate) fn reset_metrics(&self) {
         for entry in self.partition_writer_buffers.iter() {
             let pwb = entry.value();
             pwb.reset_metrics();
@@ -378,7 +378,7 @@ impl Flusher {
 
 // 添加监控结构体
 #[derive(Default, Clone, Debug)]
-pub struct PartitionMetrics {
+pub(crate) struct PartitionMetrics {
     pub partition_path: PathBuf,
     pub flush_count: Arc<AtomicU64>,         // 刷盘次数
     pub flush_bytes: Arc<AtomicU64>,         // 刷盘字节数
