@@ -3,7 +3,7 @@ use futures::future::join_all;
 use std::sync::Arc;
 use std::time::Duration;
 use structopt::StructOpt;
-use tokio::sync::mpsc;
+use tokio::sync::{Barrier, mpsc};
 use tokio::time;
 
 #[derive(StructOpt, Debug)]
@@ -34,34 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     println!("Starting producer test with config: {:?}", args);
     // 创建消息内容（一次性创建，避免重复分配）
-    let message_content = Arc::new(vec![
-        Bytes::from(vec![b'a'; args.message_size]),
-        Bytes::from(vec![b'b'; args.message_size]),
-        Bytes::from(vec![b'c'; args.message_size]),
-        Bytes::from(vec![b'd'; args.message_size]),
-        Bytes::from(vec![b'e'; args.message_size]),
-        Bytes::from(vec![b'f'; args.message_size]),
-        Bytes::from(vec![b'g'; args.message_size]),
-        Bytes::from(vec![b'h'; args.message_size]),
-        Bytes::from(vec![b'i'; args.message_size]),
-        Bytes::from(vec![b'j'; args.message_size]),
-        Bytes::from(vec![b'k'; args.message_size]),
-        Bytes::from(vec![b'l'; args.message_size]),
-        Bytes::from(vec![b'm'; args.message_size]),
-        Bytes::from(vec![b'n'; args.message_size]),
-        Bytes::from(vec![b'o'; args.message_size]),
-        Bytes::from(vec![b'p'; args.message_size]),
-        Bytes::from(vec![b'q'; args.message_size]),
-        Bytes::from(vec![b'r'; args.message_size]),
-        Bytes::from(vec![b's'; args.message_size]),
-        Bytes::from(vec![b't'; args.message_size]),
-        Bytes::from(vec![b'u'; args.message_size]),
-        Bytes::from(vec![b'v'; args.message_size]),
-        Bytes::from(vec![b'w'; args.message_size]),
-        Bytes::from(vec![b'x'; args.message_size]),
-        Bytes::from(vec![b'y'; args.message_size]),
-        Bytes::from(vec![b'z'; args.message_size]),
-    ]);
+    let message_content: Arc<Vec<Bytes>> = Arc::new(
+        (0..26)
+            .map(|v| Bytes::from(vec![b'a' + v; args.message_size]))
+            .collect(),
+    );
 
     // 模拟 num_producers 个客户端
     let mut txs = vec![];
@@ -92,11 +69,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("准备进入消息发送阶段");
     // 创建生产者任务
-    let start_time = time::Instant::now();
+
     let mut handles = Vec::with_capacity(args.num_producers);
+    let barrier = Arc::new(Barrier::new(txs.len() + 1));
     for tx in txs {
         let message_content = message_content.clone();
+        let barrier = barrier.clone();
         handles.push(tokio::spawn(async move {
+            barrier.wait().await;
             for msg_id in 0..args.num_messages {
                 // 创建带唯一标识的键
                 // let key = format!("prod-{}-msg-{}", producer_id, msg_id);
@@ -113,13 +93,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // 添加少量延迟以模拟真实场景
-                if msg_id % 100 == 0 {
-                    time::sleep(Duration::from_micros(10)).await;
-                }
+                // if msg_id % 100 == 0 {
+                //     time::sleep(Duration::from_micros(10)).await;
+                // }
             }
             println!("Producer[{}] finished", tx.0);
         }));
     }
+
+    let start_time = time::Instant::now();
+    barrier.wait().await;
     // 等待所有生产者完成
     join_all(handles).await;
 

@@ -348,7 +348,6 @@ impl Publisher {
                 .new_topic(&self.topic.clone(), partition_num)
                 .await?;
 
-            println!("tpds = {:?}", tpds);
             // println!("tpds = {:?}", tpds);
             for tpd in tpds {
                 let _ = self

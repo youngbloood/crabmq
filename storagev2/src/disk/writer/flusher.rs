@@ -345,7 +345,7 @@ impl Flusher {
 // metrics
 impl Flusher {
     // 添加获取分区指标的方法
-    pub(crate) fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
+    pub fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
         // if let Some(ts) = self.topics.get(topic) {
         let mut result = vec![];
         for pwb in self.partition_writer_buffers.iter() {
@@ -368,7 +368,7 @@ impl Flusher {
         result
     }
 
-    pub(crate) fn reset_metrics(&self) {
+    pub fn reset_metrics(&self) {
         for entry in self.partition_writer_buffers.iter() {
             let pwb = entry.value();
             pwb.reset_metrics();
@@ -378,7 +378,7 @@ impl Flusher {
 
 // 添加监控结构体
 #[derive(Default, Clone, Debug)]
-pub(crate) struct PartitionMetrics {
+pub struct PartitionMetrics {
     pub partition_path: PathBuf,
     pub flush_count: Arc<AtomicU64>,         // 刷盘次数
     pub flush_bytes: Arc<AtomicU64>,         // 刷盘字节数

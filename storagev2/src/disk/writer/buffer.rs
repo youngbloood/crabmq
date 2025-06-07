@@ -5,16 +5,14 @@ use crate::disk::{
     writer::flusher::Flusher,
 };
 use anyhow::{Result, anyhow};
-use bytes::{BufMut as _, Bytes, BytesMut};
+use bytes::Bytes;
 use common::dir_recursive;
 use crossbeam::queue::SegQueue;
 use log::error;
 use std::{
     ffi::OsString,
-    io::{IoSlice, Seek, SeekFrom},
-    os::fd,
+    io::{IoSlice, SeekFrom},
     path::PathBuf,
-    ptr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -22,9 +20,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
-#[cfg(target_os = "linux")]
-use tokio::sync::RwLock;
-use tokio_uring::fs::File as UringFile;
+// use tokio_uring::fs::File as UringFile;
 
 #[derive(Clone)]
 pub(crate) struct PartitionWriterBuffer {
@@ -96,7 +92,7 @@ impl PartitionWriterBuffer {
             0
         };
 
-        let current_fd = get_current_fd(&dir, max_file, write_ptr.get_flush_offset()).await?;
+        let current_fd = Self::get_current_fd(&dir, max_file, write_ptr.get_flush_offset()).await?;
 
         Ok(Self {
             dir: dir.clone(),
@@ -121,9 +117,8 @@ impl PartitionWriterBuffer {
         max_file: u64,
         offset: u64,
     ) -> Result<FileHandlerWriterAsync> {
-        let current_fd = FileHandlerWriterAsync::new(create_writer_fd_with_prealloc(
+        let current_fd = FileHandlerWriterAsync::new(create_writer_fd(
             &dir.join(gen_record_filename(max_file)),
-            max_size_per_file,
         )?);
 
         // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
@@ -132,9 +127,11 @@ impl PartitionWriterBuffer {
             .await
             .seek(SeekFrom::Start(offset))
             .await?;
+
+        Ok(current_fd)
     }
 
-    // #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     async fn get_current_fd(dir: &PathBuf, max_file: u64, offset: u64) -> Result<UringFile> {
         let mut std_fd = create_writer_fd(&dir.join(gen_record_filename(max_file)))?
             .into_std()

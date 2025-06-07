@@ -262,11 +262,11 @@ where
         if !self.partitions.is_my_partition(&req.topic, req.partition) {
             return Err(BrokerError::InvalidPartition);
         }
-        println!(
-            "broker[{}] 收到分区[{}]的消息",
-            self.get_id(),
-            req.partition
-        );
+        // println!(
+        //     "broker[{}] 收到分区[{}]的消息",
+        //     self.get_id(),
+        //     req.partition
+        // );
         let payload = Bytes::from_owner(req.payload);
         // 存储消息
         self.storage_writer

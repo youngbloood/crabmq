@@ -247,6 +247,7 @@ impl DiskStorageWriter {
                             break;
                         }
 
+                        // TODO: recv_many()
                         res = rx_worker.recv() => {
                             if res.is_none(){
                                 continue;
@@ -294,114 +295,23 @@ impl DiskStorageWriter {
         self.workers.iter().find(|_| true).unwrap().value().clone()
     }
 
-    // async fn get_partition_writer(
-    //     &self,
-    //     topic: &str,
-    //     partition_id: u32,
-    // ) -> Result<mpsc::Sender<Bytes>> {
-    //     let ts = self.get_topic_storage(topic).await?;
-
-    //     // 第一重检查：快速路径
-    //     if let Some(pwb) = ts.partitions.get(&partition_id) {
-    //         return Ok(pwb.value().clone());
-    //     }
-
-    //     // 获取或创建partition级别的锁
-    //     let partition_lock = ts
-    //         .partition_create_locks
-    //         .entry(partition_id)
-    //         .or_insert_with(|| Mutex::new(()));
-    //     let _partition_lock = partition_lock.value().lock().await;
-
-    //     // 第二重检查：在持有锁后再次检查
-    //     if let Some(pwb) = ts.partitions.get(&partition_id) {
-    //         return Ok(pwb.value().clone());
-    //     }
-
-    //     let (tx_partition, mut rx_partition) =
-    //         mpsc::channel(self.conf.partition_writer_buffer_size);
-
-    //     let _flusher = self.flusher.clone();
-    //     let conf = self.conf.clone();
-    //     let max_size_per_file = self.conf.max_size_per_file;
-    //     let _fd_cache = self.fd_cache.clone();
-    //     let _stop = self.stop.clone();
-    //     tokio::spawn(async move {
-    //         // 先加载/创建 PartitionWriterPtr
-    //         let dir = ts.dir.join(format!("{}", partition_id));
-    //         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-    //             error!("get_partition_writer create_dir_all err: {e:?}");
-    //             rx_partition.close();
-    //             return;
-    //         }
-
-    //         // 加载写指针文件
-    //         let writer_ptr_filename = dir.join(WRITER_PTR_FILENAME);
-    //         let wpp = if writer_ptr_filename.exists() {
-    //             match WriterPositionPtr::load(&writer_ptr_filename).await {
-    //                 Ok(pwp) => pwp,
-    //                 Err(e) => {
-    //                     error!("get_partition_writer WriterPositionPtr load err: {e:?}");
-    //                     rx_partition.close();
-    //                     return;
-    //                 }
-    //             }
-    //         } else {
-    //             match WriterPositionPtr::new(
-    //                 writer_ptr_filename.clone(),
-    //                 dir.join(gen_record_filename(0)),
-    //             ) {
-    //                 Ok(ptr) => ptr,
-    //                 Err(e) => {
-    //                     error!("get_partition_writer WriterPositionPtr new err: {e:?}");
-    //                     rx_partition.close();
-    //                     return;
-    //                 }
-    //             }
-    //         };
-
-    //         // 加载
-    //         let wpp = Arc::new(wpp);
-    //         match PartitionWriterBuffer::new(dir.clone(), &conf, wpp.clone(), _flusher.clone())
-    //             .await
-    //         {
-    //             Ok(pwb) => {
-    //                 _flusher.add_partition_writer(dir.clone(), pwb.clone());
-    //                 _flusher.add_partition_writer_ptr(writer_ptr_filename, wpp.clone());
-    //                 let buffer_size_half = conf.partition_writer_buffer_size / 2 + 1;
-    //                 let mut datas: Vec<Bytes> = Vec::with_capacity(buffer_size_half);
-    //                 loop {
-    //                     if rx_partition.is_closed() {
-    //                         break;
-    //                     }
-    //                     select! {
-    //                         _ = _stop.cancelled() => {
-    //                             warn!("DiskStorageWriter: get_partition_writer receive stop signal, exit");
-    //                             break;
-    //                         }
-
-    //                         s = rx_partition.recv_many(&mut datas, buffer_size_half) => {
-    //                             let _ = pwb.write_batch(&datas[..s]).await;
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //             Err(e) => {
-    //                 error!("get_partition_writer PartitionWriterBuffer new err: {e:?}");
-    //                 rx_partition.close();
-    //             }
-    //         };
-    //     });
-    //     ts.partitions.insert(partition_id, tx_partition.clone());
-    //     Ok(tx_partition)
-    // }
-
-    async fn write(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
+    async fn write_to_worker(&self, topic: &str, partition_id: u32, data: Bytes) -> Result<()> {
         let worker_id =
             partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
         let worker = self.get_worker(worker_id as _).await;
         worker.send((topic.to_string(), partition_id, data)).await?;
         Ok(())
+    }
+
+    fn get_cached_partition(&self, topic: &str, pid: u32) -> Option<PartitionWriterBuffer> {
+        // 基于DashMap的原子查询
+        let ts = self.topic_manager.topics.get(topic);
+        ts.as_ref()?;
+        let ts = ts.unwrap();
+        let pwb = ts.partitions.get(&pid);
+        pwb.as_ref()?;
+        let pwb = pwb.unwrap();
+        Some(pwb.value().clone())
     }
 }
 
@@ -424,7 +334,12 @@ impl StorageWriter for DiskStorageWriter {
         if data.is_empty() {
             return Err(anyhow!("can't store empty data"));
         }
-        self.write(topic, partition_id, data).await?;
+        if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
+            pwb.write_batch(&[data]).await?;
+        } else {
+            self.write_to_worker(topic, partition_id, data).await?;
+        }
+
         Ok(())
     }
 }
@@ -712,7 +627,7 @@ mod test {
         );
         // 创建消息内容池
         let message_pool: Vec<Bytes> = (0..26)
-            .map(|_| Bytes::from(vec![b'a' + 1; message_size]))
+            .map(|v| Bytes::from(vec![b'a' + v; message_size]))
             .collect();
         let message_pool = Arc::new(message_pool);
 

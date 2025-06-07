@@ -9,63 +9,62 @@ use storagev2::{
 use tokio::sync::Barrier;
 
 #[tokio::main]
-
 async fn main() -> Result<()> {
     struct TestArgs {
         partition_count: u32,      // 分区数量
-        message_size: usize,       // 10KB
+        message_size: usize,       // 单个消息大小
         warmup_duration: Duration, // 预热时长
-        current_rate: usize,       // 起始速率 MB/s
+        current_rate: usize,       // 起始速率 (MB/s)
         rate_step: usize,          // 速率步长 (MB/s)
         test_duration: Duration,   // 每个速率级别的测试时长
-        max_rate_mbps: usize,      // 降低最大测试速率
+        max_rate_mbps: usize,      // 最大测试速率
     }
 
     // 测试时修改参数
     let args = vec![
         TestArgs {
-            partition_count: 1,
+            partition_count: 10000,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(5),
-            current_rate: 50,
-            rate_step: 50,
-            test_duration: Duration::from_secs(5),
-            max_rate_mbps: 300,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 200,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1200,
         },
         TestArgs {
-            partition_count: 10,
+            partition_count: 5000,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(5),
-            current_rate: 50,
-            rate_step: 50,
-            test_duration: Duration::from_secs(5),
-            max_rate_mbps: 1000,
+            warmup_duration: Duration::from_secs(17),
+            current_rate: 200,
+            rate_step: 100,
+            test_duration: Duration::from_secs(17),
+            max_rate_mbps: 1200,
         },
         TestArgs {
-            partition_count: 30,
+            partition_count: 2000,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(5),
-            current_rate: 50,
-            rate_step: 50,
-            test_duration: Duration::from_secs(5),
-            max_rate_mbps: 1000,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 200,
+            rate_step: 100,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1200,
         },
         TestArgs {
-            partition_count: 50,
+            partition_count: 1000,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(5),
-            current_rate: 50,
-            rate_step: 50,
-            test_duration: Duration::from_secs(5),
-            max_rate_mbps: 1000,
+            warmup_duration: Duration::from_secs(12),
+            current_rate: 200,
+            rate_step: 100,
+            test_duration: Duration::from_secs(12),
+            max_rate_mbps: 1200,
         },
         TestArgs {
-            partition_count: 100,
+            partition_count: 500,
             message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(5),
-            current_rate: 50,
-            rate_step: 50,
-            test_duration: Duration::from_secs(5),
+            warmup_duration: Duration::from_secs(7),
+            current_rate: 100,
+            rate_step: 100,
+            test_duration: Duration::from_secs(7),
             max_rate_mbps: 1000,
         },
     ];
@@ -88,12 +87,12 @@ async fn main() -> Result<()> {
 
 async fn test_flush_speed_with_dynamic_rate_multi_partition(
     partition_count: u32,      // 分区数量
-    message_size: usize,       // 10KB
+    message_size: usize,       // 单个消息大小
     warmup_duration: Duration, // 预热时长
-    current_rate: usize,       // 起始速率 MB/s
+    current_rate: usize,       // 起始速率 (MB/s)
     rate_step: usize,          // 速率步长 (MB/s)
     test_duration: Duration,   // 每个速率级别的测试时长
-    max_rate_mbps: usize,      // 降低最大测试速率
+    max_rate_mbps: usize,      // 最大测试速率
 ) -> Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::time::{Duration, Instant};
@@ -108,12 +107,6 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     let store = Arc::new(DiskStorageWriter::new(config)?);
     // 测试参数
     let topic = format!("flush_speed_test_{}", partition_count);
-    // let message_size = 10 * 1024; // 10KB
-    // let warmup_duration = Duration::from_secs(5); // 预热时长
-    // let max_rate_mbps = 1000; // 降低最大测试速率
-    // let rate_step = 50; // 速率步长 (MB/s)
-    // let current_rate = 50; // 起始速率 MB/s
-    // let test_duration = Duration::from_secs(5); // 每个速率级别的测试时长
 
     println!(
         "起始速度: {current_rate} MB/s, 步长增速: {rate_step} MB/s, 单步持续时长: {}s, 最大速率: {max_rate_mbps} MB/s",
@@ -121,7 +114,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     );
     // 创建消息内容池
     let message_pool: Vec<Bytes> = (0..26)
-        .map(|_| Bytes::from(vec![b'a' + 1; message_size]))
+        .map(|v| Bytes::from(vec![b'a' + v; message_size]))
         .collect();
     let message_pool = Arc::new(message_pool);
 
@@ -150,36 +143,38 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
     // 获取初始刷盘指标 - 确保分区已初始化
     println!("等待分区初始化...");
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
     let mut initial_metrics = store.get_partition_metrics();
     println!("初始指标数量: {}", initial_metrics.len());
 
     // 如果指标数量不足，尝试重新获取
     if initial_metrics.len() < partition_count as usize {
-        println!("检测到分区指标缺失，重新获取...");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        initial_metrics = store.get_partition_metrics();
-    }
-
-    // 确保所有分区都有指标
-    if initial_metrics.len() != partition_count as usize {
-        println!(
-            "警告: 初始化分区指标数量 ({}) 不等于分区数量 ({})",
-            initial_metrics.len(),
-            partition_count
-        );
+        loop {
+            println!("检测到分区指标缺失，重新获取...");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            initial_metrics = store.get_partition_metrics();
+            if (initial_metrics.len() as f64 / partition_count as f64) < 0.85 {
+                println!(
+                    "警告: 初始化分区指标数量丢失严重: 初始化分区数量/分区数量 = {:.1}/{:.1}*100% = {:2}%",
+                    initial_metrics.len(),
+                    partition_count,
+                    (initial_metrics.len() as f64 / partition_count as f64) * 100.0
+                );
+                println!("注意: 'ulimit -n' 查看可打开的最大文件描述符数量");
+                continue;
+            }
+            break;
+        }
     }
 
     // 速率测试控制
     let mut results = vec![];
 
-    println!("\n{:-^94}", " 开始动态速率测试 (多分区) ");
+    println!("\n{:-^72}", " 开始动态速率测试 (多分区) ");
+    println!("|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|分区数|",);
     println!(
-        "|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|平均延迟(ms)|墙钟吞吐量(MB/s)|平均每分区吞吐量(MB/s)|分区数|",
-    );
-    println!(
-        "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<22}|{:-<6}|",
-        "", "", "", "", "", "", "", "",
+        "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<6}|",
+        "", "", "", "", "", "", "",
     );
 
     for target_rate in (current_rate..=max_rate_mbps).step_by(rate_step) {
@@ -349,47 +344,50 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         results.push((
             target_rate,
             actual_rate,
-            avg_partition_flush_throughput,
+            wall_clock_throughput,
             avg_flush_latency,
         ));
 
         // 打印结果
         println!(
-            "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>22.1}|{:>6}|",
+            "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>6}|",
             target_rate as f64,
             test_duration.as_secs_f64(),
             sent_bytes as f64 / 1024.0 / 1024.0,
             total_flushed_bytes as f64 / 1024.0 / 1024.0,
             wall_clock_time_us as f64 / 1_000.0,
             wall_clock_throughput,
-            avg_partition_flush_throughput,
+            // avg_partition_flush_throughput,
             partition_count
         );
     }
 
     // 分析结果找到瓶颈点
-    let mut max_throughput = 0.0;
+    let mut max_wall_clock_throughput = 0.0;
     let mut optimal_rate = 0.0;
 
     for (target_rate, _, throughput, _) in &results {
-        if *throughput > max_throughput {
-            max_throughput = *throughput;
+        if *throughput > max_wall_clock_throughput {
+            max_wall_clock_throughput = *throughput;
             optimal_rate = *target_rate as f64;
         }
     }
 
-    println!("\n{:-^100}", " 测试结果摘要 ");
-    println!("最大落盘吞吐量: {:.2} MB/s", max_throughput);
+    println!("\n{:-^78}", " 测试结果摘要 ");
+    println!("最大落盘吞吐量: {:.2} MB/s", max_wall_clock_throughput);
     println!("最佳发送速率: {:.2} MB/s", optimal_rate);
     println!("分区数量: {}", partition_count);
     println!("消息大小: {} KB", message_size / 1024);
 
     // 可视化结果
     println!("\n速率与吞吐量关系:");
-    for (target_rate, _, throughput, _) in &results {
-        let bar_len = (throughput / 50.0).round() as usize;
+    for (target_rate, _, wall_clock_throughput, _) in &results {
+        let bar_len = (wall_clock_throughput / 50.0).round() as usize;
         let bar = "█".repeat(bar_len);
-        println!("{:>5} MB/s: {:.1} MB/s |{}", target_rate, throughput, bar);
+        println!(
+            "{:>5} MB/s: {:.1} MB/s |{}",
+            target_rate, wall_clock_throughput, bar
+        );
     }
 
     println!("\n清除测试数据...");
@@ -397,4 +395,19 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     tokio::fs::remove_dir_all("./flush_bench_data").await?;
 
     Ok(())
+}
+
+#[test]
+fn format_form() {
+    println!("\n{:-^72}", " 开始动态速率测试 (多分区) ");
+    println!("|速率(MB/s)|测试时长(s)|发送量(MB)|落盘量(MB)|墙钟耗时(ms)|墙钟吞吐量(MB/s)|分区数|",);
+    println!(
+        "|{:-<10}|{:-<11}|{:-<10}|{:-<10}|{:-<12}|{:-<16}|{:-<6}|",
+        "", "", "", "", "", "", "",
+    );
+    println!(
+        "|{:>10.1}|{:>11.1}|{:>10.1}|{:>10.1}|{:>12.1}|{:>16.1}|{:>6}|",
+        50.0, 5.0, 250.0, 300.2, 53.1, 60.0, 1
+    );
+    println!("\n{:-^78}", " 测试结果摘要 ");
 }
