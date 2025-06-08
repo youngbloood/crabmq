@@ -1,9 +1,5 @@
 use super::buffer::PartitionWriterBuffer;
-use crate::disk::{
-    StorageError,
-    fd_cache::FdWriterCacheAync,
-    meta::{TopicMeta, WriterPositionPtr},
-};
+use crate::disk::{StorageError, meta::WriterPositionPtr};
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use log::{error, warn};
@@ -43,9 +39,8 @@ pub(crate) struct Flusher {
     stop: CancellationToken,
 
     partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
-    pub partition_states: Arc<DashMap<PathBuf, PartitionState>>,
+    pub(crate) partition_states: Arc<DashMap<PathBuf, PartitionState>>,
 
-    topic_metas: Arc<DashMap<PathBuf, TopicMeta>>,
     partition_writer_ptrs: Arc<DashMap<PathBuf, Arc<WriterPositionPtr>>>,
     interval: Duration,
 
@@ -75,7 +70,6 @@ impl Flusher {
         partition_writer_buffer_tasks_num: usize,
         partition_writer_ptr_tasks_num: usize,
         interval: Duration,
-        fd_cache: Arc<FdWriterCacheAync>,
     ) -> Self {
         let mut buffer_tasks = vec![];
         for _ in 0..partition_writer_buffer_tasks_num {
@@ -88,7 +82,7 @@ impl Flusher {
                     }
                     select! {
                         _ = _stop.cancelled() => {
-                            warn!("Flusher: partition_writer_ptr_tasks receive stop signal, exit.");
+                            warn!("Flusher: partition_writer_buffer_tasks receive stop signal, exit.");
                             break;
                         }
 
@@ -113,8 +107,6 @@ impl Flusher {
         for _ in 0..partition_writer_ptr_tasks_num {
             let _stop = stop.clone();
             let (tx, mut rx) = mpsc::channel::<(bool, Vec<Arc<WriterPositionPtr>>)>(1);
-            let _fd_cache = fd_cache.clone();
-
             tokio::spawn(async move {
                 loop {
                     if rx.is_closed() {
@@ -148,7 +140,6 @@ impl Flusher {
             partition_writer_buffers: Arc::new(DashMap::new()),
             partition_states: Arc::default(),
             interval,
-            topic_metas: Arc::default(),
             partition_writer_ptrs: Arc::default(),
             partition_writer_buffer_tasks_num,
             partition_writer_buffer_tasks: Arc::new(buffer_tasks),
@@ -171,11 +162,11 @@ impl Flusher {
 
                 _ = warm_ticker.tick() => {
                     self.flush_by_state(FlushState::Warm, false);
+                    self.flush_partition_writer_ptr(false).await;
                 }
 
                 _ = cold_ticker.tick() => {
                     self.flush_by_state(FlushState::Cold, false);
-                    self.flush_topic_meta_and_partition_writer_ptr(false).await;
                 }
 
                 _ = flush_signal.recv() => {
@@ -195,6 +186,16 @@ impl Flusher {
         }
     }
 
+    // 添加分区移除方法
+    pub(crate) fn remove_partition_writer(&self, path: &PathBuf) {
+        // 从所有相关集合中移除分区
+        self.partition_writer_buffers.remove(path);
+        self.partition_states.remove(path);
+        self.partition_writer_ptrs.remove(path);
+
+        log::debug!("Removed partition from flusher: {:?}", path);
+    }
+
     #[inline]
     pub(crate) fn add_partition_writer(&self, key: PathBuf, writer: PartitionWriterBuffer) {
         self.partition_writer_buffers
@@ -207,11 +208,6 @@ impl Flusher {
                 flush_state: FlushState::Stale,
             },
         );
-    }
-
-    #[inline]
-    pub(crate) fn add_topic_meta(&self, topic: PathBuf, meta: TopicMeta) {
-        self.topic_metas.insert(topic, meta);
     }
 
     #[inline]
@@ -268,18 +264,7 @@ impl Flusher {
     }
 
     // fsync = false 时，交给操作系统刷脏页落盘
-    async fn flush_topic_meta_and_partition_writer_ptr(&self, fsync: bool) {
-        let topic_metas: Vec<(PathBuf, TopicMeta)> = self
-            .topic_metas
-            .iter_mut()
-            .map(|e| (e.key().clone(), e.value().clone()))
-            .collect();
-        for (filename, meta) in topic_metas {
-            if let Err(e) = meta.save().await {
-                error!("Flush topic_metas [{filename:?}] failed: {e:?}");
-            }
-        }
-
+    async fn flush_partition_writer_ptr(&self, fsync: bool) {
         // 处理 PartitionWriterPtr
         let partition_writer_ptrs: Vec<Arc<WriterPositionPtr>> = self
             .partition_writer_ptrs
@@ -317,8 +302,10 @@ impl Flusher {
             .partition_writer_buffers
             .iter()
             .filter(|entry| {
-                let state_entry = self.partition_states.get(entry.key()).unwrap();
-                state_entry.flush_state == state
+                if let Some(state_entry) = self.partition_states.get(entry.key()) {
+                    return state_entry.flush_state == state;
+                }
+                false
             })
             .map(|entry| entry.value().clone())
             .collect();
@@ -326,8 +313,7 @@ impl Flusher {
         // 每个task最大批次处理 FLUSH_CHUNK_SIZE 大小的刷盘任务
         let chunks = writers.chunks(FLUSH_CHUNK_SIZE);
         for chunk in chunks {
-            // 使用现有任务分发机制
-            // let idx = /* 计算任务索引 */;
+            /* 计算任务索引 */
             let idx = rand::random::<u32>() as usize;
             if let Err(e) = self.partition_writer_buffer_tasks
                 [idx % self.partition_writer_buffer_tasks_num]

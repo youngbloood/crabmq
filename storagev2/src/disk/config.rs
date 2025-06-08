@@ -14,7 +14,12 @@ pub struct Config {
 
     // PartitionWriter 中内存缓冲区长度，每个分区缓存写入消息的长度
     pub partition_writer_buffer_size: usize,
+    // partition record file prealloc
     pub partition_writer_prealloc: bool,
+    // 分区活跃检查间隔(秒)
+    pub partition_cleanup_interval: u64,
+    // 分区不活跃阈值(秒)，超过该值会被移除内存，等待下次活跃时加载
+    pub partition_inactive_threshold: u64,
 
     pub worker_tasks_num: usize,
     // 默认每个消息文件中的最大消息数量
@@ -68,6 +73,8 @@ pub fn default_config() -> Config {
         flusher_partition_writer_ptr_tasks_num: 64,
         partition_writer_buffer_size: 100,
         partition_writer_prealloc: false,
+        partition_cleanup_interval: 150,
+        partition_inactive_threshold: 300,
         max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
         max_size_per_file: 1024 * 1024 * 1024, // 1G
         compress_type: 0,

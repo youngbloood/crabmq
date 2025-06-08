@@ -29,7 +29,7 @@ where
 
     subscriber_timeout: u64,
 
-    storage_reader: SR,
+    storage_reader: Arc<SR>,
 }
 
 impl<SR> ConsumerGroupManager<SR>
@@ -42,7 +42,7 @@ where
             sessions: Arc::new(DashMap::new()),
             heartbeats: Arc::new(DashMap::new()),
             subscriber_timeout,
-            storage_reader: sr,
+            storage_reader: Arc::new(sr),
         };
 
         // 启动心跳检测任务

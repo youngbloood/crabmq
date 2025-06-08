@@ -215,8 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hist = latency_hist.lock().await;
     println!("\n{:=^80}", " BENCHMARK RESULTS ");
     println!(
-        "Message size per request: {:.2}k/q",
-        args.message_size / 1024.0
+        "Message size per request: {:.2} k/q",
+        args.message_size as f64 / 1024.0
     );
     println!("Test completed in {:.2?}", elapsed);
     println!("Total messages sent: {}", total_sent);

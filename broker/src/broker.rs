@@ -33,7 +33,7 @@ where
 {
     conf: Config,
 
-    storage_writer: SW,
+    storage_writer: Arc<SW>,
     partitions: PartitionManager,
     consumers: ConsumerGroupManager<SR>,
     message_bus: MessageBus,
@@ -49,7 +49,7 @@ where
 {
     pub fn new(conf: Config, sw: SW, sr: SR) -> Self {
         Self {
-            storage_writer: sw,
+            storage_writer: Arc::new(sw),
             partitions: PartitionManager::new(conf.id),
             consumers: ConsumerGroupManager::new(conf.subscriber_timeout, sr),
             message_bus: MessageBus::new(

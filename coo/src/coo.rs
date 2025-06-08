@@ -24,6 +24,7 @@ use grpcx::topic_meta::TopicPartitionDetail;
 use grpcx::{brokercoosvc, clientcoosvc};
 use log::error;
 use log::info;
+use log::warn;
 use partition::PartitionManager;
 use protobuf::Message as _;
 use raft::prelude::*;
@@ -52,6 +53,7 @@ pub struct Coordinator {
     raft_node_sender: mpsc::Sender<AllMessageType>,
 
     // coo: leader 收集到的 broker 上报信息
+    // broker_id -> BrokerState
     brokers: Arc<DashMap<u32, BrokerState>>,
 
     // 链接 coo 的客户端
@@ -81,7 +83,7 @@ impl Deref for Coordinator {
 
 impl Coordinator {
     pub fn new(
-        raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中 */
+        raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中，为空时表示自己为当前集群的第一个节点 */
         conf: CooConfig,
     ) -> Self {
         let partition_manager =
@@ -377,7 +379,7 @@ impl Coordinator {
         };
         for (topic, ta) in topic_assignment {
             ta.iter()
-                .map(|v| tpr.list.push(v.convert_to_topic_partition_meta(&topic)));
+                .for_each(|v| tpr.list.push(v.convert_to_topic_partition_meta(&topic)));
         }
 
         tpr
@@ -619,6 +621,7 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                     }
                 }
             }
+            warn!("unsubscribe broker_event_bus: {}", sub_id);
             // 连接结束时取消订阅
             bus.unsubscribe(&sub_id);
         });
@@ -705,7 +708,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         self.check_leader().await?;
 
         let req = request.into_inner();
-        println!("收到创建 topic 请求  req = {:?}", req);
+
         let (part, exist) = self
             .partition_manager
             .build_allocator(
@@ -716,7 +719,6 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
             .await
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
-        println!("收到创建 topic 响应 = {:?}", part);
         if exist {
             return Ok(Response::new(clientcoosvc::NewTopicResp {
                 success: true,
@@ -751,7 +753,6 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                                 partitions: part.clone(),
                             })
                             .await;
-
                         self.client_event_bus
                             .broadcast(PartitionEvent::NewTopic {
                                 partitions: part.clone(),
@@ -1167,5 +1168,28 @@ impl From<SinglePartition> for commonsvc::TopicPartitionResp {
             .collect();
 
         tp
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::path::Path;
+
+    use crate::coo::Coordinator;
+    use crate::default_config;
+    #[tokio::test]
+    async fn qeury_topics() {
+        let id = 1;
+        let mut conf = default_config();
+        let db_path = conf.db_path.clone();
+        conf = conf
+            .with_id(id)
+            .with_db_path(Path::new("..").join(&db_path).join(format!("coo{}", id)));
+        let coo = Coordinator::new("".to_string(), conf);
+
+        let ts = coo
+            .qeury_topics(&["mytopic1".to_string()], &[], &[], &[])
+            .await;
+        println!("ts = {:?}", ts);
     }
 }

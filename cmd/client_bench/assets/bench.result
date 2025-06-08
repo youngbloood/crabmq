@@ -1,0 +1,16 @@
+============================== BENCHMARK RESULTS ===============================
+Message size per request: 10.00 k/q
+Test completed in 12.01s
+Total messages sent: 1000000
+Errors: 0
+Throughput: 83238.37 msg/sec
+Data rate: 812.87 MB/sec
+
+
+============================== BENCHMARK RESULTS ===============================
+Message size per request: 1.00 k/q
+Test completed in 1.80s
+Total messages sent: 1000000
+Errors: 0
+Throughput: 554165.75 msg/sec
+Data rate: 541.18 MB/sec

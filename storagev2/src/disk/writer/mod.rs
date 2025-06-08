@@ -3,7 +3,6 @@ mod buffer;
 mod flusher;
 
 use super::Config as DiskConfig;
-use super::fd_cache::FdWriterCacheAync;
 use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
 use crate::StorageWriter;
 use crate::disk::StorageError;
@@ -14,14 +13,15 @@ use buffer::PartitionWriterBuffer;
 use bytes::Bytes;
 use dashmap::DashMap;
 use flusher::Flusher;
-use log::error;
+use log::{error, info};
 use murmur3::murmur3_32;
 use std::io::Cursor;
 use std::ops::Deref;
 use std::path::Path;
+use std::time::Instant;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::select;
 use tokio::sync::{Mutex, mpsc};
+use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
 const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
@@ -42,28 +42,111 @@ impl Deref for Worker {
 
 #[derive(Clone)]
 struct TopicPartitionManager {
-    dir: Arc<PathBuf>,
+    storage_dir: Arc<PathBuf>,
     conf: Arc<DiskConfig>,
     flusher: Arc<Flusher>,
     // (topic, partition_id) -> PartitionWriterBuffer
     partitions: Arc<DashMap<(String, u32), PartitionWriterBuffer>>,
     // 创建分区的互斥锁
     partition_create_locks: Arc<DashMap<u32, Mutex<()>>>,
+
+    last_write_times: Arc<DashMap<(String, u32), Instant>>, // 跟踪最后写入时间
+
+    stop: CancellationToken,
 }
 
 impl TopicPartitionManager {
-    fn new(dir: Arc<PathBuf>, conf: Arc<DiskConfig>, flusher: Arc<Flusher>) -> Self {
-        Self {
-            dir,
+    fn new(
+        storage_dir: Arc<PathBuf>,
+        conf: Arc<DiskConfig>,
+        flusher: Arc<Flusher>,
+        stop: CancellationToken,
+    ) -> Self {
+        let mut manager = Self {
+            storage_dir,
             conf,
             flusher,
             partitions: Arc::default(),
             partition_create_locks: Arc::default(),
-        }
+            last_write_times: Arc::default(),
+            stop,
+        };
+
+        manager.start_cleanup_task();
+        manager
+    }
+
+    // 启动后台清理任务
+    fn start_cleanup_task(&mut self) {
+        let partitions = self.partitions.clone();
+        let last_write_times = self.last_write_times.clone();
+        let flusher = self.flusher.clone();
+        let partition_create_locks = self.partition_create_locks.clone();
+        let cleanup_interval = Duration::from_secs(self.conf.partition_cleanup_interval);
+        let inactive_threshold = Duration::from_secs(self.conf.partition_inactive_threshold);
+        let stop = self.stop.clone();
+
+        tokio::spawn(async move {
+            let mut interval = time::interval(cleanup_interval);
+            loop {
+                select! {
+                    _ = stop.cancelled() => {
+                        break;
+                    }
+
+                    _ = interval.tick() => {
+                        // 收集需要清理的分区
+                        let mut to_remove = Vec::new();
+                        for entry in last_write_times.iter() {
+                            let ((topic, pid), last_write) = entry.pair();
+                            if Instant::now().duration_since(*last_write) > inactive_threshold {
+                                to_remove.push((topic.clone(), *pid));
+                            }
+                        }
+
+                        // 清理不活跃分区
+                        for (topic, pid) in to_remove {
+                            // 获取分区锁确保安全
+                            let lock = partition_create_locks
+                                .entry(pid)
+                                .or_insert_with(|| Mutex::new(()));
+                            let _guard = lock.value().lock().await;
+
+                            // 双重检查：在持有锁后再次检查活跃性
+                            if let Some(last_write) = last_write_times.get(&(topic.clone(), pid)) {
+                                if Instant::now().duration_since(*last_write) > inactive_threshold {
+                                    // 从各组件中移除分区
+                                    let key = (topic.clone(), pid);
+
+                                    // 1. 从分区映射中移除
+                                    if let Some((_, pwb)) = partitions.remove(&key) {
+                                        // 2. 从刷盘器移除
+                                        flusher.remove_partition_writer(&pwb.dir);
+
+                                        // 3. 从时间跟踪器中移除
+                                        last_write_times.remove(&key);
+
+                                        info!("Removed inactive partition: {}/{}", topic, pid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // 更新最后写入时间
+    #[inline]
+    fn update_last_write_time(&self, topic: &str, partition_id: u32) {
+        self.last_write_times
+            .insert((topic.to_string(), partition_id), Instant::now());
     }
 
     #[inline]
     async fn send(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
+        self.update_last_write_time(topic, partition_id);
         let pwb = self
             .get_or_create_topic_partition(topic, partition_id)
             .await?;
@@ -97,7 +180,7 @@ impl TopicPartitionManager {
         }
 
         // 先加载/创建 PartitionWriterPtr，必须放到 _partition_lock 之外
-        let dir = self.dir.join(topic).join(partition_id.to_string());
+        let dir = self.storage_dir.join(topic).join(partition_id.to_string());
         tokio::fs::create_dir_all(&dir).await?;
 
         // 加载写指针文件
@@ -163,10 +246,6 @@ impl Drop for DiskStorageWriter {
 impl DiskStorageWriter {
     pub fn new(cfg: DiskConfig) -> Result<Self> {
         cfg.validate()?;
-        let fd_cache = Arc::new(FdWriterCacheAync::new(
-            cfg.max_size_per_file as usize,
-            cfg.fd_cache_size as usize,
-        ));
         let cfg = Arc::new(cfg);
 
         let stop = CancellationToken::new();
@@ -176,7 +255,6 @@ impl DiskStorageWriter {
             cfg.flusher_partition_writer_buffer_tasks_num,
             cfg.flusher_partition_writer_ptr_tasks_num,
             Duration::from_millis(cfg.flusher_period),
-            fd_cache.clone(),
         ));
         let mut _flusher = flusher.clone();
         let (flush_sender, flusher_signal) = mpsc::channel(1);
@@ -188,6 +266,7 @@ impl DiskStorageWriter {
                 Arc::new(cfg.storage_dir.clone()),
                 cfg.clone(),
                 flusher.clone(),
+                stop.clone(),
             ),
             flusher,
             stop,
@@ -304,11 +383,42 @@ impl StorageWriter for DiskStorageWriter {
         }
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
             pwb.write_batch(datas).await?;
+            self.topic_partition_manager
+                .update_last_write_time(topic, partition_id);
         } else {
             self.write_to_worker(topic, partition_id, datas).await?;
         }
 
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct DiskStorageWriterWrapper {
+    inner: Arc<DiskStorageWriter>,
+}
+
+impl Deref for DiskStorageWriterWrapper {
+    type Target = Arc<DiskStorageWriter>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DiskStorageWriterWrapper {
+    pub fn new(cfg: DiskConfig) -> Result<Self> {
+        let dsw = DiskStorageWriter::new(cfg)?;
+        Ok(Self {
+            inner: Arc::new(dsw),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageWriter for DiskStorageWriterWrapper {
+    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
+        self.inner.store(topic, partition_id, datas).await
     }
 }
 
@@ -353,6 +463,8 @@ mod test {
             with_metrics: false,
             partition_writer_prealloc: false,
             worker_tasks_num: 100,
+            partition_cleanup_interval: 150,
+            partition_inactive_threshold: 300,
         })
         .expect("error config")
     }

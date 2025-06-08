@@ -22,6 +22,55 @@ async fn main() -> Result<()> {
 
     // 测试时修改参数
     let args = vec![
+        //
+        // 1k message_size
+        TestArgs {
+            partition_count: 10000,
+            message_size: 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 5000,
+            message_size: 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 2000,
+            message_size: 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 1000,
+            message_size: 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 500,
+            message_size: 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        //
+        // 10k message_size
         TestArgs {
             partition_count: 10000,
             message_size: 10 * 1024,
@@ -67,6 +116,100 @@ async fn main() -> Result<()> {
             test_duration: Duration::from_secs(15),
             max_rate_mbps: 1500,
         },
+        //
+        // 100k message_size
+        TestArgs {
+            partition_count: 10000,
+            message_size: 100 * 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 5000,
+            message_size: 100 * 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 2000,
+            message_size: 100 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 1000,
+            message_size: 100 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 500,
+            message_size: 100 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        //
+        // 1m message_size
+        TestArgs {
+            partition_count: 10000,
+            message_size: 1000 * 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 5000,
+            message_size: 1000 * 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 2000,
+            message_size: 1000 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 1000,
+            message_size: 1000 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 500,
+            message_size: 1000 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
     ];
 
     // 测试不同分区配置
@@ -99,7 +242,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
     // 准备测试环境
     let mut config = default_config();
-    config.storage_dir = PathBuf::from("./flush_bench_data");
+    config.storage_dir = PathBuf::from("./data/flush_bench_data");
     config.fd_cache_size = 10000;
     config.partition_writer_buffer_size = 10000; // 大缓冲区防止阻塞
     config.with_metrics = true;

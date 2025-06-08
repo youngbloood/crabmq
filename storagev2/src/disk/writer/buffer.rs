@@ -24,7 +24,7 @@ use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 
 #[derive(Clone)]
 pub(crate) struct PartitionWriterBuffer {
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     conf: Arc<DiskConfig>,
 
     // 当前写的文件因子：用于构成写入的目标文件
