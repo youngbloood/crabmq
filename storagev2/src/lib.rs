@@ -1,7 +1,8 @@
+pub mod disk;
 pub mod mem;
+pub mod metrics;
 
 pub use mem::*;
-pub mod disk;
 
 use anyhow::Result;
 use async_trait::async_trait;

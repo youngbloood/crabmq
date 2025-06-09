@@ -1,8 +1,11 @@
-use crate::disk::{
-    Config as DiskConfig,
-    fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
-    meta::{WriterPositionPtr, gen_record_filename},
-    writer::flusher::Flusher,
+use crate::{
+    disk::{
+        Config as DiskConfig,
+        fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
+        meta::{WriterPositionPtr, gen_record_filename},
+        writer::flusher::Flusher,
+    },
+    metrics::StorageWriterMetrics,
 };
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -17,7 +20,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 // use tokio_uring::fs::File as UringFile;
@@ -46,9 +48,6 @@ pub(crate) struct PartitionWriterBuffer {
     has_create_next_record_file: Arc<AtomicBool>,
 
     flusher: Arc<Flusher>,
-
-    // 监控刷盘指标
-    metrics: Arc<BufferFlushMetrics>,
 }
 
 impl PartitionWriterBuffer {
@@ -104,10 +103,10 @@ impl PartitionWriterBuffer {
             write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
-            metrics: Arc::new(BufferFlushMetrics {
-                min_start_timestamp: Arc::new(AtomicU64::new(u64::MAX)),
-                ..Default::default()
-            }),
+            // metrics: Arc::new(BufferFlushMetrics {
+            //     min_start_timestamp: Arc::new(AtomicU64::new(u64::MAX)),
+            //     ..Default::default()
+            // }),
         })
     }
 
@@ -177,9 +176,9 @@ impl PartitionWriterBuffer {
     }
 
     // 写入到 buffer 中
-    pub(crate) async fn write_batch(&self, batch: &[Bytes]) -> Result<()> {
+    pub(crate) async fn write_batch(&self, batch: &[Bytes]) -> Result<u64> {
         if batch.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         self.update_partition_state(batch.len());
         let count = batch.len();
@@ -191,7 +190,15 @@ impl PartitionWriterBuffer {
                 || self.write_ptr.get_current_count() >= self.conf.max_msg_num_per_file
         };
         if should_rotate {
-            self.flush(true).await?;
+            if self.conf.with_metrics {
+                self.flusher.metrics.update_min_start_timestamp();
+            }
+            let flush_bytes = self.flush(true).await?;
+            if self.conf.with_metrics {
+                self.flusher.metrics.inc_flush_count(1);
+                self.flusher.metrics.inc_flush_bytes(flush_bytes);
+                self.flusher.metrics.update_max_end_timestamp();
+            }
             self.rotate_file().await;
         }
 
@@ -210,7 +217,15 @@ impl PartitionWriterBuffer {
 
         // 检查是否需要立即刷盘
         if self.conf.flusher_factor != 0 && total_size > self.conf.flusher_factor {
-            self.flush(false).await?;
+            if self.conf.with_metrics {
+                self.flusher.metrics.update_min_start_timestamp();
+            }
+            let flush_bytes = self.flush(false).await?;
+            if self.conf.with_metrics {
+                self.flusher.metrics.inc_flush_count(1);
+                self.flusher.metrics.inc_flush_bytes(flush_bytes);
+                self.flusher.metrics.update_max_end_timestamp();
+            }
         }
 
         // 当前文件的使用率已经达到设置阈值，预创建下一个
@@ -238,18 +253,12 @@ impl PartitionWriterBuffer {
         //         });
         //     }
         // }
-        Ok(())
+        Ok(total_size)
     }
 
     // 将数据从内存刷盘
     #[cfg(not(target_os = "linux"))]
-    pub(crate) async fn flush(&self, fsync: bool) -> Result<()> {
-        let start = std::time::Instant::now();
-        let start_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
-
+    pub(crate) async fn flush(&self, fsync: bool) -> Result<u64> {
         let mut flushed_bytes = 0_u64;
         let mut datas = Vec::with_capacity(self.buffer.len());
         // 数据零拷贝
@@ -258,7 +267,7 @@ impl PartitionWriterBuffer {
             datas.push(data);
         }
         if flushed_bytes == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
         let slices: Vec<IoSlice> = datas.iter().map(|v| IoSlice::new(v.as_ref())).collect();
@@ -276,52 +285,7 @@ impl PartitionWriterBuffer {
             });
         }
 
-        // 更新刷盘指标
-        if self.conf.with_metrics {
-            let elapsed = start.elapsed().as_micros() as u64;
-            let end_timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as u64;
-
-            self.metrics.flush_count.fetch_add(1, Ordering::Relaxed);
-            self.metrics
-                .flush_bytes
-                .fetch_add(flushed_bytes, Ordering::Relaxed);
-            self.metrics
-                .flush_latency_us
-                .fetch_add(elapsed, Ordering::Relaxed);
-
-            // 记录最早的刷盘时间
-            let current_min = self.metrics.min_start_timestamp.load(Ordering::Relaxed);
-            if start_timestamp < current_min {
-                self.metrics
-                    .min_start_timestamp
-                    .compare_exchange(
-                        current_min,
-                        start_timestamp,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .ok();
-            }
-
-            // 记录最晚的刷盘时间
-            let current_max = self.metrics.max_end_timestamp.load(Ordering::Relaxed);
-            if end_timestamp > current_max {
-                self.metrics
-                    .max_end_timestamp
-                    .compare_exchange(
-                        current_max,
-                        end_timestamp,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .ok();
-            }
-        }
-
-        Ok(())
+        Ok(flushed_bytes)
     }
 
     // 将数据从内存刷盘
@@ -414,31 +378,4 @@ impl PartitionWriterBuffer {
         self.flusher
             .update_partition_write_count(&self.dir, batch_size as _);
     }
-}
-
-impl PartitionWriterBuffer {
-    // 添加获取刷盘指标的方法
-    pub fn get_metrics(&self) -> Arc<BufferFlushMetrics> {
-        self.metrics.clone()
-    }
-
-    pub fn reset_metrics(&self) {
-        self.metrics.flush_count.store(0, Ordering::Relaxed);
-        self.metrics.flush_bytes.store(0, Ordering::Relaxed);
-        self.metrics.flush_latency_us.store(0, Ordering::Relaxed);
-        self.metrics
-            .min_start_timestamp
-            .store(u64::MAX, Ordering::Relaxed);
-        self.metrics.max_end_timestamp.store(0, Ordering::Relaxed);
-    }
-}
-
-// 添加监控指标
-#[derive(Default)]
-pub struct BufferFlushMetrics {
-    pub flush_count: AtomicU64,              // 刷盘次数
-    pub flush_bytes: AtomicU64,              // 刷盘消息字节数
-    pub flush_latency_us: AtomicU64,         // 刷盘耗时微秒数
-    pub min_start_timestamp: Arc<AtomicU64>, // 刷盘期间最早开始时间戳（微秒）
-    pub max_end_timestamp: Arc<AtomicU64>,   // 刷盘期间最晚结束时间戳（微秒）
 }

@@ -1,14 +1,14 @@
 use super::buffer::PartitionWriterBuffer;
-use crate::disk::{StorageError, meta::WriterPositionPtr};
+use crate::{
+    disk::{StorageError, meta::WriterPositionPtr},
+    metrics::StorageWriterMetrics,
+};
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use log::{error, warn};
 use std::{
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{select, sync::mpsc, time};
@@ -37,6 +37,8 @@ type FlushUnitWriterPositionPtr = (bool, Vec<Arc<WriterPositionPtr>>);
 #[derive(Clone)]
 pub(crate) struct Flusher {
     stop: CancellationToken,
+
+    pub(crate) metrics: StorageWriterMetrics,
 
     partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
     pub(crate) partition_states: Arc<DashMap<PathBuf, PartitionState>>,
@@ -70,10 +72,13 @@ impl Flusher {
         partition_writer_buffer_tasks_num: usize,
         partition_writer_ptr_tasks_num: usize,
         interval: Duration,
+        with_metrics: bool,
     ) -> Self {
+        let metrics = StorageWriterMetrics::default();
         let mut buffer_tasks = vec![];
         for _ in 0..partition_writer_buffer_tasks_num {
             let _stop = stop.clone();
+            let _metrics = metrics.clone();
             let (tx, mut rx) = mpsc::channel::<(bool, Vec<Arc<PartitionWriterBuffer>>)>(1);
             tokio::spawn(async move {
                 loop {
@@ -91,10 +96,24 @@ impl Flusher {
                                 continue;
                             }
                             let (fsync, pwbs) = res.unwrap();
+                            let mut flush_count = 0;
+                            if with_metrics {
+                                _metrics.update_min_start_timestamp();
+                            }
                             for pwb in pwbs {
-                                if let Err(e) = pwb.flush(fsync).await {
-                                    error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}")
+                                match pwb.flush(fsync).await {
+                                    Ok(num) => {
+                                        flush_count += 1;
+                                        if with_metrics {
+                                            _metrics.inc_flush_bytes(num);
+                                        }
+                                    },
+                                    Err(e) => error!("Flusher: partition_writer_buffer_tasks flush err: {e:?}"),
                                 }
+                            }
+                            if with_metrics {
+                                _metrics.inc_flush_count(flush_count);
+                                _metrics.update_max_end_timestamp();
                             }
                         }
                     }
@@ -145,6 +164,7 @@ impl Flusher {
             partition_writer_buffer_tasks: Arc::new(buffer_tasks),
             partition_writer_ptr_tasks_num,
             partition_writer_ptr_tasks: Arc::new(ptr_tasks),
+            metrics,
             // partition_writer_ptr_tasks: Arc::default(),
         }
     }
@@ -329,44 +349,11 @@ impl Flusher {
 // metrics
 impl Flusher {
     // 添加获取分区指标的方法
-    pub fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
-        // if let Some(ts) = self.topics.get(topic) {
-        let mut result = vec![];
-        for pwb in self.partition_writer_buffers.iter() {
-            let metrics = pwb.get_metrics();
-            result.push(PartitionMetrics {
-                partition_path: pwb.key().clone(),
-                flush_count: Arc::new(AtomicU64::new(metrics.flush_count.load(Ordering::Relaxed))),
-                flush_bytes: Arc::new(AtomicU64::new(metrics.flush_bytes.load(Ordering::Relaxed))),
-                flush_latency_us: Arc::new(AtomicU64::new(
-                    metrics.flush_latency_us.load(Ordering::Relaxed),
-                )),
-                min_start_timestamp: Arc::new(AtomicU64::new(
-                    metrics.min_start_timestamp.load(Ordering::Relaxed),
-                )),
-                max_end_timestamp: Arc::new(AtomicU64::new(
-                    metrics.max_end_timestamp.load(Ordering::Relaxed),
-                )),
-            });
-        }
-        result
+    pub(crate) fn get_metrics(&self) -> StorageWriterMetrics {
+        self.metrics.clone()
     }
 
-    pub fn reset_metrics(&self) {
-        for entry in self.partition_writer_buffers.iter() {
-            let pwb = entry.value();
-            pwb.reset_metrics();
-        }
+    pub(crate) fn reset_metrics(&self) {
+        self.metrics.reset();
     }
-}
-
-// 添加监控结构体
-#[derive(Default, Clone, Debug)]
-pub struct PartitionMetrics {
-    pub partition_path: PathBuf,
-    pub flush_count: Arc<AtomicU64>,         // 刷盘次数
-    pub flush_bytes: Arc<AtomicU64>,         // 刷盘字节数
-    pub flush_latency_us: Arc<AtomicU64>,    // 刷盘耗时微秒数
-    pub min_start_timestamp: Arc<AtomicU64>, // 刷盘期间最早开始时间戳（微秒）
-    pub max_end_timestamp: Arc<AtomicU64>,   // 刷盘期间最晚结束时间戳（微秒）
 }

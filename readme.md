@@ -38,8 +38,8 @@ RUST_LOG=info ./target/debug/crabmqd --id 3 -c 127.0.0.1:16003 -b 127.0.0.1:1500
 
 ## StorageV2 Bench
 
-StorageV2 Bench: 参考: [bench.result](./storagev2/assets/bench.result)
-![counts](./storagev2/assets/counts.png)
+StorageV2 Bench: 参考: [bench.result](./cmd/storage_bench/assets/bench.result)
+![counts](./cmd/storage_bench/assets/counts.png)
 
 ## Client Bench
 

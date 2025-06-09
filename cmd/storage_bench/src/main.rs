@@ -24,192 +24,192 @@ async fn main() -> Result<()> {
     let args = vec![
         //
         // 1k message_size
+        // TestArgs {
+        //     partition_count: 10000,
+        //     message_size: 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 1000,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 2500,
+        // },
+        // TestArgs {
+        //     partition_count: 5000,
+        //     message_size: 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 1000,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 2500,
+        // },
+        // TestArgs {
+        //     partition_count: 2000,
+        //     message_size: 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 600,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 1000,
+        //     message_size: 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 600,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 500,
+        //     message_size: 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 600,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // //
+        // // 10k message_size
         TestArgs {
             partition_count: 10000,
-            message_size: 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 5000,
-            message_size: 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 2000,
-            message_size: 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 1000,
-            message_size: 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 500,
-            message_size: 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        //
-        // 10k message_size
-        TestArgs {
-            partition_count: 10000,
             message_size: 10 * 1024,
             warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
+            current_rate: 450,
             rate_step: 150,
             test_duration: Duration::from_secs(20),
             max_rate_mbps: 1500,
         },
-        TestArgs {
-            partition_count: 5000,
-            message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 2000,
-            message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 1000,
-            message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 500,
-            message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        //
-        // 100k message_size
-        TestArgs {
-            partition_count: 10000,
-            message_size: 100 * 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 5000,
-            message_size: 100 * 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 2000,
-            message_size: 100 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 1000,
-            message_size: 100 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 500,
-            message_size: 100 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        //
-        // 1m message_size
-        TestArgs {
-            partition_count: 10000,
-            message_size: 1000 * 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 5000,
-            message_size: 1000 * 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 2000,
-            message_size: 1000 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 1000,
-            message_size: 1000 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
-        TestArgs {
-            partition_count: 500,
-            message_size: 1000 * 1024,
-            warmup_duration: Duration::from_secs(15),
-            current_rate: 300,
-            rate_step: 150,
-            test_duration: Duration::from_secs(15),
-            max_rate_mbps: 1500,
-        },
+        // TestArgs {
+        //     partition_count: 5000,
+        //     message_size: 10 * 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 450,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 2000,
+        //     message_size: 10 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 450,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 1000,
+        //     message_size: 10 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 450,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 500,
+        //     message_size: 10 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 450,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // //
+        // // 100k message_size
+        // TestArgs {
+        //     partition_count: 10000,
+        //     message_size: 100 * 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 5000,
+        //     message_size: 100 * 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 2000,
+        //     message_size: 100 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 1000,
+        //     message_size: 100 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 500,
+        //     message_size: 100 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // //
+        // // 1m message_size
+        // TestArgs {
+        //     partition_count: 10000,
+        //     message_size: 1000 * 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 5000,
+        //     message_size: 1000 * 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 2000,
+        //     message_size: 1000 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 1000,
+        //     message_size: 1000 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
+        // TestArgs {
+        //     partition_count: 500,
+        //     message_size: 1000 * 1024,
+        //     warmup_duration: Duration::from_secs(15),
+        //     current_rate: 300,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(15),
+        //     max_rate_mbps: 1500,
+        // },
     ];
 
     // 测试不同分区配置
@@ -242,7 +242,8 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
     // 准备测试环境
     let mut config = default_config();
-    config.storage_dir = PathBuf::from("./data/flush_bench_data");
+    let storage_dir = "./data/flush_bench_data";
+    config.storage_dir = PathBuf::from(storage_dir);
     config.fd_cache_size = 10000;
     config.partition_writer_buffer_size = 10000; // 大缓冲区防止阻塞
     config.with_metrics = true;
@@ -287,29 +288,6 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     // 获取初始刷盘指标 - 确保分区已初始化
     println!("等待分区初始化...");
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let mut initial_metrics = store.get_partition_metrics();
-    println!("初始指标数量: {}", initial_metrics.len());
-
-    // 如果指标数量不足，尝试重新获取
-    if initial_metrics.len() < partition_count as usize {
-        loop {
-            println!("检测到分区指标缺失，重新获取...");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            initial_metrics = store.get_partition_metrics();
-            if (initial_metrics.len() as f64 / partition_count as f64) < 0.85 {
-                println!(
-                    "警告: 初始化分区指标数量丢失严重: 初始化分区数量/分区数量 = {:.1}/{:.1}*100% = {:2}%",
-                    initial_metrics.len(),
-                    partition_count,
-                    (initial_metrics.len() as f64 / partition_count as f64) * 100.0
-                );
-                println!("注意: 'ulimit -n' 查看可打开的最大文件描述符数量");
-                continue;
-            }
-            break;
-        }
-    }
-
     // 速率测试控制
     let mut results = vec![];
 
@@ -339,11 +317,6 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         let message_pool_clone = message_pool.clone();
         let sent_counter = Arc::new(AtomicU64::new(0));
         let mut send_handles = vec![];
-
-        // 获取测试开始前的刷盘指标
-
-        let start_metrics = store.get_partition_metrics();
-        // println!("start_metrics = {:?}", start_metrics);
 
         let barrier = Arc::new(Barrier::new(partition_count as usize + 1));
         // 循环分区写消息
@@ -395,83 +368,31 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         // println!("等待刷盘完成...");
         // tokio::time::sleep(Duration::from_secs(5)).await; // 确保所有刷盘完成
         // 手动触发一次完整刷盘
-        let end_metrics = 'BLOCK_EM: {
-            loop {
-                tokio::time::sleep(Duration::from_secs(3)).await; // 确保所有刷盘完成
-                let end_metrics = store.get_partition_metrics();
 
-                let has_metrics = || -> bool {
-                    for em in &end_metrics {
-                        if em.flush_bytes.load(Ordering::Relaxed) != 0 {
-                            return true;
-                        }
-                    }
-                    false
-                };
-                if !has_metrics() {
-                    continue;
-                }
-                break 'BLOCK_EM end_metrics;
-            }
-        };
+        let end_metrics = store.get_metrics();
 
         // 计算总指标 - 使用分区路径匹配确保正确
         let sent_count = sent_counter.load(Ordering::Relaxed);
         let sent_bytes = sent_count * message_size as u64;
 
-        let mut total_flushed_bytes = 0;
-        let mut total_flush_count = 0;
-        let mut total_flush_latency_us = 0;
-
         // 墙钟时间(wall-clock time)
-        let mut min_start_timestamp = u64::MAX;
-        let mut max_end_timestamp = 0;
-
-        for end_metric in &end_metrics {
-            if let Some(start_metric) = start_metrics
-                .iter()
-                .find(|m| m.partition_path == end_metric.partition_path)
-            {
-                let flushed_bytes = end_metric.flush_bytes.load(Ordering::Relaxed)
-                    - start_metric.flush_bytes.load(Ordering::Relaxed);
-                total_flushed_bytes += flushed_bytes;
-
-                let flush_count = end_metric.flush_count.load(Ordering::Relaxed)
-                    - start_metric.flush_count.load(Ordering::Relaxed);
-                total_flush_count += flush_count;
-
-                let flush_latency_us = end_metric.flush_latency_us.load(Ordering::Relaxed)
-                    - start_metric.flush_latency_us.load(Ordering::Relaxed);
-                total_flush_latency_us += flush_latency_us;
-
-                let start_ts = end_metric.min_start_timestamp.load(Ordering::Relaxed);
-                let end_ts = end_metric.max_end_timestamp.load(Ordering::Relaxed);
-                if start_ts > 0 {
-                    min_start_timestamp = min_start_timestamp.min(start_ts);
-                }
-                if end_ts > 0 {
-                    max_end_timestamp = max_end_timestamp.max(end_ts);
-                }
-            } else {
-                println!(
-                    "警告: 找不到分区 {:?} 的起始指标",
-                    end_metric.partition_path
-                );
-            }
-        }
+        let min_start_timestamp = end_metrics.min_start_timestamp.load(Ordering::Relaxed);
+        let max_end_timestamp = end_metrics.max_end_timestamp.load(Ordering::Relaxed);
+        let total_flushed_bytes = end_metrics.flush_bytes.load(Ordering::Relaxed);
+        let _total_flush_count = end_metrics.flush_count.load(Ordering::Relaxed);
 
         // 计算性能指标
         let actual_rate = (sent_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64();
         // NOTE: 单分区平均吞吐量 = 总落盘字节数 / 总的落盘耗时
         // NOTE: 如果公式：总吞吐量 = 单分区平均吞吐量 * 分区数 : 这种计算方式不准确。因为墙钟时间原因: 即1个分区刷盘耗时1s, 10个分区刷盘可能还是1s
-        let avg_partition_flush_throughput = (total_flushed_bytes as f64 / 1024.0 / 1024.0)
-            / Duration::from_micros(total_flush_latency_us).as_secs_f64();
-        let avg_flush_latency = if total_flush_count > 0 {
-            // 微秒 转 毫秒
-            (total_flush_latency_us as f64 / total_flush_count as f64) / 1000.0
-        } else {
-            0.0
-        };
+        // let avg_partition_flush_throughput = (total_flushed_bytes as f64 / 1024.0 / 1024.0)
+        //     / Duration::from_micros(total_flush_latency_us).as_secs_f64();
+        // let avg_flush_latency = if total_flush_count > 0 {
+        //     // 微秒 转 毫秒
+        //     (total_flush_latency_us as f64 / total_flush_count as f64) / 1000.0
+        // } else {
+        //     0.0
+        // };
 
         // 计算基于墙钟时间的吞吐量（该吞吐量才是真实的数据落盘吞吐量）
         // wall_clock_time_us: 墙钟耗时，单位：微秒
@@ -484,12 +405,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         };
 
         // 存储结果
-        results.push((
-            target_rate,
-            actual_rate,
-            wall_clock_throughput,
-            avg_flush_latency,
-        ));
+        results.push((target_rate, actual_rate, wall_clock_throughput));
 
         // 打印结果
         println!(
@@ -509,7 +425,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     let mut max_wall_clock_throughput = 0.0;
     let mut optimal_rate = 0.0;
 
-    for (target_rate, _, throughput, _) in &results {
+    for (target_rate, _, throughput) in &results {
         if *throughput > max_wall_clock_throughput {
             max_wall_clock_throughput = *throughput;
             optimal_rate = *target_rate as f64;
@@ -524,7 +440,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
     // 可视化结果
     println!("\n速率与吞吐量关系:");
-    for (target_rate, _, wall_clock_throughput, _) in &results {
+    for (target_rate, _, wall_clock_throughput) in &results {
         let bar_len = (wall_clock_throughput / 50.0).round() as usize;
         let bar = "█".repeat(bar_len);
         println!(
@@ -535,7 +451,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
     println!("\n清除测试数据...");
     // 清理测试数据
-    tokio::fs::remove_dir_all("./flush_bench_data").await?;
+    tokio::fs::remove_dir_all(storage_dir).await?;
 
     Ok(())
 }

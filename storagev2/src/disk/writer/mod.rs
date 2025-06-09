@@ -7,7 +7,7 @@ use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
 use crate::StorageWriter;
 use crate::disk::StorageError;
 use crate::disk::meta::WriterPositionPtr;
-use crate::disk::writer::flusher::PartitionMetrics;
+use crate::metrics::StorageWriterMetrics;
 use anyhow::{Result, anyhow};
 use buffer::PartitionWriterBuffer;
 use bytes::Bytes;
@@ -255,6 +255,7 @@ impl DiskStorageWriter {
             cfg.flusher_partition_writer_buffer_tasks_num,
             cfg.flusher_partition_writer_ptr_tasks_num,
             Duration::from_millis(cfg.flusher_period),
+            cfg.with_metrics,
         ));
         let mut _flusher = flusher.clone();
         let (flush_sender, flusher_signal) = mpsc::channel(1);
@@ -365,8 +366,8 @@ impl DiskStorageWriter {
 // metrics
 impl DiskStorageWriter {
     // 添加获取分区指标的方法
-    pub fn get_partition_metrics(&self) -> Vec<PartitionMetrics> {
-        self.flusher.get_partition_metrics()
+    pub fn get_metrics(&self) -> StorageWriterMetrics {
+        self.flusher.get_metrics()
     }
 
     pub async fn reset_metrics(&self) -> Result<()> {
