@@ -78,5 +78,17 @@ message SyncConsumerAssignmentsReq {
 message SyncConsumerAssignmentsResp {
     uint32 broker_id = 1;
     uint32 term = 2;
+    GroupMeta group_meta = 3;
+}
+
+
+message GroupMeta {
+    uint32 id = 1;
+    repeated GroupTopicMeta group_topic_metas = 2;
+}
+
+message GroupTopicMeta {
+    string topic = 1;
+    uint32 offset = 2;
     repeated commonsvc.TopicPartitionMeta list = 3;
 }

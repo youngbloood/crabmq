@@ -1,12 +1,16 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use dashmap::DashMap;
+use crossbeam::queue::SegQueue;
+use dashmap::{DashMap, DashSet};
 use grpcx::{
     clientbrokersvc::{
-        PublishReq, PublishResp, client_broker_service_client::ClientBrokerServiceClient,
+        self, Ack, Commit, Fetch, Heartbeat, MessageBatch, PublishReq, PublishResp, SegmentOffset,
+        SubscribeReq, Subscription, client_broker_service_client::ClientBrokerServiceClient,
+        subscribe_req::Request,
     },
     clientcoosvc::{
-        AddPartitionsReq, GroupJoinRequest, NewTopicReq, PullReq,
+        AddPartitionsReq, GroupJoinRequest, GroupJoinSubTopic, NewTopicReq, PullReq,
+        SyncConsumerAssignmentsReq, SyncConsumerAssignmentsResp,
         client_coo_service_client::ClientCooServiceClient, group_join_response,
     },
     commonsvc::{self},
@@ -17,20 +21,23 @@ use indexmap::IndexMap;
 use log::{error, info, warn};
 use murmur3::murmur3_32;
 use std::{
-    collections::HashSet,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     io::Cursor,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use tokio::{
     select,
     sync::{Mutex, RwLock, mpsc},
+    time,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
+use tonic::{Status, transport::Channel};
 
 #[derive(Debug, Clone, Default)]
 struct PartitionAssignment {
@@ -154,6 +161,7 @@ impl TopicAssignment {
 
 #[derive(Clone)]
 pub struct Client {
+    id: String,
     topics: TopicAssignment,
     smart_coo_client: SmartClient,
     new_topic_lock: Arc<Mutex<HashSet<String>>>,
@@ -161,9 +169,10 @@ pub struct Client {
 
 impl Client {
     pub fn new(id: String, coos: Vec<String>) -> Client {
-        let sc: SmartClient = SmartClient::new(id, coos);
+        let sc: SmartClient = SmartClient::new(id.clone(), coos);
 
         let client = Self {
+            id,
             topics: TopicAssignment::default(),
             smart_coo_client: sc,
             new_topic_lock: Arc::default(),
@@ -196,13 +205,18 @@ impl Client {
         _publisher
     }
 
-    pub fn subscriber(&self, group_id: u32, topics: Vec<String>) -> Arc<Subscriber> {
-        Arc::new(Subscriber {
-            group_id,
-            topics,
+    pub fn subscriber(&self, conf: SubscriberConfig) -> Result<Arc<Subscriber>> {
+        conf.validate()?;
+        Ok(Arc::new(Subscriber {
+            conf: Arc::new(conf),
             client: self.clone(),
-            member_id: String::new(),
-        })
+            member_id: Arc::default(),
+            stop: CancellationToken::new(),
+            iter_count: Arc::new(AtomicU64::new(1)),
+            chans: Arc::default(),
+            broker_endpoints: Arc::default(),
+            subscribe_controll_manager: Arc::default(),
+        }))
     }
 
     fn apply_topic_partition_resp(&self, tpr: commonsvc::TopicPartitionResp) {
@@ -249,11 +263,15 @@ impl Client {
 
     async fn run(&self) {
         let sc = self.smart_coo_client.clone();
+        let id = self.id.clone();
         let refresh_handle = tokio::spawn(async move {
-            sc.refresh_coo_endpoints(|chan| async {
-                ClientCooServiceClient::new(chan)
-                    .list(commonsvc::CooListReq { id: "".to_string() })
-                    .await
+            sc.refresh_coo_endpoints(|chan| {
+                let id = id.clone();
+                async move {
+                    ClientCooServiceClient::new(chan)
+                        .list(commonsvc::CooListReq { id })
+                        .await
+                }
             })
             .await;
         });
@@ -529,7 +547,7 @@ impl Publisher {
 
         let broker_endpoint_addr = partition.broker_leader_addr.clone();
         // 创建通道和流
-        let (tx_middleware, rx_middleware) = mpsc::channel(100);
+        let (tx_middleware, rx_middleware) = mpsc::channel(1);
         // 创建新连接
         let chan = self
             .get_or_create_channel(&broker_endpoint_addr, tx_middleware.clone())
@@ -635,24 +653,154 @@ impl Publisher {
     }
 }
 
-pub struct Subscriber {
-    group_id: u32,
-    member_id: String,
-    topics: Vec<String>,
+pub struct SubscriberConfig {
+    pub group_id: u32,
+    pub topics: Vec<(String, u32)>,
+    // 某些 broker 连不上时是否退出
+    pub break_when_broker_disconnect: bool,
+    // 每个分区单次获取消息的最大bytes数
+    // 为 0 时以 max_all_fetch_bytes/{分区数} 为准
+    // 同 `max_partition_fetch_count` 满足其一即返回
+    pub max_partition_fetch_bytes: Arc<AtomicU64>,
+    // 所有分区获取消息的最大bytes数
+    // 为 0 时以 max_partition_fetch_bytes * {分区数} 为准
+    // max_all_fetch_bytes: Arc<AtomicU64>,
+    // 每个分区单批次获取最大消息数量
+    // 同 `max_partition_fetch_bytes` 满足其一即返回
+    pub max_partition_fetch_count: Arc<AtomicU64>,
+}
 
+impl SubscriberConfig {
+    fn validate(&self) -> Result<()> {
+        for topic in &self.topics {
+            if topic.1 != 0 && topic.1 != 1 {
+                return Err(anyhow!(format!(
+                    "topic[{}] offset must be one of [0, 1]",
+                    topic.0
+                )));
+            }
+        }
+
+        if self
+            .max_partition_fetch_bytes
+            .fetch_max(0, Ordering::Relaxed)
+            == 0
+        {
+            return Err(anyhow!(
+                "max_partition_fetch_bytes must be greate than zero",
+            ));
+        }
+
+        if self
+            .max_partition_fetch_count
+            .fetch_max(0, Ordering::Relaxed)
+            == 0
+        {
+            return Err(anyhow!(
+                "max_partition_fetch_count must be greate than zero",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct Subscriber {
+    conf: Arc<SubscriberConfig>,
+    member_id: Arc<RefCell<String>>,
     client: Client,
+    iter_count: Arc<AtomicU64>,
+    // 该 member 消费的 (broker_addr, broker_id) : Vec<SubscriberPartitionBuffer>
+    chans: Arc<DashMap<(String, u32), Arc<Vec<SubscriberPartitionBuffer>>>>,
+    // 订阅时的消息控制器，可用于发送 ack, commit, heartbeat 等消息
+    // (broker_addr, broker_id): mpsc::Sender<SubscribeReq>
+    subscribe_controll_manager: Arc<DashMap<(String, u32), mpsc::Sender<SubscribeReq>>>,
+    broker_endpoints: Arc<DashMap<String, Channel>>,
+    stop: CancellationToken,
+}
+
+// 每个分区单独 fetch 消息至自己独立的 buffer 中，等待消费
+#[derive(Clone, Debug)]
+struct SubscriberPartitionBuffer {
+    tpd: Arc<TopicPartitionDetail>,
+    buf: Arc<SegQueue<MessageBatch>>,
+    iter_count: Arc<AtomicU64>,
+    // 流量控制
+    max_partition_fetch_bytes: Arc<AtomicU64>,
+    // 每个分区单批次最大消息数量
+    max_partition_batch_count: Arc<AtomicU64>,
+    // 剩余可以拉去的bytes数
+    left_fetch_bytes: Arc<AtomicU64>,
+}
+
+impl SubscriberPartitionBuffer {
+    fn new(
+        tpd: TopicPartitionDetail,
+        max_partition_fetch_bytes: Arc<AtomicU64>,
+        max_partition_batch_count: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            tpd: Arc::new(tpd),
+            buf: Arc::default(),
+            iter_count: Arc::default(),
+            left_fetch_bytes: Arc::new(AtomicU64::new(
+                max_partition_fetch_bytes.load(Ordering::Relaxed),
+            )),
+            max_partition_fetch_bytes,
+            max_partition_batch_count,
+        }
+    }
+
+    fn push(&self, msg: MessageBatch) {
+        let total_size = msg.messages.iter().map(|v| v.payload.len()).sum::<usize>() as u64;
+        self.buf.push(msg);
+        if self
+            .left_fetch_bytes
+            .fetch_min(total_size, Ordering::Relaxed)
+            == total_size
+        {
+            self.left_fetch_bytes
+                .fetch_sub(total_size, Ordering::Relaxed);
+        } else {
+            self.left_fetch_bytes.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+unsafe impl Send for Subscriber {}
+unsafe impl Sync for Subscriber {}
+
+impl Drop for Subscriber {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
 }
 
 impl Subscriber {
-    pub async fn join(&mut self, capacity: u32) -> Result<()> {
+    pub fn close(self: Arc<Self>) {
+        self.stop.cancel();
+    }
+
+    pub async fn join(self: Arc<Self>) -> Result<()> {
+        if !self.member_id.borrow().is_empty() {
+            return Err(anyhow!("this subscriber has been joined"));
+        }
         let resp = self
             .client
             .smart_coo_client
             .execute_unary(
                 GroupJoinRequest {
-                    group_id: self.group_id,
-                    topics: self.topics.clone(),
-                    capacity,
+                    group_id: self.conf.group_id,
+                    sub_topics: self
+                        .conf
+                        .topics
+                        .iter()
+                        .map(|v| GroupJoinSubTopic {
+                            topic: v.0.clone(),
+                            offset: v.1,
+                        })
+                        .collect(),
                 },
                 |chan, req, _addr| async {
                     ClientCooServiceClient::new(chan).join_group(req).await
@@ -663,7 +811,19 @@ impl Subscriber {
 
         match resp.error() {
             group_join_response::ErrorCode::None => {
-                self.member_id = resp.member_id;
+                println!("join resp = {:?}", &resp);
+                *self.member_id.borrow_mut() = resp.member_id;
+
+                Self::apply_consumer_assignments(
+                    self.chans.clone(),
+                    &resp.list,
+                    self.conf.max_partition_fetch_bytes.clone(),
+                    self.conf.max_partition_fetch_count.clone(),
+                );
+                println!("self.chans = {:?}", self.chans);
+
+                let sub = self.clone();
+                tokio::spawn(sub.sync_consumer_assignments());
                 Ok(())
             }
             group_join_response::ErrorCode::InvalidTopic => Err(anyhow!(format!(
@@ -680,15 +840,408 @@ impl Subscriber {
         }
     }
 
-    pub fn subscribe<HM, HMFut>(&self, hm: HM) -> Result<()>
+    async fn sync_consumer_assignments(self: Arc<Self>) {
+        let stop = self.stop.clone();
+        let member_id = self.member_id.borrow().clone();
+        let group_id = self.conf.group_id;
+
+        if let Err(e) = self
+            .client
+            .smart_coo_client
+            .open_sstream(
+                SyncConsumerAssignmentsReq {
+                    group_id,
+                    member_id: member_id.clone(),
+                    generation_id: 0,
+                },
+                |chan, req, _addr| async {
+                    ClientCooServiceClient::new(chan)
+                        .sync_consumer_assignments(req)
+                        .await
+                },
+                |res| {
+                    let member_id = member_id.clone();
+                    let chans = self.chans.clone();
+                    let max_partition_fetch_bytes = self.conf.max_partition_fetch_bytes.clone();
+                    let max_partition_fetch_count = self.conf.max_partition_fetch_count.clone();
+                    async move {
+                        if !&res.member_id.eq(&member_id) || !&res.group_id.eq(&group_id) {
+                            warn!("this res not belong the client");
+                            return Err(Status::invalid_argument("this res not belong the client"));
+                        }
+                        Self::apply_consumer_assignments(
+                            chans,
+                            &res.list,
+                            max_partition_fetch_bytes,
+                            max_partition_fetch_count,
+                        );
+
+                        Ok(())
+                    }
+                },
+                stop,
+            )
+            .await
+        {
+            error!("subscriber sync consumer assignments err: {e:?}");
+        }
+    }
+
+    fn apply_consumer_assignments(
+        chans: Arc<DashMap<(String, u32), Arc<Vec<SubscriberPartitionBuffer>>>>,
+        tpms: &Vec<commonsvc::TopicPartitionMeta>,
+        max_partition_fetch_bytes: Arc<AtomicU64>,
+        max_partition_fetch_count: Arc<AtomicU64>,
+    ) {
+        let mut m = HashMap::new();
+
+        for tpm in tpms.iter() {
+            let tpd = TopicPartitionDetail::from(tpm);
+            let key = (tpd.broker_leader_addr.clone(), tpd.broker_leader_id);
+            let spb = SubscriberPartitionBuffer::new(
+                tpd,
+                max_partition_fetch_bytes.clone(),
+                max_partition_fetch_count.clone(),
+            );
+
+            m.entry(key)
+                .and_modify(|v: &mut Vec<SubscriberPartitionBuffer>| {
+                    v.push(spb.clone());
+                })
+                .or_insert(vec![spb.clone()]);
+        }
+
+        for (k, v) in m {
+            chans.insert(k, Arc::new(v));
+        }
+    }
+
+    async fn get_or_create_broker_endpoint(&self, broker_endpoint: String) -> Result<Channel> {
+        let sock = repair_addr_with_http(broker_endpoint.clone()).parse()?;
+        let chan = Channel::builder(sock).connect().await?;
+        self.broker_endpoints.insert(broker_endpoint, chan.clone());
+        Ok(chan)
+    }
+
+    pub fn subscribe<HM, HMFut>(self: Arc<Self>, hm: HM) -> Result<()>
     where
-        HM: Fn() -> HMFut,
-        HMFut: std::future::Future<Output = ()>,
+        HM: Fn((String, u32), clientbrokersvc::MessageBatch, AckCommitHandle) -> HMFut
+            + Send
+            + Sync
+            + 'static,
+        HMFut: std::future::Future<Output = ()> + Send + 'static,
     {
-        if self.member_id.is_empty() {
+        if self.member_id.borrow().is_empty() {
             return Err(anyhow!("must join fisrtly"));
         }
 
+        // 1. 启动分区拉取任务
+        let subscriber = self.clone();
+        tokio::spawn(async move {
+            subscriber.spawn_fetch_tasks().await;
+        });
+
+        // 2. 启动消费任务
+        let subscriber = self.clone();
+        tokio::spawn(async move {
+            subscriber.spawn_consumer_task(hm);
+        });
+
+        // 3. 启动心跳任务
+        let subscriber = self.clone();
+        tokio::spawn(async move {
+            subscriber.spawn_heartbeat_task().await;
+        });
+
+        Ok(())
+    }
+
+    async fn spawn_fetch_tasks(self: Arc<Self>) {
+        // 根据broker进行分组，每个partition向其所属的broker获取消息
+        let has_monitor = Arc::new(DashSet::new());
+        while !self.stop.is_cancelled() {
+            for entry in self.chans.iter() {
+                let key = entry.key().clone();
+                if has_monitor.contains(&key) {
+                    time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                has_monitor.insert(key.clone());
+                let subscriber = self.clone();
+                let chans = self.chans.clone();
+                let memeber_id = self.member_id.borrow().clone();
+                let stop = self.stop.clone();
+                let break_when_broker_disconnect = self.conf.break_when_broker_disconnect;
+                let has_monitor = has_monitor.clone();
+                tokio::spawn(async move {
+                    let broker_addr = key.0.clone();
+                    let broker_id = key.1;
+                    let broker_chan = subscriber
+                        .get_or_create_broker_endpoint(broker_addr.clone())
+                        .await;
+                    if let Err(e) = broker_chan {
+                        error!("Failed to connect to broker {}: {}", broker_addr, e);
+                        has_monitor.remove(&key);
+                        return;
+                    }
+                    let broker_chan = broker_chan.unwrap();
+                    let mut client = ClientBrokerServiceClient::new(broker_chan);
+                    let (tx_req, rx_req) = mpsc::channel(10);
+                    let _ = tx_req
+                        .send(SubscribeReq {
+                            request: Some(clientbrokersvc::subscribe_req::Request::Sub(
+                                Subscription {
+                                    member_id: memeber_id,
+                                },
+                            )),
+                        })
+                        .await;
+                    subscriber
+                        .subscribe_controll_manager
+                        .insert(key.clone(), tx_req.clone());
+
+                    let _chans = chans.clone();
+                    let _has_monitor = has_monitor.clone();
+                    let _broker_addr = broker_addr.clone();
+                    let _key = key.clone();
+                    let _stop = stop.clone();
+                    let _break_when_broker_disconnect = break_when_broker_disconnect;
+                    tokio::spawn(async move {
+                        let resp = client
+                            .subscribe(SmartReqStream::new(ReceiverStream::new(rx_req)))
+                            .await;
+                        println!("订阅成功？ resp = {:?}", resp);
+                        match resp {
+                            Ok(resp) => {
+                                let mut resp_strm = resp.into_inner();
+                                while let Ok(Some(res)) = resp_strm.message().await {
+                                    if res.messages.is_empty() {
+                                        continue;
+                                    }
+                                    if let Some(spbs) = _chans.get(&_key) {
+                                        let spbs = spbs.value();
+                                        for spb in spbs.iter() {
+                                            if spb.tpd.topic == res.topic
+                                                && spb.tpd.partition_id == res.partition_id
+                                            {
+                                                spb.push(res);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                _has_monitor.remove(&_key);
+                                error!(
+                                    "subscribe from broker[{}:{:?}] err: {e:?}",
+                                    broker_id, &_broker_addr,
+                                );
+                                if _break_when_broker_disconnect {
+                                    _stop.cancel();
+                                }
+                            }
+                        }
+                    });
+
+                    // fetch 消息
+                    loop {
+                        if stop.is_cancelled() {
+                            break;
+                        }
+                        let spbs = chans.get(&key);
+                        if spbs.is_none() {
+                            has_monitor.remove(&key);
+                            break;
+                        }
+                        let spbs = spbs.unwrap();
+                        for spb in spbs.value().iter() {
+                            if stop.is_cancelled() {
+                                break;
+                            }
+                            // 剩余可拉去的字节数占比 < 10%
+                            if (spb.left_fetch_bytes.load(Ordering::Relaxed) as f64
+                                / spb.max_partition_fetch_bytes.load(Ordering::Relaxed) as f64)
+                                < 0.1
+                            {
+                                continue;
+                            }
+                            info!(
+                                "fetch broker[{}:{:?}] topic-partition[{}-{}] message: left_fetch_bytes: {}, max_partition_batch_count: {}",
+                                broker_id,
+                                &broker_addr,
+                                &spb.tpd.topic,
+                                spb.tpd.partition_id,
+                                spb.left_fetch_bytes.load(Ordering::Relaxed),
+                                spb.max_partition_batch_count.load(Ordering::Relaxed),
+                            );
+                            // 发送fetch获取消息
+                            if let Err(e) = tx_req
+                                .send(SubscribeReq {
+                                    request: Some(clientbrokersvc::subscribe_req::Request::Fetch(
+                                        Fetch {
+                                            topic: spb.tpd.topic.clone(),
+                                            partition_id: spb.tpd.partition_id,
+                                            max_partition_bytes: spb
+                                                .left_fetch_bytes
+                                                .load(Ordering::Relaxed),
+                                            max_partition_batch_count: spb
+                                                .max_partition_batch_count
+                                                .load(Ordering::Relaxed),
+                                        },
+                                    )),
+                                })
+                                .await
+                            {
+                                error!(
+                                    "fetch [{}-{}] from broker[{}:{:?}] send err: {e:?}",
+                                    &spb.tpd.topic, spb.tpd.partition_id, broker_id, &broker_addr,
+                                );
+                                if break_when_broker_disconnect {
+                                    stop.cancel();
+                                }
+                            }
+                        }
+                        time::sleep(Duration::from_millis(500)).await;
+                    }
+                });
+            }
+        }
+    }
+
+    fn spawn_consumer_task<HM, HMFut>(&self, handler: HM)
+    where
+        HM: Fn((String, u32), clientbrokersvc::MessageBatch, AckCommitHandle) -> HMFut
+            + Send
+            + Sync
+            + 'static,
+        HMFut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        let ack_commit_manager = self.subscribe_controll_manager.clone();
+        let stop = self.stop.clone();
+        let chans = self.chans.clone();
+
+        tokio::spawn(async move {
+            // 轮询所有分区的缓冲区
+            while !stop.is_cancelled() {
+                let mut processed = false;
+
+                for entry in chans.iter() {
+                    let broker_info = entry.key();
+                    let (_, spbs) = entry.pair();
+                    for spb in spbs.iter() {
+                        if let Some(messages) = spb.buf.pop() {
+                            if messages.messages.is_empty() {
+                                continue;
+                            }
+                            let key =
+                                (spb.tpd.broker_leader_addr.clone(), spb.tpd.broker_leader_id);
+                            let message_size: usize =
+                                messages.messages.iter().map(|v| v.payload.len()).sum();
+                            processed = true;
+                            // 创建ACK COMMIT句柄
+                            let ack_handle = AckCommitHandle {
+                                // topic: messages.topic.clone(),
+                                // partition: messages.partition_id,
+                                batch_id: messages.batch_id.clone(),
+                                batch_message_size: message_size as _,
+                                spb: spb.clone(),
+                                last_offset: messages
+                                    .messages
+                                    .last()
+                                    .unwrap()
+                                    .offset
+                                    .clone()
+                                    .unwrap(),
+                                notify: Arc::new(
+                                    ack_commit_manager.get(&key).unwrap().value().clone(),
+                                ),
+                            };
+
+                            // 调用用户处理函数
+                            handler(broker_info.clone(), messages, ack_handle).await;
+                        }
+                    }
+                }
+
+                // 如果没有处理任何消息，短暂休眠避免CPU空转
+                if !processed {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        });
+    }
+
+    async fn spawn_heartbeat_task(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        while !self.stop.is_cancelled() {
+            interval.tick().await;
+
+            for entry in self.subscribe_controll_manager.iter() {
+                let key = entry.key();
+                let tx = entry.value().clone();
+                if let Err(e) = tx
+                    .send(SubscribeReq {
+                        request: Some(Request::Heartbeat(Heartbeat { credit_request: 0 })),
+                    })
+                    .await
+                {
+                    error!(
+                        "[Subscriber]: Heartbeat to broker[{}:{}] err: {e:?}",
+                        key.1, key.0
+                    );
+                    if self.conf.break_when_broker_disconnect {
+                        self.stop.cancel();
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub struct AckCommitHandle {
+    // topic: String,
+    // partition: u32,
+    // 用于批次 ack
+    batch_id: String,
+    // 该批次消息大小
+    batch_message_size: u64,
+    // 用于commit
+    last_offset: SegmentOffset,
+    spb: SubscriberPartitionBuffer,
+    notify: Arc<mpsc::Sender<SubscribeReq>>,
+}
+
+impl AckCommitHandle {
+    pub async fn ack(self) -> Result<()> {
+        self.notify
+            .send(SubscribeReq {
+                request: Some(clientbrokersvc::subscribe_req::Request::Ack(Ack {
+                    batch_id: self.batch_id,
+                })),
+            })
+            .await?;
+        self.spb
+            .left_fetch_bytes
+            .fetch_add(self.batch_message_size, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn nack(self) {
+        // 如果需要重新投递，可以实现重新入队逻辑
+        // 当前设计不提供NACK功能，需要用户自己处理失败
+        // self.spb.push(msg);
+    }
+
+    pub async fn commit(self) -> Result<()> {
+        self.notify
+            .send(SubscribeReq {
+                request: Some(clientbrokersvc::subscribe_req::Request::Commit(Commit {
+                    commit_pos: Some(self.last_offset),
+                })),
+            })
+            .await?;
         Ok(())
     }
 }

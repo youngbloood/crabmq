@@ -634,9 +634,10 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
     ) -> std::result::Result<tonic::Response<Self::SyncConsumerAssignmentsStream>, tonic::Status>
     {
         let req = request.into_inner();
+        println!("收到 sync_consumer_assignments 请求, req = {:?}", req);
         let broker_id = req.broker_id;
+        let consumer_group_manager = self.consumer_group_manager.clone();
         let mut rx = self.consumer_group_manager.subscribe_broker_consumer(req);
-
         let (tx_middleware, rx_middleware) = mpsc::channel(1);
         tokio::spawn(async move {
             loop {
@@ -651,13 +652,14 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                         let res = res.unwrap();
                         if res.broker_id == broker_id {
                             if let Err(e) = tx_middleware.send(Ok(res)).await {
-                                error!("sync_consumer_assignments resp stream err: {e:?}");
+                                error!("sync_consumer_assignments to broker resp stream err: {e:?}");
                                 break;
                             }
                         }
                     }
                 }
             }
+            consumer_group_manager.unsubscribe_broker_consumer(req);
         });
 
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(
@@ -954,7 +956,10 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
     {
         let req = request.into_inner();
         let member_id = req.member_id.clone();
-        let mut rx = self.consumer_group_manager.subscribe_client_consumer(req);
+        let consumer_group_manager = self.consumer_group_manager.clone();
+        let mut rx = self
+            .consumer_group_manager
+            .subscribe_client_consumer(req.clone());
 
         let (tx_middleware, rx_middleware) = mpsc::channel(1);
         tokio::spawn(async move {
@@ -970,13 +975,14 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                         let res = res.unwrap();
                         if res.member_id == member_id {
                             if let Err(e) = tx_middleware.send(Ok(res)).await {
-                                error!("sync_consumer_assignments resp stream err: {e:?}");
+                                error!("sync_consumer_assignments to client resp stream err: {e:?}");
                                 break;
                             }
                         }
                     }
                 }
             }
+            consumer_group_manager.unsubscribe_client_consumer(req);
         });
 
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(

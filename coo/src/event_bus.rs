@@ -1,5 +1,6 @@
 // 新增事件总线模块 src/event_bus.rs
 use dashmap::DashMap;
+use log::error;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
@@ -31,10 +32,13 @@ impl<T: Clone + Send + 'static> EventBus<T> {
 
     pub async fn broadcast(&self, event: T) {
         for entry in self.subscriptions.iter() {
-            let _ = entry
+            if let Err(e) = entry
                 .value()
                 .send_timeout(event.clone(), self.timeout)
-                .await;
+                .await
+            {
+                error!("event_bus broadcast to {} err: {e:?}", entry.key());
+            }
         }
     }
 }

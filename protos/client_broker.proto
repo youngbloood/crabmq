@@ -6,7 +6,7 @@ service ClientBrokerService {
   rpc Publish(stream PublishReq) returns (stream PublishResp);
   
   // 消费消息（双向流式）
-  rpc Subscribe(stream SubscribeReq) returns (stream Message);
+  rpc Subscribe(stream SubscribeReq) returns (stream MessageBatch);
 }
 
 // ========== 生产消息协议 ==========
@@ -26,54 +26,51 @@ message PublishResp {
 message SubscribeReq {
   oneof request {
     Subscription sub = 1;       // 初始化订阅
-    Ack ack = 2;                // 消息确认
-    FlowControl flow = 3;       // 流控请求
-    Heartbeat heartbeat = 4;    // 新增：心跳包
+    Fetch fetch = 2;
+    Ack ack = 3;                // 消息确认
+    Commit commit = 4;
+    Heartbeat heartbeat = 5;    // 新增：心跳包
   }
 }
 
 message Subscription {
-  uint32 group_id = 1;
-  string member_id = 2;
+  string member_id =1;
+}
 
-  message SubTopic {
-    string topic = 1;
-    uint32 partition = 2;
-    uint64 offset = 3;            // 起始消费位移（-1表示最新）
-  }
-  repeated SubTopic SubTopics = 3;
-  
-  // 改进的流控参数
-  message FlowConfig {
-    uint32 max_bytes = 1;       // 最大字节数 (默认10MB)
-    uint32 max_messages = 2;    // 最大消息数 (默认500)
-    uint32 min_bytes = 3;       // 最小触发字节 (默认1)
-    uint32 max_wait_ms = 4;     // 最大等待时间 (默认500ms)
-    uint32 max_partition_bytes = 5; // 单分区最大字节 (默认1MB)
-  }
-  FlowConfig flow_config = 4;   // 流控配置
+message Fetch {
+  string topic = 1;
+  uint32 partition_id = 2;
+  uint64 max_partition_bytes = 3;
+  uint64 max_partition_batch_count = 4;
 }
 
 message Ack {
-  string message_id = 1;
-  bool commit = 2;              // true=确认消费，false=拒绝
-  uint32 credit_return = 3;     // 新增：返还的信用额度（字节数）
+  string batch_id = 1;           // 批次ID
 }
 
-message FlowControl {
-  enum Action {
-    INCREASE = 0;
-    DECREASE = 1;
-    PAUSE = 2;
-    RESUME = 3;
-  }
-  Action action = 1;
-  uint32 value = 2;             // 调整值（字节或消息数）
+
+message Commit {
+  SegmentOffset commit_pos = 1;  // 提交位置
 }
 
 message Heartbeat {
   uint32 credit_request = 1;    // 请求的信用额度（字节数）
 }
+
+
+message MessageBatch {
+  string batch_id = 1;     
+  string topic = 2;
+  uint32 partition_id = 3;         
+  repeated Message messages = 4;
+}
+
+message SegmentOffset {
+  string segment = 1;     // 段文件名称
+  uint64 offset = 2;       // 段内偏移量
+}
+
+
 
 
 // ========== 通用结构 ==========
@@ -82,7 +79,7 @@ message Message {
   uint32 partition = 2;
   string message_id = 3;
   bytes payload = 4;
-  int64 offset = 5;         // Broker维护的位移
+  SegmentOffset offset = 5;         // Broker维护的位移
   map<string,string> metadata = 6;  // 扩展元数据
   // 新增流控元数据
   uint32 credit_remaining = 7;      // Broker端剩余信用额度

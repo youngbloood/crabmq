@@ -430,7 +430,7 @@ where
                             .await
                     },
                     |res| async {
-                        sync_consumergroup_broker.apply_consumergroup(res).await;
+                        let _ = sync_consumergroup_broker.apply_consumergroup(res).await;
                         info!(
                             "Broker[{broker_id}]->External-Coo[{}]: SyncConsumerGroup",
                             _coo_leader_sync_consumergroup.lock().await,

@@ -163,28 +163,30 @@ impl From<TopicPartitionMeta> for TopicPartitionDetailSnapshot {
 impl From<&TopicPartitionMeta> for TopicPartitionDetailSnapshot {
     fn from(v: &TopicPartitionMeta) -> Self {
         let mut broker_follower_ids = vec![];
-        v.multi_labels.get("broker_follower_ids").map(|vs| {
-            vs.values
+        if let Some(lv) = v.multi_labels.get("broker_follower_ids") {
+            lv.values
                 .iter()
-                .map(|v| broker_follower_ids.push(v.parse::<u32>().unwrap()))
-        });
+                .for_each(|v| broker_follower_ids.push(v.parse::<u32>().unwrap()))
+        }
 
         let mut broker_follower_addrs = vec![];
-        v.multi_labels.get("broker_follower_addrs").map(|vs| {
-            vs.values
+        if let Some(lv) = v.multi_labels.get("broker_follower_addrs") {
+            lv.values
                 .iter()
-                .map(|v| broker_follower_addrs.push(v.to_string()))
-        });
+                .for_each(|v| broker_follower_addrs.push(v.to_string()))
+        }
 
         let mut pub_keys = vec![];
-        v.multi_labels
-            .get("pub_keys")
-            .map(|vs| vs.values.iter().map(|v| pub_keys.push(v.to_string())));
+        if let Some(lv) = v.multi_labels.get("pub_keys") {
+            lv.values.iter().for_each(|v| pub_keys.push(v.to_string()))
+        }
 
         let mut sub_member_ids = vec![];
-        v.multi_labels
-            .get("sub_member_ids")
-            .map(|vs| vs.values.iter().map(|v| sub_member_ids.push(v.to_string())));
+        if let Some(lv) = v.multi_labels.get("sub_member_ids") {
+            lv.values
+                .iter()
+                .for_each(|v| sub_member_ids.push(v.to_string()))
+        }
 
         TopicPartitionDetailSnapshot {
             topic: v.topic.clone(),
@@ -259,7 +261,7 @@ fn convert_to_topic_partition_meta(
                 },
             ),
             (
-                "broker_follower_addr".to_string(),
+                "broker_follower_addrs".to_string(),
                 LabelValue {
                     values: broker_follower_addrs
                         .iter()

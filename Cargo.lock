@@ -345,10 +345,12 @@ dependencies = [
  "async-stream",
  "bytes",
  "chrono",
+ "crossbeam",
  "dashmap",
  "futures",
  "grpcx",
  "log",
+ "nanoid",
  "prost",
  "storagev2",
  "sysinfo",
@@ -474,6 +476,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "crossbeam",
  "dashmap",
  "grpcx",
  "indexmap",
@@ -492,6 +495,23 @@ dependencies = [
  "anyhow",
  "bytes",
  "client",
+ "env_logger",
+ "futures",
+ "grpcx",
+ "hdrhistogram",
+ "rand 0.9.1",
+ "structopt",
+ "tokio",
+]
+
+[[package]]
+name = "client_sub_bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "client",
+ "common",
  "env_logger",
  "futures",
  "grpcx",

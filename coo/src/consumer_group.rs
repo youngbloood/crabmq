@@ -1,11 +1,9 @@
 use crate::event_bus::EventBus;
 use anyhow::Result;
 use dashmap::{DashMap, DashSet};
-use grpcx::brokercoosvc;
-use grpcx::clientcoosvc::{
-    self, GroupJoinResponse, SyncConsumerAssignmentsResp, group_join_response,
-};
-use grpcx::commonsvc::GroupStatus;
+use grpcx::brokercoosvc::{self, GroupMeta, GroupTopicMeta};
+use grpcx::clientcoosvc::{self, GroupJoinResponse, group_join_response};
+use grpcx::commonsvc::{GroupStatus, TopicPartitionMeta};
 use grpcx::topic_meta::TopicPartitionDetail;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,9 +13,7 @@ use tokio::sync::mpsc;
 struct ConsumerMember {
     // member_id: 由 coo 端生成
     member_id: String,
-    topics: Arc<DashSet<String>>,
-    // 消费容量
-    capacity: u32,
+    topics: Arc<DashMap<String, u32>>,
     last_seen: u64, // timestamp
 }
 
@@ -28,7 +24,7 @@ struct ConsumerGroup {
     generation_id: i32,
 
     // 该消费者组订阅的 topics
-    topics: Arc<DashSet<String>>,
+    topics: Arc<DashMap<String, u32>>,
     // member_id -> ConsumerMember
     members: Arc<DashMap<String, ConsumerMember>>,
     // topic -> Vec<PartitionMeta>
@@ -61,23 +57,11 @@ impl ConsumerGroup {
     }
 
     fn trigger_rebalance(&mut self, mut all_partitions: Vec<(String, Vec<TopicPartitionDetail>)>) {
-        // 按容量排序成员（从高到低）
         let mut members: Vec<_> = self
             .members
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        members.sort_by(|a, b| b.capacity.cmp(&a.capacity));
-
-        // 计算总容量
-        let total_capacity: u32 = members.iter().map(|m| m.capacity).sum();
-        if total_capacity == 0 || members.is_empty() {
-            // 清空分配并返回
-            self.assignments = Arc::new(DashMap::new());
-            self.generation_id += 1;
-            self.status = GroupStatus::Stable;
-            return;
-        }
 
         // 计算总分区数
         let total_partitions = all_partitions
@@ -94,32 +78,14 @@ impl ConsumerGroup {
         }
 
         // 为每个分区分配成员
-        let mut global_partition_index = 0;
-
+        let mut member_idx = 0;
         for (_, partitions) in all_partitions.iter_mut() {
             for partition in partitions.iter_mut() {
-                // 计算应分配的成员索引（基于容量的权重分配）
-                let target_ratio = global_partition_index as f32 / total_partitions as f32;
-                let mut accumulated = 0.0;
-                let mut member_idx = 0;
-
-                for (idx, member) in members.iter().enumerate() {
-                    let ratio = member.capacity as f32 / total_capacity as f32;
-                    accumulated += ratio;
-
-                    if accumulated >= target_ratio {
-                        member_idx = idx;
-                        break;
-                    }
-                }
-
                 // 获取成员ID
-                let member_id = members[member_idx].member_id.clone();
-
+                let member_id = members[member_idx % members.len()].member_id.clone();
                 // 更新分区的sub_member_ids（只分配一个成员）
                 partition.sub_member_ids = vec![member_id];
-
-                global_partition_index += 1;
+                member_idx += 1;
             }
         }
 
@@ -166,9 +132,9 @@ impl ConsumerGroupManager {
             .groups
             .entry(req.group_id)
             .or_insert_with(|| -> ConsumerGroup {
-                let topics = DashSet::new();
-                req.topics.iter().for_each(|v| {
-                    topics.insert(v.to_string());
+                let topics = DashMap::new();
+                req.sub_topics.iter().for_each(|v| {
+                    topics.insert(v.topic.clone(), v.offset);
                 });
 
                 ConsumerGroup {
@@ -181,8 +147,8 @@ impl ConsumerGroupManager {
             });
 
         let topics = DashSet::new();
-        req.topics.iter().for_each(|v| {
-            topics.insert(v.to_string());
+        req.sub_topics.iter().for_each(|v| {
+            topics.insert(v.topic.clone());
         });
 
         // 检查所有topic是否存在
@@ -204,7 +170,7 @@ impl ConsumerGroupManager {
                 });
             }
             for k in topics {
-                if !group.topics.contains(&k) {
+                if !group.topics.contains_key(&k) {
                     return Ok(GroupJoinResponse {
                         error: group_join_response::ErrorCode::SubscriptionConflict.into(),
                         ..Default::default()
@@ -213,20 +179,11 @@ impl ConsumerGroupManager {
             }
         }
 
-        // 首次加入初始化
-        if group.status == GroupStatus::Empty {
-            req.topics.iter().for_each(|v| {
-                group.topics.insert(v.to_string());
-            });
-            group.status = GroupStatus::Stable;
-        }
-
         // 生成成员ID
         let member_id = format!("{}-{}", req.group_id, nanoid::nanoid!());
         let member = ConsumerMember {
             member_id: member_id.clone(),
             topics: group.topics.clone(),
-            capacity: req.capacity,
             last_seen: chrono::Local::now().timestamp_millis() as _,
         };
 
@@ -234,15 +191,15 @@ impl ConsumerGroupManager {
         if group.members.is_empty() {
             group.members.insert(member_id.clone(), member);
             group.clear_member();
-            self.assign_all_partitions(&mut group);
-            return self.build_join_response(&mut group, &member_id);
+            self.assign_all_partitions(&mut group).await;
+            return self.build_join_response(&group, &member_id);
         }
 
         // 触发 Rebalance
         group.members.insert(member_id.clone(), member);
         group.status = GroupStatus::Rebalancing;
         self.trigger_rebalance(&mut group).await;
-        self.build_join_response(&mut group, &member_id)
+        self.build_join_response(&group, &member_id)
     }
 
     pub fn subscribe_client_consumer(
@@ -284,19 +241,32 @@ impl ConsumerGroupManager {
     ) -> Result<GroupJoinResponse> {
         let mut topics: Vec<String> = vec![];
         cg.topics.iter().for_each(|v| topics.push(v.to_string()));
+
+        let mut tpms = vec![];
+        for tpds in cg.assignments.iter() {
+            for tpd in tpds.value() {
+                if tpd.sub_member_ids.contains(&member_id.to_string()) {
+                    tpms.push(tpd.convert_to_topic_partition_meta(tpds.key()));
+                }
+            }
+        }
+
         Ok(GroupJoinResponse {
             group_id: cg.id,
             member_id: member_id.to_string(),
             generation_id: 0,
             assigned_topics: topics,
+            list: tpms,
             status: GroupStatus::Stable.into(),
             error: 0,
         })
     }
 
-    fn assign_all_partitions(&self, group: &mut ConsumerGroup) {
+    async fn assign_all_partitions(&self, group: &mut ConsumerGroup) {
         let all_partitions = self.collect_partitions(group);
         group.assign_all_partitions(all_partitions);
+        self.notify_clients(group, group.assignments.clone()).await;
+        self.notify_brokers(group, group.assignments.clone()).await;
     }
 
     fn collect_partitions(
@@ -306,7 +276,7 @@ impl ConsumerGroupManager {
         let mut topic_pool = vec![];
         for topic in group.topics.iter() {
             if let Some(assignment) = self.all_topics.get(topic.key()) {
-                topic_pool.push((topic.clone(), assignment.value().clone()));
+                topic_pool.push((topic.key().clone(), assignment.value().clone()));
             }
         }
         topic_pool
@@ -352,6 +322,7 @@ impl ConsumerGroupManager {
             }
         }
 
+        println!("广播client: {:?}", member_map);
         // 广播
         for v in member_map.values() {
             self.client_consumer_bus.broadcast(v.clone()).await;
@@ -374,17 +345,34 @@ impl ConsumerGroupManager {
                 broker_map
                     .entry(partition.broker_leader_id)
                     .and_modify(|resp: &mut brokercoosvc::SyncConsumerAssignmentsResp| {
-                        resp.list
-                            .push(partition.convert_to_topic_partition_meta(topic));
+                        resp.group_meta
+                            .as_mut()
+                            .unwrap()
+                            .group_topic_metas
+                            .push(GroupTopicMeta {
+                                topic: topic.clone(),
+                                offset: *group.topics.get(topic).unwrap(),
+                                list: vec![partition.convert_to_topic_partition_meta(topic)],
+                            });
                     })
-                    .or_insert_with(|| brokercoosvc::SyncConsumerAssignmentsResp {
-                        list: vec![partition.convert_to_topic_partition_meta(topic)],
-                        broker_id: partition.broker_leader_id,
-                        term: 0,
+                    .or_insert_with(|| -> brokercoosvc::SyncConsumerAssignmentsResp {
+                        brokercoosvc::SyncConsumerAssignmentsResp {
+                            group_meta: Some(GroupMeta {
+                                id: group.id,
+                                group_topic_metas: vec![GroupTopicMeta {
+                                    topic: topic.clone(),
+                                    offset: *group.topics.get(topic).unwrap(),
+                                    list: vec![partition.convert_to_topic_partition_meta(topic)],
+                                }],
+                            }),
+                            broker_id: partition.broker_leader_id,
+                            term: 0,
+                        }
                     });
             }
         }
 
+        println!("广播broker: {:?}", broker_map);
         // 广播
         for v in broker_map.values() {
             self.broker_consumer_bus.broadcast(v.clone()).await;

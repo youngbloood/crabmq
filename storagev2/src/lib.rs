@@ -2,6 +2,8 @@ pub mod disk;
 pub mod mem;
 pub mod metrics;
 
+use std::{num::NonZero, path::PathBuf};
+
 pub use mem::*;
 
 use anyhow::Result;
@@ -26,16 +28,25 @@ pub trait StorageReader: Send + Sync + Clone + 'static {
 
 #[async_trait]
 pub trait StorageReaderSession: Send + Sync + 'static {
-    /// Get the next message
-    ///
-    /// It should block when there are no new message
+    /// Get the next n message
     async fn next(
         &self,
         topic: &str,
         partition: u32,
-        stop_signal: CancellationToken,
-    ) -> Result<Bytes>;
+        n: NonZero<u64>,
+    ) -> Result<Vec<(Bytes, SegmentOffset)>>;
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32) -> Result<()>;
+    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> Result<()>;
+}
+
+#[derive(Default, Debug)]
+pub struct SegmentOffset {
+    pub filename: PathBuf,
+    pub offset: u64,
+}
+
+pub enum ReadType {
+    FromBegin, // 从头开始消费
+    Latest,    // 从最新消息开始消费，以第一次调用next为快照
 }

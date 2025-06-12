@@ -2,17 +2,17 @@ use crate::{
     config::Config, consumer_group_v2::ConsumerGroupManager, message_bus::MessageBus,
     partition::PartitionManager,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use dashmap::DashMap;
 use grpcx::{
     brokercoosvc::{BrokerState, SyncConsumerAssignmentsResp},
     clientbrokersvc::{
-        Message, PublishReq, PublishResp, Status as BrokerStatus, SubscribeReq,
+        Message, MessageBatch, PublishReq, PublishResp, Status as BrokerStatus, SubscribeReq,
         client_broker_service_server::{ClientBrokerService, ClientBrokerServiceServer},
         subscribe_req,
     },
-    commonsvc::{self, TopicPartitionMeta, TopicPartitionResp},
+    commonsvc::TopicPartitionResp,
     topic_meta::TopicPartitionDetail,
 };
 use log::{debug, error, info};
@@ -74,7 +74,7 @@ where
     SR: StorageReader,
 {
     type PublishStream = tonic::codegen::BoxStream<PublishResp>;
-    type SubscribeStream = tonic::codegen::BoxStream<Message>;
+    type SubscribeStream = tonic::codegen::BoxStream<MessageBatch>;
 
     async fn publish(
         &self,
@@ -108,7 +108,7 @@ where
         let remote_addr = request.remote_addr().unwrap().to_string();
         let mut stream = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(self.conf.subscribe_buffer_size);
-
+        let id = self.get_id();
         let broker = self.clone();
         tokio::spawn(async move {
             while let Ok(Some(req)) = stream.message().await {
@@ -118,6 +118,7 @@ where
                 {
                     Ok(_) => {}
                     Err(e) => {
+                        error!("Broker[{}] handle subscribe err: {e:?}", id);
                         let _ = tx.send(Err(e)).await;
                         break;
                     }
@@ -163,8 +164,13 @@ where
         self.partitions.apply_topic_infos(list)
     }
 
-    pub async fn apply_consumergroup(&self, s: SyncConsumerAssignmentsResp) {
+    pub async fn apply_consumergroup(&self, s: SyncConsumerAssignmentsResp) -> Result<()> {
+        if s.broker_id != self.conf.id {
+            return Err(anyhow!("this message not belong the broker"));
+        }
+        println!("broker收到  ==== {:?}", s);
         self.consumers.apply_consumergroup(s).await;
+        Ok(())
     }
 
     pub async fn run(&self) -> Result<()> {
@@ -209,6 +215,7 @@ where
             }
         });
 
+        // 定期获取 broker 所在节点的状态
         let metrics = self.metrics.clone();
         let metrics_handle = tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(5));
@@ -295,46 +302,32 @@ where
         &self,
         client_addr: &str,
         req: SubscribeReq,
-        tx: mpsc::Sender<Result<Message, Status>>,
+        tx: mpsc::Sender<Result<MessageBatch, Status>>,
     ) -> Result<(), Status> {
         match req.request {
             Some(subscribe_req::Request::Sub(sub)) => {
-                for sub_topic in &sub.sub_topics {
-                    // 验证分区归属
-                    if !self
-                        .partitions
-                        .is_my_partition(&sub_topic.topic, sub_topic.partition)
-                    {
-                        return Err(Status::new(
-                            tonic::Code::InvalidArgument,
-                            "invalid topic or partition",
-                        ));
-                    }
-
-                    // 检查该客户端是否有订阅该分区的权限
-                    if !self
-                        .consumers
-                        .check_consumer(
-                            // sub.group_id,
-                            &sub.member_id,
-                            &sub_topic.topic,
-                            sub_topic.partition,
-                        )
-                        .await
-                    {
-                        return Err(Status::new(
-                            tonic::Code::PermissionDenied,
-                            "the client not allowed to sub the partition",
-                        ));
-                    }
-                }
-
                 // 创建会话
                 self.consumers
-                    .new_sesssion(sub.group_id, sub.sub_topics, client_addr.to_string(), tx)
+                    .new_sesssion(sub.member_id, client_addr.to_string())
                     .await
                     .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
             }
+
+            Some(subscribe_req::Request::Fetch(fetch)) => {
+                // 更新流量控制
+                let sess = self.consumers.get_session(client_addr);
+                if sess.is_none() {
+                    // 统一由外部处理
+                    return Err(tonic::Status::new(
+                        tonic::Code::InvalidArgument,
+                        "Must be sub firstly",
+                    ));
+                }
+                let sess = sess.unwrap();
+                // 处理ACK逻辑
+                sess.handle_fetch(fetch, tx).await;
+            }
+
             Some(subscribe_req::Request::Ack(ack)) => {
                 let sess = self.consumers.get_session(client_addr);
                 if sess.is_none() {
@@ -348,23 +341,13 @@ where
                 // 处理ACK逻辑
                 sess.handle_ack(ack);
             }
-            Some(subscribe_req::Request::Flow(flow)) => {
-                // 更新流量控制
-                let sess = self.consumers.get_session(client_addr);
-                if sess.is_none() {
-                    // 统一由外部处理
-                    return Err(tonic::Status::new(
-                        tonic::Code::InvalidArgument,
-                        "Must be sub firstly",
-                    ));
-                }
-                let sess = sess.unwrap();
-                // 处理ACK逻辑
-                sess.handle_flow(flow);
+
+            Some(subscribe_req::Request::Commit(commit)) => {
+                // todo: 处理 commit 逻辑
             }
-            Some(subscribe_req::Request::Heartbeat(hb)) => {
-                todo!()
-            }
+
+            Some(subscribe_req::Request::Heartbeat(hb)) => {}
+
             None => return Err(tonic::Status::new(tonic::Code::InvalidArgument, "Unkown ")),
         }
         Ok(())

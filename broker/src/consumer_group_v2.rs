@@ -1,25 +1,77 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use bytes::Bytes;
+use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
-use grpcx::brokercoosvc::SyncConsumerAssignmentsResp;
-use grpcx::clientbrokersvc::{self, Ack, FlowControl, Message};
-use grpcx::topic_meta;
-use log::error;
+use grpcx::brokercoosvc::{self, SyncConsumerAssignmentsResp};
+use grpcx::clientbrokersvc::{Ack, Fetch, Message, MessageBatch, SegmentOffset};
+use grpcx::topic_meta::TopicPartitionDetail;
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use storagev2::SegmentOffset as StorageSegmentOffset;
 use storagev2::{StorageReader, StorageReaderSession};
 use tokio::sync::{Semaphore, mpsc};
-use tokio::{select, time};
-use tokio_util::sync::CancellationToken;
+use tokio::time;
 use tonic::Status;
 
+pub struct GroupTopicMeta {
+    topic: String,
+    offset: u32,
+    list: Vec<TopicPartitionDetail>,
+}
+struct GroupMeta {
+    id: u32,
+    group_topic_metas: Vec<GroupTopicMeta>,
+}
+
+impl From<brokercoosvc::GroupMeta> for GroupMeta {
+    fn from(v: brokercoosvc::GroupMeta) -> Self {
+        let mut topic_metas = vec![];
+        for gtm in &v.group_topic_metas {
+            let tpds = gtm.list.iter().map(TopicPartitionDetail::from).collect();
+            topic_metas.push(GroupTopicMeta {
+                topic: gtm.topic.clone(),
+                offset: gtm.offset,
+                list: tpds,
+            })
+        }
+
+        GroupMeta {
+            id: v.id,
+            group_topic_metas: topic_metas,
+        }
+    }
+}
+
+impl From<&brokercoosvc::GroupMeta> for GroupMeta {
+    fn from(v: &brokercoosvc::GroupMeta) -> Self {
+        let mut topic_metas = vec![];
+        for gtm in &v.group_topic_metas {
+            let tpds = gtm.list.iter().map(TopicPartitionDetail::from).collect();
+            topic_metas.push(GroupTopicMeta {
+                topic: gtm.topic.clone(),
+                offset: gtm.offset,
+                list: tpds,
+            })
+        }
+
+        GroupMeta {
+            id: v.id,
+            group_topic_metas: topic_metas,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct ConsumerGroupManager<SR>
+pub(crate) struct ConsumerGroupManager<SR>
 where
     SR: StorageReader,
 {
-    // group_id: Vec<commonsvc::TopicPartitionMeta>
-    consumers: Arc<DashMap<String, Vec<topic_meta::TopicPartitionDetail>>>,
+    // member_id: group_id
+    consumers: Arc<DashMap<String, u32>>,
+
+    group: Arc<DashMap<u32, GroupMeta>>,
 
     // <ClientAddr, SubSession>
     sessions: Arc<DashMap<String, SubSession>>,
@@ -43,6 +95,7 @@ where
             heartbeats: Arc::new(DashMap::new()),
             subscriber_timeout,
             storage_reader: Arc::new(sr),
+            group: Arc::default(),
         };
 
         // 启动心跳检测任务
@@ -51,46 +104,67 @@ where
     }
 
     pub async fn apply_consumergroup(&self, res: SyncConsumerAssignmentsResp) {
-        res.list.iter().map(|v| {
-            let tm = topic_meta::TopicPartitionDetail::from(v.clone());
-            for member_id in &tm.sub_member_ids {
-                self.consumers
-                    .entry(member_id.to_string())
-                    .and_modify(|entry: &mut Vec<topic_meta::TopicPartitionDetail>| {
-                        entry.push(tm.clone());
-                    })
-                    .or_insert(vec![tm.clone()]);
+        let group_meta = res.group_meta.unwrap();
+        for v in &group_meta.group_topic_metas {
+            for tpm in &v.list {
+                let tpd = TopicPartitionDetail::from(tpm);
+                println!("TPD = {:?}", tpd);
+                for member_id in tpd.sub_member_ids {
+                    self.consumers.insert(member_id, group_meta.id);
+                }
             }
-        });
+        }
+
+        self.group
+            .insert(group_meta.id, GroupMeta::from(group_meta));
     }
 
-    pub async fn check_consumer(
-        &self,
-        // group_id: u32,
-        member_id: &str,
-        topic: &str,
-        partition_id: u32,
-    ) -> bool {
+    pub async fn check_consumer(&self, member_id: &str, topics: &[String]) -> bool {
         if !self.consumers.contains_key(member_id) {
             return false;
         }
-        for pm in self.consumers.get(member_id).unwrap().iter() {
-            if pm.topic == topic && pm.partition_id == partition_id {
-                return true;
+        let group = self.consumers.get(member_id).unwrap();
+        let group_id = group.value();
+
+        let has_topics: Vec<String> = self
+            .group
+            .get(group_id)
+            .unwrap()
+            .group_topic_metas
+            .iter()
+            .map(|v| v.topic.clone())
+            .collect();
+
+        for topic in topics {
+            if !has_topics.contains(&topic) {
+                return false;
             }
         }
-        false
+        true
     }
 
-    pub async fn new_sesssion(
-        &self,
-        group_id: u32,
-        sub_topics: Vec<clientbrokersvc::subscription::SubTopic>,
-        client_addr: String,
-        tx: mpsc::Sender<Result<Message, Status>>,
-    ) -> Result<()> {
-        let srs = self.storage_reader.new_session(group_id).await?;
-        let ss = SubSession::new(group_id, sub_topics, client_addr.clone(), srs, tx);
+    pub async fn new_sesssion(&self, member_id: String, client_addr: String) -> Result<()> {
+        let group = self.consumers.get(&member_id);
+        if group.is_none() {
+            return Err(anyhow!("group not found the member"));
+        }
+        let group = group.unwrap();
+        let group_id = group.value();
+
+        let sub_topics = DashMap::new();
+        let group_meta = self.group.get(group_id).unwrap();
+        group_meta.group_topic_metas.iter().for_each(|v| {
+            v.list.iter().for_each(|tpd| {
+                sub_topics.insert(
+                    (tpd.topic.clone(), tpd.partition_id),
+                    (v.offset, tpd.clone()),
+                );
+            });
+        });
+
+        let srs = self.storage_reader.new_session(*group_id).await?;
+
+        let ss = SubSession::new(member_id, *group_id, sub_topics, client_addr.clone(), srs);
         self.sessions.insert(client_addr, ss);
         Ok(())
     }
@@ -129,102 +203,130 @@ where
 // 流量控制等
 #[derive(Clone)]
 pub struct SubSession {
+    member_id: String,
     group_id: u32,
-    sub_topics: Arc<Vec<clientbrokersvc::subscription::SubTopic>>,
+    // 该客户端分配到的可消费的(topic, partition_id)
+    // (topic, partition_id): (offset, TopicPartitionDetail)
+    sub_topics: Arc<DashMap<(String, u32), (u32, TopicPartitionDetail)>>,
     // 以链接至 broker 的客户端地址作为 session_id
     client_addr: String,
 
     window: Arc<Semaphore>,
     storage: Arc<Box<dyn StorageReaderSession>>,
-    stop_signal: CancellationToken,
+
+    buf: Arc<SegQueue<(Bytes, StorageSegmentOffset)>>,
+    slide_window: SlideWindow,
 }
+
+#[derive(Clone)]
+struct SlideWindow {}
 
 impl SubSession {
     pub fn new(
+        member_id: String,
         group_id: u32,
-        sub_topics: Vec<clientbrokersvc::subscription::SubTopic>,
+        sub_topics: DashMap<(String, u32), (u32, TopicPartitionDetail)>,
         client_addr: String,
         storage: Box<dyn StorageReaderSession>,
-        tx: mpsc::Sender<Result<Message, Status>>,
     ) -> Self {
-        let (tx_storage, mut rx_storage) = mpsc::channel(1024);
         let ss = Self {
+            member_id,
             group_id,
             sub_topics: Arc::new(sub_topics),
             client_addr,
-
             window: Arc::new(Semaphore::new(10)),
             storage: Arc::new(storage),
-            stop_signal: CancellationToken::new(),
+            buf: Arc::default(),
+            slide_window: SlideWindow {},
         };
-
-        let stop = ss.stop_signal.clone();
-
-        tokio::spawn(async move {
-            loop {
-                select! {
-                    _ = stop.cancelled() => {
-                        tx.send(Err(tonic::Status::cancelled("cancelled"))).await;
-                        return;
-                    }
-
-                    msg = rx_storage.recv() => {
-                        match msg {
-                            Some(msg) => {
-                                let _ = tx.send(Ok(msg)).await;
-                            }
-                            None => {
-                                tx.send(Err(tonic::Status::data_loss("get none from tx_storage"))).await;
-                            },
-                        }
-                    }
-                }
-            }
-        });
-
-        for st in ss.sub_topics.iter() {
-            let reader = ss.storage.clone();
-            let topic = st.topic.clone();
-            let partition_id = st.partition.clone();
-            let offset = st.offset;
-            let _tx = tx_storage.clone();
-            let stop = ss.stop_signal.clone();
-            tokio::spawn(async move {
-                loop {
-                    match reader.next(&topic, partition_id, stop.clone()).await {
-                        Ok(msg) => {
-                            _tx.send(Message {
-                                message_id: String::new(),
-                                topic: topic.clone(),
-                                partition: partition_id,
-                                offset: 0,
-                                payload: msg.to_vec(),
-                                metadata: HashMap::new(),
-                                ..Default::default()
-                            })
-                            .await;
-                        }
-                        Err(e) => {
-                            error!(
-                                "get the topic[{topic}]-partition[{partition_id}] next failed: {e:?}"
-                            );
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
         ss
-    }
-
-    fn close(&self) {
-        self.stop_signal.cancel();
     }
 
     pub fn handle_ack(&self, ack: Ack) {}
 
-    pub fn handle_flow(&self, flow: FlowControl) {}
+    pub async fn handle_fetch(&self, f: Fetch, tx: mpsc::Sender<Result<MessageBatch, Status>>) {
+        let mut left_bytes = f.max_partition_bytes;
+        println!("left_bytes = {}", left_bytes);
+        let mut message_batch = MessageBatch {
+            batch_id: nanoid::nanoid!(),
+            topic: f.topic.clone(),
+            partition_id: f.partition_id,
+            messages: Vec::new(),
+        };
+
+        let append_msg =
+            |batch: &mut MessageBatch, _f: &Fetch, msg: (Bytes, StorageSegmentOffset)| {
+                batch.messages.push(Message {
+                    topic: _f.topic.clone(),
+                    partition: _f.partition_id,
+                    message_id: String::new(),
+                    payload: msg.0.into(),
+                    offset: Some(SegmentOffset {
+                        segment: format!("{:?}", msg.1.filename),
+                        offset: msg.1.offset,
+                    }),
+                    metadata: HashMap::new(),
+                    credit_remaining: 0,
+                    credit_consumed: 0,
+                    recommended_next_bytes: 0,
+                });
+            };
+
+        let mut has_full = false;
+        // 先从 buf 中进行填充
+        let mut message_count = 0;
+        while let Some(msg) = self.buf.pop() {
+            if message_count >= f.max_partition_batch_count {
+                let _ = tx.send(Ok(message_batch)).await;
+                return;
+            }
+            let msgs_size = msg.0.len() as u64;
+            if msgs_size > left_bytes {
+                let _ = tx.send(Ok(message_batch)).await;
+                return;
+            }
+            left_bytes -= msgs_size;
+            println!("调用push 111111");
+            append_msg(&mut message_batch, &f, msg);
+            message_count += 1;
+        }
+        println!("left_bytes111 = {}", left_bytes);
+
+        while message_count < f.max_partition_batch_count {
+            // buf 中已无缓存，在从 storage 中读取并填充
+            match self
+                .storage
+                .next(&f.topic, f.partition_id, NonZero::new(1).unwrap())
+                .await
+            {
+                Ok(msgs) => {
+                    for msg in msgs {
+                        if has_full {
+                            // 将已经读出来的数据放入缓存
+                            self.buf.push(msg);
+                            continue;
+                        }
+                        let msgs_size = msg.0.len() as u64;
+                        if msgs_size > left_bytes {
+                            has_full = true;
+                            self.buf.push(msg);
+                            continue;
+                        }
+                        left_bytes -= msgs_size;
+                        append_msg(&mut message_batch, &f, msg);
+                        message_count += 1;
+                        println!("left_bytes222 = {}", left_bytes);
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(Status::internal(format!("StorageReader err: {:?}", e))))
+                        .await;
+                }
+            }
+        }
+        let _ = tx.send(Ok(message_batch)).await;
+    }
 
     // pub async fn next(&mut self) -> Result<Message, Status> {
     //     select! {

@@ -1,11 +1,13 @@
 use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
+use crate::SegmentOffset;
 use crate::disk::meta::gen_record_filename;
 use crate::{StorageReader, StorageReaderSession, disk::StorageError};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use common::check_exist;
 use dashmap::DashMap;
+use std::num::NonZero;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -72,8 +74,8 @@ impl StorageReaderSession for DiskStorageReaderSession {
         &self,
         topic: &str,
         partition_id: u32,
-        stop_signal: CancellationToken,
-    ) -> Result<Bytes> {
+        n: NonZero<u64>,
+    ) -> Result<Vec<(Bytes, SegmentOffset)>> {
         if self
             .readers
             .get(&(topic.to_string(), partition_id))
@@ -99,11 +101,16 @@ impl StorageReaderSession for DiskStorageReaderSession {
             .get_mut(&(topic.to_string(), partition_id))
             .unwrap();
 
-        Ok(reader.next().await?)
+        let mut list = vec![];
+        for _ in 0..n.into() {
+            list.push(reader.next().await?);
+        }
+
+        Ok(list)
     }
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32) -> Result<()> {
+    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> Result<()> {
         // TODO:
         Ok(())
     }
@@ -174,7 +181,15 @@ impl DiskStorageReaderSessionPartition {
         Ok(())
     }
 
-    async fn read(&self) -> Result<Bytes> {
+    async fn get_segment_offset(&self) -> SegmentOffset {
+        let rl = self.reader_ptr.read().await;
+        SegmentOffset {
+            filename: rl.filename.clone(),
+            offset: rl.offset,
+        }
+    }
+
+    async fn read(&self) -> Result<(Bytes, SegmentOffset)> {
         let (filename, read_offset) = {
             let reader_ptr_rl = self.reader_ptr.read().await;
             (reader_ptr_rl.filename.clone(), reader_ptr_rl.offset)
@@ -190,7 +205,7 @@ impl DiskStorageReaderSessionPartition {
         wl.read_exact(&mut len_buf).await?;
         let len = u64::from_be_bytes(len_buf);
         if len == 0 {
-            return Ok(Bytes::new());
+            return Ok((Bytes::new(), SegmentOffset::default()));
         }
 
         // 读取消息内容
@@ -203,13 +218,13 @@ impl DiskStorageReaderSessionPartition {
         tokio::spawn(async move {
             let _ = reader.save_reader_ptr().await;
         });
-        Ok(Bytes::from(buf))
+        Ok((Bytes::from(buf), self.get_segment_offset().await))
     }
 
-    async fn next(&mut self) -> Result<Bytes> {
+    async fn next(&mut self) -> Result<(Bytes, SegmentOffset)> {
         match self.read().await {
             Ok(data) => {
-                if !data.is_empty() {
+                if !data.0.is_empty() {
                     return Ok(data);
                 }
                 // data为空，滚动文件查找
@@ -245,7 +260,7 @@ fn filename_factor_next_record(filename: &Path) -> PathBuf {
 #[cfg(test)]
 mod test {
     use crate::{StorageReader, disk::DiskStorageReader};
-    use std::path::PathBuf;
+    use std::{num::NonZero, path::PathBuf};
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
@@ -253,10 +268,13 @@ mod test {
         let dsr = DiskStorageReader::new(PathBuf::from("./data"));
         let sess = dsr.new_session(2).await.expect("new session failed");
         let stop = CancellationToken::new();
-        while let Ok(data) = sess.next("topic111", 11, stop.clone()).await {
-            if data.is_empty() {
-                return;
-            }
+        while let Ok(data) = sess
+            .next("topic111", 11, NonZero::new(1_u64).unwrap())
+            .await
+        {
+            // if data.is_empty() {
+            //     return;
+            // }
             println!("data = {data:?}");
         }
     }

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 bytes = "1.10.1"
+crossbeam = { version = "0.8.4", features = ["crossbeam-deque"] }
 dashmap = "6.1.0"
 grpcx = { version = "0.1.0", path = "../grpcx" }
 indexmap = { version = "2.9.0", features = ["quickcheck"] }

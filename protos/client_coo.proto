@@ -66,8 +66,15 @@ message PullReq {
 
 message GroupJoinRequest {
     uint32 group_id = 1;
-    repeated string topics = 2;
-    uint32 capacity = 3;  // 新增：客户端处理能力
+    repeated GroupJoinSubTopic sub_topics = 2;
+}
+
+// 仅每个消费者组中的第一个 SubTopic 有效
+message GroupJoinSubTopic {
+    string topic = 1; 
+    // 起始消费位移（1表示最新，0表示从头开始消费）
+    // 仅每个组中的第一个消费者的 offset 设置有效
+    uint32 offset = 2;         
 }
 
 message GroupJoinResponse {
@@ -75,14 +82,15 @@ message GroupJoinResponse {
     string member_id = 2;
     int32 generation_id = 3;
     repeated string assigned_topics = 4;  // 统一后的订阅列表
-    commonsvc.GroupStatus status = 5;
+    repeated commonsvc.TopicPartitionMeta list = 5;
+    commonsvc.GroupStatus status = 6;
     enum ErrorCode {
         NONE = 0;
         InvalidTopic = 1;
         SUBSCRIPTION_CONFLICT = 2;
         INVALID_GENERATION = 3;
     }
-    ErrorCode error = 6;
+    ErrorCode error = 7;
 }
 
 message SyncConsumerAssignmentsReq {
@@ -94,7 +102,8 @@ message SyncConsumerAssignmentsReq {
 message SyncConsumerAssignmentsResp {
     uint32 group_id = 1;
     string member_id = 2;
-    // 客户端存储成 map: broker_id -> Vec<(topic-partition)>
+    // 客户端存储成 map: (topic, partition_id) -> commonsvc.TopicPartitionMeta
+    // 并从该分区不断 Fetch 消息
     repeated commonsvc.TopicPartitionMeta list = 3;
     commonsvc.GroupStatus status = 4;
 }
