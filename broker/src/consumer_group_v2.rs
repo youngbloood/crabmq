@@ -5,11 +5,12 @@ use dashmap::DashMap;
 use grpcx::brokercoosvc::{self, SyncConsumerAssignmentsResp};
 use grpcx::clientbrokersvc::{Ack, Fetch, Message, MessageBatch, SegmentOffset};
 use grpcx::topic_meta::TopicPartitionDetail;
+use log::error;
 use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use storagev2::SegmentOffset as StorageSegmentOffset;
+use storagev2::{ReadPosition, SegmentOffset as StorageSegmentOffset};
 use storagev2::{StorageReader, StorageReaderSession};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time;
@@ -23,6 +24,22 @@ pub struct GroupTopicMeta {
 struct GroupMeta {
     id: u32,
     group_topic_metas: Vec<GroupTopicMeta>,
+}
+
+impl GroupMeta {
+    fn get_topic_read_positions(&self) -> Vec<(String, ReadPosition)> {
+        let mut list = vec![];
+        self.group_topic_metas.iter().for_each(|v| {
+            let read_position = if v.offset == 1 {
+                ReadPosition::Latest
+            } else {
+                ReadPosition::Begin
+            };
+            list.push((v.topic.clone(), read_position));
+        });
+
+        list
+    }
 }
 
 impl From<brokercoosvc::GroupMeta> for GroupMeta {
@@ -70,7 +87,7 @@ where
 {
     // member_id: group_id
     consumers: Arc<DashMap<String, u32>>,
-
+    // group_id: GroupMeta
     group: Arc<DashMap<u32, GroupMeta>>,
 
     // <ClientAddr, SubSession>
@@ -162,7 +179,10 @@ where
             });
         });
 
-        let srs = self.storage_reader.new_session(*group_id).await?;
+        let srs = self
+            .storage_reader
+            .new_session(*group_id, group_meta.get_topic_read_positions())
+            .await?;
 
         let ss = SubSession::new(member_id, *group_id, sub_topics, client_addr.clone(), srs);
         self.sessions.insert(client_addr, ss);
@@ -246,7 +266,6 @@ impl SubSession {
 
     pub async fn handle_fetch(&self, f: Fetch, tx: mpsc::Sender<Result<MessageBatch, Status>>) {
         let mut left_bytes = f.max_partition_bytes;
-        println!("left_bytes = {}", left_bytes);
         let mut message_batch = MessageBatch {
             batch_id: nanoid::nanoid!(),
             topic: f.topic.clone(),
@@ -286,11 +305,9 @@ impl SubSession {
                 return;
             }
             left_bytes -= msgs_size;
-            println!("调用push 111111");
             append_msg(&mut message_batch, &f, msg);
             message_count += 1;
         }
-        println!("left_bytes111 = {}", left_bytes);
 
         while message_count < f.max_partition_batch_count {
             // buf 中已无缓存，在从 storage 中读取并填充
@@ -301,6 +318,7 @@ impl SubSession {
             {
                 Ok(msgs) => {
                     for msg in msgs {
+                        message_count += 1;
                         if has_full {
                             // 将已经读出来的数据放入缓存
                             self.buf.push(msg);
@@ -314,8 +332,10 @@ impl SubSession {
                         }
                         left_bytes -= msgs_size;
                         append_msg(&mut message_batch, &f, msg);
-                        message_count += 1;
-                        println!("left_bytes222 = {}", left_bytes);
+                    }
+                    // 跳出外层循环
+                    if has_full {
+                        break;
                     }
                 }
                 Err(e) => {
@@ -325,7 +345,9 @@ impl SubSession {
                 }
             }
         }
-        let _ = tx.send(Ok(message_batch)).await;
+        if let Err(e) = tx.send(Ok(message_batch)).await {
+            error!("send message_batch to consumer err: {e:?}");
+        }
     }
 
     // pub async fn next(&mut self) -> Result<Message, Status> {

@@ -8,7 +8,7 @@ use crate::{
     metrics::StorageWriterMetrics,
 };
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use common::dir_recursive;
 use crossbeam::queue::SegQueue;
 use log::error;
@@ -23,6 +23,115 @@ use std::{
 };
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 // use tokio_uring::fs::File as UringFile;
+
+struct SwitchQueue {
+    switcher: Arc<AtomicBool>,
+    queue_a: Arc<SegQueue<(Bytes, Bytes)>>,
+    queue_b: Arc<SegQueue<(Bytes, Bytes)>>,
+}
+
+impl SwitchQueue {
+    const ACQUIRE_ORDER: Ordering = Ordering::Acquire;
+    const RELEASE_ORDER: Ordering = Ordering::Release;
+    const RELAXED_ORDER: Ordering = Ordering::Relaxed;
+
+    fn new() -> Self {
+        Self {
+            switcher: Arc::new(AtomicBool::new(false)),
+            queue_a: Arc::new(SegQueue::new()),
+            queue_b: Arc::new(SegQueue::new()),
+        }
+    }
+
+    #[inline(always)]
+    fn push(&self, data: (Bytes, Bytes)) {
+        let current = self.switcher.load(Self::RELAXED_ORDER);
+        let queue = if current {
+            &self.queue_b
+        } else {
+            &self.queue_a
+        };
+        queue.push(data);
+    }
+
+    // 高性能批量弹出
+    fn pop_batch(&self, batch_size: usize) -> Vec<(Bytes, Bytes)> {
+        let mut results = Vec::with_capacity(batch_size);
+        let current = self.switcher.load(Self::ACQUIRE_ORDER);
+
+        let (active_queue, inactive_queue) = if current {
+            (&self.queue_b, &self.queue_a)
+        } else {
+            (&self.queue_a, &self.queue_b)
+        };
+
+        // 优先处理活跃队列
+        while let Some(item) = active_queue.pop() {
+            results.push(item);
+            if results.len() >= batch_size {
+                return results;
+            }
+        }
+
+        // 活跃队列空时检查非活跃队列
+        if !inactive_queue.is_empty() {
+            // 原子切换队列
+            self.switcher
+                .compare_exchange(current, !current, Self::RELEASE_ORDER, Self::RELAXED_ORDER)
+                .ok(); // 不关心是否切换成功
+
+            // 处理新活跃队列
+            let new_active = if current {
+                &self.queue_a
+            } else {
+                &self.queue_b
+            };
+            while let Some(item) = new_active.pop() {
+                results.push(item);
+                if results.len() >= batch_size {
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
+    // 弹出全部元素
+    fn pop_all(&self) -> Vec<(Bytes, Bytes)> {
+        let mut results = Vec::new();
+        let current = self.switcher.load(Self::ACQUIRE_ORDER);
+
+        let (active_queue, inactive_queue) = if current {
+            (&self.queue_b, &self.queue_a)
+        } else {
+            (&self.queue_a, &self.queue_b)
+        };
+
+        // 清空活跃队列
+        while let Some(item) = active_queue.pop() {
+            results.push(item);
+        }
+
+        // 尝试切换并处理新队列
+        if self
+            .switcher
+            .compare_exchange(current, !current, Self::RELEASE_ORDER, Self::RELAXED_ORDER)
+            .is_ok()
+        {
+            let new_active = if current {
+                &self.queue_a
+            } else {
+                &self.queue_b
+            };
+            while let Some(item) = new_active.pop() {
+                results.push(item);
+            }
+        }
+
+        results
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct PartitionWriterBuffer {
@@ -39,7 +148,7 @@ pub(crate) struct PartitionWriterBuffer {
     pub(crate) current_fd: Arc<RwLock<UringFile>>,
 
     // 先将数据存入内存缓冲区
-    pub(crate) buffer: Arc<SegQueue<Bytes>>,
+    pub(crate) buffer: Arc<SwitchQueue>,
 
     // 写相关的位置指针
     pub(crate) write_ptr: Arc<WriterPositionPtr>,
@@ -99,7 +208,7 @@ impl PartitionWriterBuffer {
             #[cfg(not(target_os = "linux"))]
             current_fd,
             conf: conf.clone(),
-            buffer: Arc::new(SegQueue::new()),
+            buffer: Arc::new(SwitchQueue::new()),
             write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
@@ -203,11 +312,11 @@ impl PartitionWriterBuffer {
         }
 
         for data in batch {
-            // 写入消息长度
-            self.buffer
-                .push(Bytes::from_owner(data.len().to_be_bytes()));
-            // 写入消息
-            self.buffer.push(data.clone());
+            // 这里将 (消息头,消息体) 单次调用 push 写入，否则有并发问题
+            // 创建消息头
+            let header = Bytes::from_owner(data.len().to_be_bytes());
+            // 存储消息头和消息体（零拷贝）
+            self.buffer.push((header, data.clone())); // data.clone() 是引用计数增量，非内存拷贝
         }
         {
             // 更新指针（减少锁次数）
@@ -259,22 +368,22 @@ impl PartitionWriterBuffer {
     // 将数据从内存刷盘
     #[cfg(not(target_os = "linux"))]
     pub(crate) async fn flush(&self, fsync: bool) -> Result<u64> {
-        let mut flushed_bytes = 0_u64;
-        let mut datas = Vec::with_capacity(self.buffer.len());
-        // 数据零拷贝
-        while let Some(data) = self.buffer.pop() {
-            flushed_bytes += data.len() as u64;
-            datas.push(data);
-        }
-        if flushed_bytes == 0 {
+        // 批量获取数据（每次最多128条消息）
+        let batch = self.buffer.pop_batch(128);
+        if batch.is_empty() {
             return Ok(0);
         }
 
-        let slices: Vec<IoSlice> = datas.iter().map(|v| IoSlice::new(v.as_ref())).collect();
-        let mut fd_wl = self.current_fd.write().await;
-        if let Err(e) = fd_wl.write_vectored(&slices).await {
-            return Err(anyhow!(e));
+        // 准备IO向量
+        let mut iovecs = Vec::with_capacity(batch.len() * 2);
+        for (header, data) in batch {
+            iovecs.extend_from_slice(&[header, data]);
         }
+        // 执行批量写入
+        let slices: Vec<IoSlice> = iovecs.iter().map(|v| IoSlice::new(v)).collect();
+        let mut fd_wl = self.current_fd.write().await;
+        let flushed_bytes = fd_wl.write_vectored(&slices).await? as u64;
+
         // 更新刷盘位置
         self.write_ptr.rotate_flush_offset(flushed_bytes);
         // 批量同步

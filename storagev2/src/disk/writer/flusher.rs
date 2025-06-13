@@ -268,6 +268,7 @@ impl Flusher {
         }
     }
 
+    // 刷指定的 topic-parition 消息文件
     pub(crate) async fn flush_topic_partition(&self, p: &PathBuf, fsync: bool) -> Result<()> {
         let pwb = self.partition_writer_buffers.get(p);
         if pwb.is_none() {
@@ -279,6 +280,27 @@ impl Flusher {
         let idx = rand::random::<u32>() as usize;
         self.partition_writer_buffer_tasks[idx % self.partition_writer_buffer_tasks_num]
             .send((fsync, vec![pwb.value().clone()]))
+            .await?;
+        Ok(())
+    }
+
+    // 刷指定的 topic-parition 消息文件的写指针文件
+    pub(crate) async fn flush_topic_partition_writer_ptr(
+        &self,
+        p: &PathBuf,
+        fsync: bool,
+    ) -> Result<()> {
+        let wpp = self.partition_writer_ptrs.get(p);
+        if wpp.is_none() {
+            return Err(anyhow!(
+                StorageError::PartitionNotFound("Flusher".to_string()).to_string()
+            ));
+        }
+
+        let wpp = wpp.unwrap();
+        let idx = rand::random::<u32>() as usize;
+        self.partition_writer_ptr_tasks[idx % self.partition_writer_buffer_tasks_num]
+            .send((fsync, vec![wpp.value().clone()]))
             .await?;
         Ok(())
     }

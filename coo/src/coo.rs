@@ -637,7 +637,9 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
         println!("收到 sync_consumer_assignments 请求, req = {:?}", req);
         let broker_id = req.broker_id;
         let consumer_group_manager = self.consumer_group_manager.clone();
-        let mut rx = self.consumer_group_manager.subscribe_broker_consumer(req);
+        self.consumer_group_manager
+            .unsubscribe_broker_consumer(&req);
+        let mut rx = self.consumer_group_manager.subscribe_broker_consumer(&req);
         let (tx_middleware, rx_middleware) = mpsc::channel(1);
         tokio::spawn(async move {
             loop {
@@ -659,7 +661,7 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
                     }
                 }
             }
-            consumer_group_manager.unsubscribe_broker_consumer(req);
+            consumer_group_manager.unsubscribe_broker_consumer(&req);
         });
 
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(
@@ -957,9 +959,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
         let req = request.into_inner();
         let member_id = req.member_id.clone();
         let consumer_group_manager = self.consumer_group_manager.clone();
-        let mut rx = self
-            .consumer_group_manager
-            .subscribe_client_consumer(req.clone());
+        let mut rx = self.consumer_group_manager.subscribe_client_consumer(&req);
 
         let (tx_middleware, rx_middleware) = mpsc::channel(1);
         tokio::spawn(async move {
@@ -982,7 +982,7 @@ impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
                     }
                 }
             }
-            consumer_group_manager.unsubscribe_client_consumer(req);
+            consumer_group_manager.unsubscribe_client_consumer(&req);
         });
 
         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(

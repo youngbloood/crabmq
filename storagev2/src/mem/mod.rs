@@ -11,7 +11,7 @@ use tokio::select;
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{SegmentOffset, StorageReader, StorageReaderSession, StorageWriter};
+use crate::{ReadPosition, SegmentOffset, StorageReader, StorageReaderSession, StorageWriter};
 
 struct PartitionQueue {
     // sema: Arc<Semaphore>,
@@ -144,10 +144,17 @@ impl MemStorageReader {
     }
 }
 
+/// 内存消息队列限制
+/// 1. 只能有 1 个消费者
+/// 2. 只能从头开始 read, commit
 #[async_trait]
 impl StorageReader for MemStorageReader {
     /// New a session with group_id, it will be return Err() when session has been created.
-    async fn new_session(&self, _group_id: u32) -> Result<Box<dyn StorageReaderSession>> {
+    async fn new_session(
+        &self,
+        _group_id: u32,
+        _read_position: Vec<(String, ReadPosition)>,
+    ) -> Result<Box<dyn StorageReaderSession>> {
         if self
             .has_session
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)

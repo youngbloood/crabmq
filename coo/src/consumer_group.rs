@@ -3,7 +3,7 @@ use anyhow::Result;
 use dashmap::{DashMap, DashSet};
 use grpcx::brokercoosvc::{self, GroupMeta, GroupTopicMeta};
 use grpcx::clientcoosvc::{self, GroupJoinResponse, group_join_response};
-use grpcx::commonsvc::{GroupStatus, TopicPartitionMeta};
+use grpcx::commonsvc::GroupStatus;
 use grpcx::topic_meta::TopicPartitionDetail;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,7 +57,7 @@ impl ConsumerGroup {
     }
 
     fn trigger_rebalance(&mut self, mut all_partitions: Vec<(String, Vec<TopicPartitionDetail>)>) {
-        let mut members: Vec<_> = self
+        let members: Vec<_> = self
             .members
             .iter()
             .map(|entry| entry.value().clone())
@@ -204,7 +204,7 @@ impl ConsumerGroupManager {
 
     pub fn subscribe_client_consumer(
         &self,
-        req: clientcoosvc::SyncConsumerAssignmentsReq,
+        req: &clientcoosvc::SyncConsumerAssignmentsReq,
     ) -> mpsc::Receiver<clientcoosvc::SyncConsumerAssignmentsResp> {
         let (_, rx) = self
             .client_consumer_bus
@@ -212,14 +212,14 @@ impl ConsumerGroupManager {
         rx
     }
 
-    pub fn unsubscribe_client_consumer(&self, req: clientcoosvc::SyncConsumerAssignmentsReq) {
+    pub fn unsubscribe_client_consumer(&self, req: &clientcoosvc::SyncConsumerAssignmentsReq) {
         self.client_consumer_bus
             .unsubscribe(&format!("{}-{}", req.group_id, req.member_id));
     }
 
     pub fn subscribe_broker_consumer(
         &self,
-        req: brokercoosvc::SyncConsumerAssignmentsReq,
+        req: &brokercoosvc::SyncConsumerAssignmentsReq,
     ) -> mpsc::Receiver<brokercoosvc::SyncConsumerAssignmentsResp> {
         let (_, rx) = self
             .broker_consumer_bus
@@ -227,7 +227,7 @@ impl ConsumerGroupManager {
         rx
     }
 
-    pub fn unsubscribe_broker_consumer(&self, req: brokercoosvc::SyncConsumerAssignmentsReq) {
+    pub fn unsubscribe_broker_consumer(&self, req: &brokercoosvc::SyncConsumerAssignmentsReq) {
         self.broker_consumer_bus.unsubscribe(&format!(
             "broker_subscribe_consumer_group_{}",
             req.broker_id

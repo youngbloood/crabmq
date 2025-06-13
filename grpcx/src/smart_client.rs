@@ -196,6 +196,7 @@ impl SmartClient {
             let (chan, addr) = match self.get_channel().await {
                 Ok((chan, addr)) => (chan, addr),
                 Err(e) => {
+                    error!("[SmartClient:{}]: get_channel err: {e:?}", self.id);
                     self.handle_refresh_error(e).await;
                     time::sleep(backoff).await;
                     backoff = std::cmp::min(

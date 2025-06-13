@@ -18,6 +18,9 @@ struct Args {
     #[structopt(long = "max-partition-fetch-count", default_value = "10")]
     max_partition_fetch_count: u64,
 
+    #[structopt(long = "max-all-fetch-count", default_value = "104857600")]
+    max_all_fetch_bytes: u64,
+
     // sub_topics 作为剩余参数，解析为 Vec<SubTopic>
     #[structopt(long = "sub-topics", parse(try_from_str = parse_sub_topic, ))]
     sub_topics: Vec<SubTopic>,
@@ -68,7 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect(),
         break_when_broker_disconnect: false,
         max_partition_fetch_bytes: Arc::new(AtomicU64::new(args.max_partition_fetch_bytes)),
-        max_partition_fetch_count: Arc::new(AtomicU64::new(args.max_partition_fetch_count)),
+        max_partition_batch_count: Arc::new(AtomicU64::new(args.max_partition_fetch_count)),
+        min_fetch_size: Arc::new(AtomicU64::new(100)),
+        max_all_fetch_bytes: Arc::new(AtomicU64::new(args.max_all_fetch_bytes)),
+        next_fetch_interval_when_empty: Arc::new(AtomicU64::new(10)),
     })?;
 
     subscriber.clone().join().await?;

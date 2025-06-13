@@ -322,16 +322,14 @@ impl DiskStorageWriter {
             ));
         }
 
-        self.flusher
-            .flush_topic_partition(
-                &self
-                    .conf
-                    .storage_dir
-                    .join(topic)
-                    .join(partition_id.to_string()),
-                true,
-            )
-            .await
+        let p = &self
+            .conf
+            .storage_dir
+            .join(topic)
+            .join(partition_id.to_string());
+
+        self.flusher.flush_topic_partition(p, true).await?;
+        self.flusher.flush_topic_partition_writer_ptr(p, true).await
     }
 
     #[inline]
@@ -442,9 +440,10 @@ fn partition_to_worker(topic: &str, partition_id: u32, worker_num: u32) -> Resul
 #[cfg(test)]
 mod test {
     use super::{DiskConfig, DiskStorageWriter};
-    use crate::StorageWriter as _;
+    use crate::{StorageWriter as _, disk::default_config};
     use anyhow::Result;
     use bytes::Bytes;
+    use futures::future::join_all;
     use std::{path::PathBuf, time::Duration};
     use tokio::time;
 
@@ -471,9 +470,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn storage_store() -> Result<()> {
-        let store = new_disk_storage();
-        let datas = vec![
+    async fn storage_store_multi() -> Result<()> {
+        let store = DiskStorageWriter::new(default_config()).expect("error config");
+        let datas: Vec<&'static str> = vec![
             "Apple",
             "Banana",
             "Cat",
@@ -501,17 +500,31 @@ mod test {
             "Yak",
             "Zebra",
         ];
-        // for _ in 0..1000 {
-        for d in &datas {
-            if let Err(e) = store
-                .store("topic111", 11, &[Bytes::copy_from_slice(d.as_bytes())])
-                .await
-            {
-                eprintln!("e = {e:?}");
-            }
+
+        let mut handles = vec![];
+        for _ in 0..20 {
+            let _store = store.clone();
+            let _datas = datas.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..100000 {
+                    let idx = rand::random::<u32>() as usize;
+                    if let Err(e) = _store
+                        .store(
+                            "topic111",
+                            11,
+                            &[Bytes::from_owner(_datas[idx % _datas.len()].as_bytes())],
+                        )
+                        .await
+                    {
+                        eprintln!("e = {e:?}");
+                    }
+                }
+            }));
         }
-        // }
-        time::sleep(Duration::from_secs(2)).await;
+
+        join_all(handles).await;
+        store.flush_topic_partition_force("topic111", 11).await?;
+        time::sleep(Duration::from_secs(5)).await;
         Ok(())
     }
 }

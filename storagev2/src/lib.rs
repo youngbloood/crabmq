@@ -9,7 +9,6 @@ pub use mem::*;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio_util::sync::CancellationToken;
 
 #[async_trait]
 pub trait StorageWriter: Send + Sync + Clone + 'static {
@@ -20,7 +19,11 @@ pub trait StorageWriter: Send + Sync + Clone + 'static {
 #[async_trait]
 pub trait StorageReader: Send + Sync + Clone + 'static {
     /// New a session with group_id, it will be return Err() when session has been created.
-    async fn new_session(&self, group_id: u32) -> Result<Box<dyn StorageReaderSession>>;
+    async fn new_session(
+        &self,
+        group_id: u32,
+        read_position: Vec<(String, ReadPosition)>, // 该 consumer-grpup 指定消费的 topic 的位置
+    ) -> Result<Box<dyn StorageReaderSession>>;
 
     /// Close a session by group_id.
     async fn close_session(&self, group_id: u32);
@@ -46,7 +49,8 @@ pub struct SegmentOffset {
     pub offset: u64,
 }
 
-pub enum ReadType {
-    FromBegin, // 从头开始消费
-    Latest,    // 从最新消息开始消费，以第一次调用next为快照
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReadPosition {
+    Begin,  // 从头开始消费
+    Latest, // 从最新消息开始消费，以第一次调用next为快照
 }

@@ -1,7 +1,6 @@
 use super::prealloc::preallocate;
 use anyhow::Result;
 use common::util::{check_and_create_dir, check_exist};
-use crossbeam::sync::ShardedLock;
 use lru::LruCache;
 use std::{
     fs::OpenOptions,
@@ -29,50 +28,44 @@ impl Deref for FileHandlerReaderAsync {
 
 #[derive(Clone, Debug)]
 pub struct FdReaderCacheAync {
-    inner: Arc<ShardedLock<LruCache<PathBuf, FileHandlerReaderAsync>>>,
+    inner: Arc<RwLock<LruCache<PathBuf, FileHandlerReaderAsync>>>,
 }
 
 impl FdReaderCacheAync {
     pub fn new(size: usize) -> Self {
         FdReaderCacheAync {
-            inner: Arc::new(ShardedLock::new(LruCache::new(
-                NonZeroUsize::new(size).unwrap(),
-            ))),
+            inner: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(size).unwrap()))),
         }
     }
 
-    pub fn get(&self, key: &Path) -> Option<FileHandlerReaderAsync> {
-        let mut wg = self.inner.write().expect("Failed to acquire write lock");
-        wg.get(key).cloned()
+    pub async fn get(&self, key: &Path) -> Option<FileHandlerReaderAsync> {
+        let mut wl = self.inner.write().await;
+        wl.get(key).cloned()
     }
 
-    pub fn get_or_create(&self, key: &Path) -> Result<FileHandlerReaderAsync> {
+    pub async fn get_or_create(
+        &self,
+        key: &Path,
+        read_offset: u64,
+    ) -> Result<FileHandlerReaderAsync> {
         // 第一次检查缓存
-        {
-            let mut wg = self.inner.write().expect("Failed to acquire write lock");
-            if let Some(handler) = wg.get(key) {
-                return Ok(handler.clone());
-            }
-        }
-
-        // 确保父目录存在
-        if let Some(parent) = key.parent() {
-            if !check_exist(parent) {
-                check_and_create_dir(parent)?;
-            }
+        if let Some(handler) = self.get(key).await {
+            return Ok(handler);
         }
 
         // 然后打开读文件句柄
-        let read_fd = OpenOptions::new()
+        let mut read_fd = OpenOptions::new()
             .read(true)
             .open(key)
             .map_err(|e| anyhow::anyhow!("Failed to open read file: {}", e))?;
-
+        if read_offset != 0 {
+            read_fd.seek(SeekFrom::Start(read_offset))?;
+        }
         let async_read = Arc::new(RwLock::new(AsyncFile::from_std(read_fd)));
         let handler = FileHandlerReaderAsync { inner: async_read };
 
         // 再次检查并插入缓存
-        let mut wg = self.inner.write().expect("Failed to acquire write lock");
+        let mut wg = self.inner.write().await;
         if let Some(existing) = wg.get(key) {
             return Ok(existing.clone());
         }
@@ -110,31 +103,32 @@ impl FileHandlerWriterAsync {
 #[derive(Clone, Debug)]
 pub struct FdWriterCacheAync {
     prealloc_size: usize,
-    inner: Arc<ShardedLock<LruCache<PathBuf, FileHandlerWriterAsync>>>,
+    inner: Arc<RwLock<LruCache<PathBuf, FileHandlerWriterAsync>>>,
 }
 
 impl FdWriterCacheAync {
     pub fn new(prealloc_size: usize, buffer_size: usize) -> Self {
         FdWriterCacheAync {
             prealloc_size,
-            inner: Arc::new(ShardedLock::new(LruCache::new(
+            inner: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(buffer_size).unwrap(),
             ))),
         }
     }
 
-    pub fn get(&self, key: &Path) -> Option<FileHandlerWriterAsync> {
-        let mut wg = self.inner.write().expect("Failed to acquire write lock");
+    pub async fn get(&self, key: &Path) -> Option<FileHandlerWriterAsync> {
+        let mut wg = self.inner.write().await;
         wg.get(key).cloned()
     }
 
-    pub fn get_or_create(&self, key: &Path, prealloc_size: bool) -> Result<FileHandlerWriterAsync> {
+    pub async fn get_or_create(
+        &self,
+        key: &Path,
+        prealloc_size: bool,
+    ) -> Result<FileHandlerWriterAsync> {
         // 第一次检查缓存
-        {
-            let mut wg = self.inner.write().expect("Failed to acquire write lock");
-            if let Some(handler) = wg.get(key) {
-                return Ok(handler.clone());
-            }
+        if let Some(handler) = self.get(key).await {
+            return Ok(handler);
         }
 
         // 确保父目录存在
@@ -165,7 +159,7 @@ impl FdWriterCacheAync {
         let handler = FileHandlerWriterAsync::new(async_write);
 
         // 再次检查并插入缓存
-        let mut wg = self.inner.write().expect("Failed to acquire write lock");
+        let mut wg = self.inner.write().await;
         if let Some(existing) = wg.get(key) {
             return Ok(existing.clone());
         }
@@ -215,12 +209,12 @@ mod test {
     use super::*;
     use std::path::Path;
 
-    #[test]
-    fn test_lru_cache_push() -> Result<()> {
+    #[tokio::test]
+    async fn test_lru_cache_push() -> Result<()> {
         let fd_cache = FdReaderCacheAync::new(4);
         for i in 0..10 {
             let p = format!("../target/debug/{}", i);
-            fd_cache.get_or_create(Path::new(&p))?;
+            fd_cache.get_or_create(Path::new(&p), 0).await?;
         }
         Ok(())
     }

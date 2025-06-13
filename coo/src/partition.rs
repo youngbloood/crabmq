@@ -9,7 +9,7 @@ use grpcx::{
 };
 use serde::{Deserialize, Serialize};
 use sled::Db;
-use std::{num::ParseIntError, sync::Arc};
+use std::{collections::HashMap, num::ParseIntError, sync::Arc};
 use tokio::sync::Mutex;
 
 const TOPIC_META_PREFIX: &str = "topic_meta/";

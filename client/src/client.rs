@@ -10,8 +10,8 @@ use grpcx::{
     },
     clientcoosvc::{
         AddPartitionsReq, GroupJoinRequest, GroupJoinSubTopic, NewTopicReq, PullReq,
-        SyncConsumerAssignmentsReq, SyncConsumerAssignmentsResp,
-        client_coo_service_client::ClientCooServiceClient, group_join_response,
+        SyncConsumerAssignmentsReq, client_coo_service_client::ClientCooServiceClient,
+        group_join_response,
     },
     commonsvc::{self},
     smart_client::{SmartClient, SmartReqStream, repair_addr_with_http},
@@ -28,7 +28,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     select,
@@ -212,7 +212,25 @@ impl Client {
             client: self.clone(),
             member_id: Arc::default(),
             stop: CancellationToken::new(),
-            iter_count: Arc::new(AtomicU64::new(1)),
+            // iter_count: Arc::new(AtomicU64::new(1)),
+            chans: Arc::default(),
+            broker_endpoints: Arc::default(),
+            subscribe_controll_manager: Arc::default(),
+        }))
+    }
+
+    pub fn subscriber_with_default(
+        &self,
+        group_id: u32,
+        topics: Vec<String>,
+    ) -> Result<Arc<Subscriber>> {
+        let conf = with_subscriber_config(group_id, topics);
+        Ok(Arc::new(Subscriber {
+            conf: Arc::new(conf),
+            client: self.clone(),
+            member_id: Arc::default(),
+            stop: CancellationToken::new(),
+            // iter_count: Arc::new(AtomicU64::new(1)),
             chans: Arc::default(),
             broker_endpoints: Arc::default(),
             subscribe_controll_manager: Arc::default(),
@@ -653,21 +671,45 @@ impl Publisher {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SubscriberConfig {
     pub group_id: u32,
     pub topics: Vec<(String, u32)>,
     // 某些 broker 连不上时是否退出
     pub break_when_broker_disconnect: bool,
+    /// 流量控制
     // 每个分区单次获取消息的最大bytes数
     // 为 0 时以 max_all_fetch_bytes/{分区数} 为准
     // 同 `max_partition_fetch_count` 满足其一即返回
     pub max_partition_fetch_bytes: Arc<AtomicU64>,
-    // 所有分区获取消息的最大bytes数
-    // 为 0 时以 max_partition_fetch_bytes * {分区数} 为准
-    // max_all_fetch_bytes: Arc<AtomicU64>,
+
     // 每个分区单批次获取最大消息数量
     // 同 `max_partition_fetch_bytes` 满足其一即返回
-    pub max_partition_fetch_count: Arc<AtomicU64>,
+    pub max_partition_batch_count: Arc<AtomicU64>,
+
+    // 所有分区获取消息的最大bytes数
+    // 为 0 时以 max_partition_fetch_bytes * {分区数} 为准
+    pub max_all_fetch_bytes: Arc<AtomicU64>,
+
+    // 每个分区的 left_fetch_bytes 大于该值时，也会进行 fetch
+    pub min_fetch_size: Arc<AtomicU64>,
+
+    /// 频率控制
+    // 当服务端返回某个分区 fetch 的消息为空时，下次执行 fetch 的间隔，单位: s
+    pub next_fetch_interval_when_empty: Arc<AtomicU64>,
+}
+
+pub fn with_subscriber_config(group_id: u32, topics: Vec<String>) -> SubscriberConfig {
+    SubscriberConfig {
+        group_id,
+        topics: topics.iter().map(|v| (v.clone(), 0_u32)).collect(),
+        break_when_broker_disconnect: false,
+        max_partition_fetch_bytes: Arc::new(AtomicU64::new(10000)),
+        max_partition_batch_count: Arc::new(AtomicU64::new(10000)),
+        max_all_fetch_bytes: Arc::new(AtomicU64::new(100000)),
+        min_fetch_size: Arc::new(AtomicU64::new(100)),
+        next_fetch_interval_when_empty: Arc::new(AtomicU64::new(10)),
+    }
 }
 
 impl SubscriberConfig {
@@ -692,7 +734,7 @@ impl SubscriberConfig {
         }
 
         if self
-            .max_partition_fetch_count
+            .max_partition_batch_count
             .fetch_max(0, Ordering::Relaxed)
             == 0
         {
@@ -703,6 +745,22 @@ impl SubscriberConfig {
 
         Ok(())
     }
+
+    fn re_calc(&self, partition_num: u64) {
+        if partition_num == 0 {
+            return;
+        }
+        let bytes_per_partition = self.max_all_fetch_bytes.load(Ordering::Relaxed) / partition_num;
+        if bytes_per_partition == 0 {
+            return;
+        }
+        self.max_partition_fetch_bytes.store(
+            self.max_partition_fetch_bytes
+                .load(Ordering::Relaxed)
+                .min(bytes_per_partition),
+            Ordering::Relaxed,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -710,7 +768,7 @@ pub struct Subscriber {
     conf: Arc<SubscriberConfig>,
     member_id: Arc<RefCell<String>>,
     client: Client,
-    iter_count: Arc<AtomicU64>,
+    // iter_count: Arc<AtomicU64>,
     // 该 member 消费的 (broker_addr, broker_id) : Vec<SubscriberPartitionBuffer>
     chans: Arc<DashMap<(String, u32), Arc<Vec<SubscriberPartitionBuffer>>>>,
     // 订阅时的消息控制器，可用于发送 ack, commit, heartbeat 等消息
@@ -723,37 +781,53 @@ pub struct Subscriber {
 // 每个分区单独 fetch 消息至自己独立的 buffer 中，等待消费
 #[derive(Clone, Debug)]
 struct SubscriberPartitionBuffer {
+    conf: Arc<SubscriberConfig>,
     tpd: Arc<TopicPartitionDetail>,
     buf: Arc<SegQueue<MessageBatch>>,
-    iter_count: Arc<AtomicU64>,
-    // 流量控制
-    max_partition_fetch_bytes: Arc<AtomicU64>,
-    // 每个分区单批次最大消息数量
-    max_partition_batch_count: Arc<AtomicU64>,
+    // iter_count: Arc<AtomicU64>,
     // 剩余可以拉去的bytes数
     left_fetch_bytes: Arc<AtomicU64>,
+    next_fetch_after: Arc<AtomicU64>,
 }
 
 impl SubscriberPartitionBuffer {
-    fn new(
-        tpd: TopicPartitionDetail,
-        max_partition_fetch_bytes: Arc<AtomicU64>,
-        max_partition_batch_count: Arc<AtomicU64>,
-    ) -> Self {
+    fn new(tpd: TopicPartitionDetail, conf: Arc<SubscriberConfig>) -> Self {
         Self {
             tpd: Arc::new(tpd),
             buf: Arc::default(),
-            iter_count: Arc::default(),
+            // iter_count: Arc::default(),
             left_fetch_bytes: Arc::new(AtomicU64::new(
-                max_partition_fetch_bytes.load(Ordering::Relaxed),
+                conf.max_partition_fetch_bytes.load(Ordering::Relaxed),
             )),
-            max_partition_fetch_bytes,
-            max_partition_batch_count,
+            conf,
+            next_fetch_after: Arc::default(),
         }
     }
 
     fn push(&self, msg: MessageBatch) {
+        if msg.messages.is_empty() {
+            self.next_fetch_after.store(
+                chrono::Local::now().timestamp() as u64
+                    + self
+                        .conf
+                        .next_fetch_interval_when_empty
+                        .load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            return;
+        }
         let total_size = msg.messages.iter().map(|v| v.payload.len()).sum::<usize>() as u64;
+        if total_size == 0 {
+            self.next_fetch_after.store(
+                chrono::Local::now().timestamp() as u64
+                    + self
+                        .conf
+                        .next_fetch_interval_when_empty
+                        .load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            return;
+        }
         self.buf.push(msg);
         if self
             .left_fetch_bytes
@@ -814,12 +888,7 @@ impl Subscriber {
                 println!("join resp = {:?}", &resp);
                 *self.member_id.borrow_mut() = resp.member_id;
 
-                Self::apply_consumer_assignments(
-                    self.chans.clone(),
-                    &resp.list,
-                    self.conf.max_partition_fetch_bytes.clone(),
-                    self.conf.max_partition_fetch_count.clone(),
-                );
+                Self::apply_consumer_assignments(self.chans.clone(), &resp.list, self.conf.clone());
                 println!("self.chans = {:?}", self.chans);
 
                 let sub = self.clone();
@@ -862,19 +931,13 @@ impl Subscriber {
                 |res| {
                     let member_id = member_id.clone();
                     let chans = self.chans.clone();
-                    let max_partition_fetch_bytes = self.conf.max_partition_fetch_bytes.clone();
-                    let max_partition_fetch_count = self.conf.max_partition_fetch_count.clone();
+                    let conf = self.conf.clone();
                     async move {
                         if !&res.member_id.eq(&member_id) || !&res.group_id.eq(&group_id) {
                             warn!("this res not belong the client");
                             return Err(Status::invalid_argument("this res not belong the client"));
                         }
-                        Self::apply_consumer_assignments(
-                            chans,
-                            &res.list,
-                            max_partition_fetch_bytes,
-                            max_partition_fetch_count,
-                        );
+                        Self::apply_consumer_assignments(chans, &res.list, conf);
 
                         Ok(())
                     }
@@ -890,19 +953,14 @@ impl Subscriber {
     fn apply_consumer_assignments(
         chans: Arc<DashMap<(String, u32), Arc<Vec<SubscriberPartitionBuffer>>>>,
         tpms: &Vec<commonsvc::TopicPartitionMeta>,
-        max_partition_fetch_bytes: Arc<AtomicU64>,
-        max_partition_fetch_count: Arc<AtomicU64>,
+        conf: Arc<SubscriberConfig>,
     ) {
         let mut m = HashMap::new();
 
         for tpm in tpms.iter() {
             let tpd = TopicPartitionDetail::from(tpm);
             let key = (tpd.broker_leader_addr.clone(), tpd.broker_leader_id);
-            let spb = SubscriberPartitionBuffer::new(
-                tpd,
-                max_partition_fetch_bytes.clone(),
-                max_partition_fetch_count.clone(),
-            );
+            let spb = SubscriberPartitionBuffer::new(tpd, conf.clone());
 
             m.entry(key)
                 .and_modify(|v: &mut Vec<SubscriberPartitionBuffer>| {
@@ -957,9 +1015,12 @@ impl Subscriber {
     }
 
     async fn spawn_fetch_tasks(self: Arc<Self>) {
-        // 根据broker进行分组，每个partition向其所属的broker获取消息
+        // 根据 broker 进行分组，每个 partition 向其所属的 broker 获取消息
+        // 开启 task 数量 = self.chans.len() * 2
         let has_monitor = Arc::new(DashSet::new());
         while !self.stop.is_cancelled() {
+            let partition_num = self.chans.iter().map(|v| v.value().len()).sum::<usize>() as u64;
+            self.conf.re_calc(partition_num);
             for entry in self.chans.iter() {
                 let key = entry.key().clone();
                 if has_monitor.contains(&key) {
@@ -1049,21 +1110,43 @@ impl Subscriber {
                         if stop.is_cancelled() {
                             break;
                         }
+
                         let spbs = chans.get(&key);
                         if spbs.is_none() {
                             has_monitor.remove(&key);
                             break;
                         }
                         let spbs = spbs.unwrap();
-                        for spb in spbs.value().iter() {
+                        for spb in spbs.value().iter().filter(|v| {
+                            let now = chrono::Local::now().timestamp() as u64;
+                            v.next_fetch_after.fetch_max(0, Ordering::Relaxed) == 0
+                                || v.next_fetch_after.fetch_max(now, Ordering::Relaxed) == now
+                        }) {
                             if stop.is_cancelled() {
                                 break;
                             }
-                            // 剩余可拉去的字节数占比 < 10%
-                            if (spb.left_fetch_bytes.load(Ordering::Relaxed) as f64
-                                / spb.max_partition_fetch_bytes.load(Ordering::Relaxed) as f64)
-                                < 0.1
+                            println!(
+                                "循环fetch消息:left_fetch_bytes: {}, max_partition_fetch_bytes: {} ",
+                                spb.left_fetch_bytes.load(Ordering::Relaxed),
+                                spb.conf.max_partition_fetch_bytes.load(Ordering::Relaxed)
+                            );
+
+                            let left_bytes = spb.left_fetch_bytes.load(Ordering::Relaxed);
+                            let max_bytes =
+                                spb.conf.max_partition_fetch_bytes.load(Ordering::Relaxed);
+                            // min_fetch_size <= left_bytes <= max_bytes 时，才进行 fetch
+                            if left_bytes < spb.conf.min_fetch_size.load(Ordering::Relaxed)
+                                || left_bytes > max_bytes
                             {
+                                warn!(
+                                    "skip fetch: broker[{}:{:?}] topic-partition[{}-{}], left_bytes = {}, max_bytes = {}",
+                                    broker_id,
+                                    &broker_addr,
+                                    &spb.tpd.topic,
+                                    spb.tpd.partition_id,
+                                    left_bytes,
+                                    max_bytes
+                                );
                                 continue;
                             }
                             info!(
@@ -1072,8 +1155,8 @@ impl Subscriber {
                                 &broker_addr,
                                 &spb.tpd.topic,
                                 spb.tpd.partition_id,
-                                spb.left_fetch_bytes.load(Ordering::Relaxed),
-                                spb.max_partition_batch_count.load(Ordering::Relaxed),
+                                left_bytes,
+                                spb.conf.max_partition_batch_count.load(Ordering::Relaxed),
                             );
                             // 发送fetch获取消息
                             if let Err(e) = tx_req
@@ -1086,6 +1169,7 @@ impl Subscriber {
                                                 .left_fetch_bytes
                                                 .load(Ordering::Relaxed),
                                             max_partition_batch_count: spb
+                                                .conf
                                                 .max_partition_batch_count
                                                 .load(Ordering::Relaxed),
                                         },
@@ -1102,7 +1186,7 @@ impl Subscriber {
                                 }
                             }
                         }
-                        time::sleep(Duration::from_millis(500)).await;
+                        time::sleep(Duration::from_millis(30)).await;
                     }
                 });
             }
@@ -1137,15 +1221,22 @@ impl Subscriber {
                             }
                             let key =
                                 (spb.tpd.broker_leader_addr.clone(), spb.tpd.broker_leader_id);
-                            let message_size: usize =
-                                messages.messages.iter().map(|v| v.payload.len()).sum();
+                            let message_size = messages
+                                .messages
+                                .iter()
+                                .map(|v| v.payload.len())
+                                .sum::<usize>()
+                                as u64;
+                            if message_size == 0 {
+                                continue;
+                            }
                             processed = true;
                             // 创建ACK COMMIT句柄
                             let ack_handle = AckCommitHandle {
                                 // topic: messages.topic.clone(),
                                 // partition: messages.partition_id,
                                 batch_id: messages.batch_id.clone(),
-                                batch_message_size: message_size as _,
+                                batch_message_size: message_size,
                                 spb: spb.clone(),
                                 last_offset: messages
                                     .messages
@@ -1222,9 +1313,16 @@ impl AckCommitHandle {
                 })),
             })
             .await?;
+
         self.spb
             .left_fetch_bytes
             .fetch_add(self.batch_message_size, Ordering::Relaxed);
+
+        println!(
+            "调用 ack 并返回 bytes = {:?}, left_fetch_bytes = {:?}",
+            self.batch_message_size,
+            self.spb.left_fetch_bytes.load(Ordering::Relaxed)
+        );
         Ok(())
     }
 

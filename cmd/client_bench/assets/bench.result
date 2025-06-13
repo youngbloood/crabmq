@@ -1,3 +1,13 @@
+2coo-2broker 测试结果:
+
+============================== BENCHMARK RESULTS ===============================
+Message size per request: 1.00 k/q
+Test completed in 63.78s
+Total messages sent: 1000000
+Errors: 0
+Throughput: 15678.75 msg/sec
+Data rate: 15.31 MB/sec
+
 ============================== BENCHMARK RESULTS ===============================
 Message size per request: 10.00 k/q
 Test completed in 63.65s
@@ -5,12 +15,3 @@ Total messages sent: 1000000
 Errors: 0
 Throughput: 15709.81 msg/sec
 Data rate: 153.42 MB/sec
-
-
-============================== BENCHMARK RESULTS ===============================
-Message size per request: 1.00 k/q
-Test completed in 1.80s
-Total messages sent: 1000000
-Errors: 0
-Throughput: 554165.75 msg/sec
-Data rate: 541.18 MB/sec
