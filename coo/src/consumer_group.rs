@@ -166,10 +166,11 @@ impl ConsumerGroupManager {
         // 该group的首位成员
         if group.members.is_empty() {
             if req.opt.is_none() {
-                return Ok(GroupJoinResponse {
-                    error: group_join_response::ErrorCode::FirstMemberMustSetConfig.into(),
-                    ..Default::default()
-                });
+                return self.build_err_join_response(
+                    group_join_response::ErrorCode::FirstMemberMustSetConfig,
+                    "".to_string(),
+                    &group,
+                );
             }
 
             let opt = req.opt.as_ref().unwrap();
@@ -177,10 +178,11 @@ impl ConsumerGroupManager {
             // 检查所有topic是否存在
             for st in sub_topics.iter() {
                 if !self.all_topics.contains_key(&*st.topic) {
-                    return Ok(GroupJoinResponse {
-                        error: group_join_response::ErrorCode::InvalidTopic.into(),
-                        ..Default::default()
-                    });
+                    return self.build_err_join_response(
+                        group_join_response::ErrorCode::InvalidTopic,
+                        "".to_string(),
+                        &group,
+                    );
                 }
             }
             if opt.consumer_slide_window_size == 0 {
@@ -193,42 +195,47 @@ impl ConsumerGroupManager {
             let opt = req.opt.as_ref().unwrap();
             let sub_topics = &opt.sub_topics;
             if sub_topics.len() != group.topics.len() {
-                return Ok(GroupJoinResponse {
-                    error: group_join_response::ErrorCode::InvalidTopic.into(),
-                    ..Default::default()
-                });
+                return self.build_err_join_response(
+                    group_join_response::ErrorCode::InvalidTopic,
+                    "sub topics length not equal the before".to_string(),
+                    &group,
+                );
             }
 
             // 校验订阅一致性
             for st in sub_topics.iter() {
                 if !group.topics.contains_key(&st.topic) {
-                    return Ok(GroupJoinResponse {
-                        error: group_join_response::ErrorCode::InvalidTopic.into(),
-                        ..Default::default()
-                    });
+                    return self.build_err_join_response(
+                        group_join_response::ErrorCode::InvalidTopic,
+                        "sub topics not in before".to_string(),
+                        &group,
+                    );
                 }
                 if *group.topics.get(&st.topic).unwrap().value() != st.offset {
-                    return Ok(GroupJoinResponse {
-                        error: group_join_response::ErrorCode::InvalidTopic.into(),
-                        ..Default::default()
-                    });
+                    return self.build_err_join_response(
+                        group_join_response::ErrorCode::InvalidTopic,
+                        "sub topics's offset not equal the before".to_string(),
+                        &group,
+                    );
                 }
             }
 
             if opt.auto_commit != group.auto_commit {
-                return Ok(GroupJoinResponse {
-                    error: group_join_response::ErrorCode::AutoCommitConflict.into(),
-                    ..Default::default()
-                });
+                return self.build_err_join_response(
+                    group_join_response::ErrorCode::AutoCommitConflict,
+                    "".to_string(),
+                    &group,
+                );
             }
 
             if opt.consumer_slide_window_size != 0
                 && opt.consumer_slide_window_size != group.consumer_slide_window_size
             {
-                return Ok(GroupJoinResponse {
-                    error: group_join_response::ErrorCode::SlideWindowConflict.into(),
-                    ..Default::default()
-                });
+                return self.build_err_join_response(
+                    group_join_response::ErrorCode::SlideWindowConflict,
+                    "".to_string(),
+                    &group,
+                );
             }
         }
 
@@ -312,6 +319,23 @@ impl ConsumerGroupManager {
             status: GroupStatus::Stable.into(),
             error: 0,
             error_msg: "".to_string(),
+        })
+    }
+
+    fn build_err_join_response(
+        &self,
+        err_code: group_join_response::ErrorCode,
+        err_msg: String,
+        cg: &ConsumerGroup,
+    ) -> Result<GroupJoinResponse> {
+        Ok(GroupJoinResponse {
+            group_id: cg.id,
+            member_id: "".to_string(),
+            opt: Some(cg.gen_option()),
+            list: vec![],
+            status: GroupStatus::Stable.into(),
+            error: err_code.into(),
+            error_msg: err_msg,
         })
     }
 

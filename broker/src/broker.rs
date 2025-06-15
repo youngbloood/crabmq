@@ -1,5 +1,5 @@
 use crate::{
-    config::Config, consumer_group_v2::ConsumerGroupManager, message_bus::MessageBus,
+    config::Config, consumer_group::ConsumerGroupManager, message_bus::MessageBus,
     partition::PartitionManager,
 };
 use anyhow::{Result, anyhow};
@@ -256,7 +256,7 @@ where
             }
         });
 
-        tokio::try_join!(broker_state_handle, server_handle, metrics_handle);
+        tokio::try_join!(broker_state_handle, server_handle, metrics_handle)?;
         Ok(())
     }
 

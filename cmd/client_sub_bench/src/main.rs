@@ -1,6 +1,9 @@
 use client::SubscriberConfig;
 use common::random_str;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 use structopt::StructOpt;
 use tokio::signal;
 
@@ -65,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = cli.subscriber(SubscriberConfig {
         group_id: args.group_id,
         auto_commit: true,
+        auto_commit_interval: Duration::from_secs(1),
         consumer_slide_window_size: 0,
         topics: args
             .sub_topics
@@ -84,15 +88,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .subscribe(|broker_info, messages, callback| async move {
             println!(
-                "消费 broker[{}:{}] topic-partition[{}-{}] 消息: {} 条, last_offset: {:?}",
+                "应用层处理消息: broker[{}:{}] topic-partition[{}-{}] 消息: {} 条, last_offset: {:?}",
                 broker_info.1,
                 broker_info.0,
                 messages.topic,
                 messages.partition_id,
                 messages.messages.len(),
-                messages.messages.last().unwrap().offset.clone().unwrap(),
+                messages.messages.last().unwrap().offset.unwrap(),
             );
-            callback.release();
+            if let Some(callback)=callback{
+                callback.release();
+            }
         })?;
 
     // 等待 Ctrl+C 信号

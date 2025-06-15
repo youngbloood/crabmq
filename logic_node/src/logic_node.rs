@@ -176,6 +176,7 @@ where
             let coo_handle = tokio::spawn(async move {
                 if let Err(e) = coo.unwrap().run().await {
                     error!("Coo run err: {:?}", e);
+                    std::process::exit(1);
                 }
             });
             handles.push(coo_handle);
@@ -186,6 +187,7 @@ where
             let broker_handle = tokio::spawn(async move {
                 if let Err(e) = broker.unwrap().run().await {
                     error!("Broker run err: {:?}", e);
+                    std::process::exit(1);
                 }
             });
             handles.push(broker_handle);
@@ -196,6 +198,7 @@ where
             let slave_handle = tokio::spawn(async move {
                 if let Err(e) = salve.unwrap().run().await {
                     error!("Slave run err: {:?}", e);
+                    std::process::exit(1);
                 }
             });
             handles.push(slave_handle);

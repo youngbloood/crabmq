@@ -690,6 +690,8 @@ pub struct SubscriberConfig {
 
     // 配置是否自动提交
     pub auto_commit: bool,
+    // 配置自动提交间隔：建议<2s
+    pub auto_commit_interval: Duration,
 
     // 配置 broker 端 read 和 commit 间的滑动窗口大小，为0时默认coo的配置
     pub consumer_slide_window_size: u64,
@@ -722,6 +724,7 @@ pub fn with_subscriber_config(group_id: u32, topics: Vec<String>) -> SubscriberC
     SubscriberConfig {
         group_id,
         auto_commit: true,
+        auto_commit_interval: Duration::from_secs(1),
         consumer_slide_window_size: 0,
         topics: topics.iter().map(|v| (v.clone(), 0_u32)).collect(),
         break_when_broker_disconnect: false,
@@ -838,6 +841,7 @@ impl SubscriberPartitionBuffer {
 
     async fn push(&self, msgs: MessageBatch) {
         if msgs.messages.is_empty() {
+            println!("从broker返回0条消息");
             self.next_fetch_after.store(
                 chrono::Local::now().timestamp() as u64
                     + self
@@ -850,6 +854,10 @@ impl SubscriberPartitionBuffer {
         }
         let total_size = msgs.messages.iter().map(|v| v.payload.len()).sum::<usize>() as u64;
         if total_size == 0 {
+            println!(
+                "从broker返回 {} 条消息, 但是消息大小为 0",
+                msgs.messages.len()
+            );
             self.next_fetch_after.store(
                 chrono::Local::now().timestamp() as u64
                     + self
@@ -861,6 +869,7 @@ impl SubscriberPartitionBuffer {
             return;
         }
 
+        println!("从broker返回 {} 条消息, 放入buf中", msgs.messages.len());
         self.buf.push(msgs);
         if self
             .left_fetch_bytes
@@ -920,6 +929,7 @@ impl Subscriber {
             .await?
             .into_inner();
 
+        println!("resp. = {:?}", resp);
         match resp.error() {
             group_join_response::ErrorCode::None => {
                 println!("join resp = {:?}", &resp);
@@ -1028,7 +1038,7 @@ impl Subscriber {
 
     pub fn subscribe<HM, HMFut>(self: Arc<Self>, hm: HM) -> Result<()>
     where
-        HM: Fn((String, u32), clientbrokersvc::MessageBatch, AckCommitHandle) -> HMFut
+        HM: Fn((String, u32), clientbrokersvc::MessageBatch, Option<AckCommitHandle>) -> HMFut
             + Send
             + Sync
             + 'static,
@@ -1128,6 +1138,7 @@ impl Subscriber {
                                 let mut resp_strm = resp.into_inner();
                                 while let Ok(Some(res)) = resp_strm.message().await {
                                     if res.messages.is_empty() {
+                                        println!("broker 反会空消息了");
                                         continue;
                                     }
                                     if let Some(spbs) = _chans.get(&_key) {
@@ -1176,11 +1187,11 @@ impl Subscriber {
                             if stop.is_cancelled() {
                                 break;
                             }
-                            println!(
-                                "循环fetch消息:left_fetch_bytes: {}, max_partition_fetch_bytes: {} ",
-                                spb.left_fetch_bytes.load(Ordering::Relaxed),
-                                spb.conf.max_partition_fetch_bytes.load(Ordering::Relaxed)
-                            );
+                            // println!(
+                            //     "循环fetch消息:left_fetch_bytes: {}, max_partition_fetch_bytes: {} ",
+                            //     spb.left_fetch_bytes.load(Ordering::Relaxed),
+                            //     spb.conf.max_partition_fetch_bytes.load(Ordering::Relaxed)
+                            // );
 
                             let left_bytes = spb.left_fetch_bytes.load(Ordering::Relaxed);
                             let max_bytes =
@@ -1246,7 +1257,7 @@ impl Subscriber {
 
     fn spawn_consumer_task<HM, HMFut>(&self, handler: HM)
     where
-        HM: Fn((String, u32), clientbrokersvc::MessageBatch, AckCommitHandle) -> HMFut
+        HM: Fn((String, u32), clientbrokersvc::MessageBatch, Option<AckCommitHandle>) -> HMFut
             + Send
             + Sync
             + 'static,
@@ -1262,7 +1273,6 @@ impl Subscriber {
             // 轮询所有分区的缓冲区，并将消息交给应用层处理
             while !stop.is_cancelled() {
                 let mut processed = false;
-
                 for entry in chans.iter() {
                     let broker_info = entry.key();
                     let (_, spbs) = entry.pair();
@@ -1298,7 +1308,12 @@ impl Subscriber {
 
                             let last_position = messages.messages.last().unwrap().offset.unwrap();
                             // 调用用户处理函数
-                            handler(broker_info.clone(), messages, ack_handle).await;
+                            if auto_commit {
+                                handler(broker_info.clone(), messages, None).await;
+                                ack_handle.release();
+                            } else {
+                                handler(broker_info.clone(), messages, Some(ack_handle)).await;
+                            }
 
                             // 交给应用层处理后，才更新 last_position
                             {
@@ -1348,7 +1363,7 @@ impl Subscriber {
         if !self.conf.auto_commit {
             return;
         }
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut interval = tokio::time::interval(self.conf.auto_commit_interval);
         let chans = self.chans.clone();
         let subscribe_controll_manager = self.subscribe_controll_manager.clone();
         tokio::spawn(async move {
