@@ -64,6 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = client::Client::new(random_str(6), vec![args.coo_addr.clone()]);
     let subscriber = cli.subscriber(SubscriberConfig {
         group_id: args.group_id,
+        auto_commit: true,
+        consumer_slide_window_size: 0,
         topics: args
             .sub_topics
             .iter()
@@ -90,9 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 messages.messages.len(),
                 messages.messages.last().unwrap().offset.clone().unwrap(),
             );
-            if let Err(e) = callback.ack().await {
-                eprintln!("ack err: {e:?}");
-            }
+            callback.release();
         })?;
 
     // 等待 Ctrl+C 信号

@@ -3,7 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_build::configure()
         // .message_attribute(path, attribute)
-        .type_attribute("../protos/broker_coo.proto.PullReq", "#[derive(Default, Clone, Serialize, Deserialize)]")
+        .type_attribute( "clientbrokersvc.MessageReq", "#[derive(serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]")
         .compile_protos(
             &[
                 "../protos/broker_coo.proto",

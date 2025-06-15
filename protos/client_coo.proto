@@ -66,7 +66,18 @@ message PullReq {
 
 message GroupJoinRequest {
     uint32 group_id = 1;
-    repeated GroupJoinSubTopic sub_topics = 2;
+    // 加入group的可选参数
+    // 该 group 中的第一个客户端必须填该值
+    // 该 group 中的后续客户端不填该值，默认使用第一个的；若填，则需要校验
+    optional GroupJoinRequestOption opt = 2;
+}
+
+message GroupJoinRequestOption{
+    repeated GroupJoinSubTopic sub_topics = 1;
+    // 自动 commit   
+    bool auto_commit = 2; 
+    // 设置滑动窗口大小，用于 broker 中单个 consumer 限制 read_ptr 与 commit_ptr 之间的窗口大小，防止consumer过度占用资源
+    uint64 consumer_slide_window_size = 3;
 }
 
 // 仅每个消费者组中的第一个 SubTopic 有效
@@ -80,17 +91,20 @@ message GroupJoinSubTopic {
 message GroupJoinResponse {
     uint32 group_id = 1;
     string member_id = 2;
-    int32 generation_id = 3;
-    repeated string assigned_topics = 4;  // 统一后的订阅列表
-    repeated commonsvc.TopicPartitionMeta list = 5;
+    // 正确的 opt 参数
+    GroupJoinRequestOption opt = 3;
+    repeated commonsvc.TopicPartitionMeta list = 4;
     commonsvc.GroupStatus status = 6;
     enum ErrorCode {
         NONE = 0;
-        InvalidTopic = 1;
-        SUBSCRIPTION_CONFLICT = 2;
-        INVALID_GENERATION = 3;
+        FirstMemberMustSetConfig = 1; // 首成员必须设置
+        InvalidTopic = 2;
+        SUBSCRIPTION_CONFLICT = 3;
+        AUTO_COMMIT_CONFLICT = 4;
+        SLIDE_WINDOW_CONFLICT = 5;
     }
     ErrorCode error = 7;
+    string error_msg = 8;
 }
 
 message SyncConsumerAssignmentsReq {

@@ -1,14 +1,11 @@
-use crate::{
-    disk::{
-        Config as DiskConfig,
-        fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
-        meta::{WriterPositionPtr, gen_record_filename},
-        writer::flusher::Flusher,
-    },
-    metrics::StorageWriterMetrics,
+use crate::disk::{
+    Config as DiskConfig,
+    fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
+    meta::{WriterPositionPtr, gen_record_filename},
+    writer::flusher::Flusher,
 };
-use anyhow::{Result, anyhow};
-use bytes::{Bytes, BytesMut};
+use anyhow::Result;
+use bytes::Bytes;
 use common::dir_recursive;
 use crossbeam::queue::SegQueue;
 use log::error;
@@ -23,6 +20,8 @@ use std::{
 };
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 // use tokio_uring::fs::File as UringFile;
+
+const BATCH_POP_SIZE: usize = 36;
 
 struct SwitchQueue {
     switcher: Arc<AtomicBool>,
@@ -368,8 +367,8 @@ impl PartitionWriterBuffer {
     // 将数据从内存刷盘
     #[cfg(not(target_os = "linux"))]
     pub(crate) async fn flush(&self, fsync: bool) -> Result<u64> {
-        // 批量获取数据（每次最多128条消息）
-        let batch = self.buffer.pop_batch(128);
+        // 批量获取数据
+        let batch = self.buffer.pop_batch(BATCH_POP_SIZE);
         if batch.is_empty() {
             return Ok(0);
         }

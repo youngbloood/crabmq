@@ -421,6 +421,7 @@ where
                             .0;
                     let unique_id = part.unique_id.clone();
                     self.db.apply(part);
+                    // quorum 确认机制
                     if let Some((unique_id, cb)) = self.callbacks.remove(&unique_id) {
                         let _ = cb.send(Ok(unique_id)).await;
                     }

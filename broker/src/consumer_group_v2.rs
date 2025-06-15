@@ -3,12 +3,13 @@ use bytes::Bytes;
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use grpcx::brokercoosvc::{self, SyncConsumerAssignmentsResp};
-use grpcx::clientbrokersvc::{Ack, Fetch, Message, MessageBatch, SegmentOffset};
+use grpcx::clientbrokersvc::{Commit, Fetch, MessageBatch, MessageReq, MessageResp, SegmentOffset};
 use grpcx::topic_meta::TopicPartitionDetail;
 use log::error;
-use std::collections::HashMap;
 use std::num::NonZero;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use storagev2::{ReadPosition, SegmentOffset as StorageSegmentOffset};
 use storagev2::{StorageReader, StorageReaderSession};
@@ -16,13 +17,17 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::time;
 use tonic::Status;
 
+#[derive(Clone)]
 pub struct GroupTopicMeta {
     topic: String,
     offset: u32,
     list: Vec<TopicPartitionDetail>,
 }
+
+#[derive(Clone)]
 struct GroupMeta {
     id: u32,
+    consumer_slide_window_size: u64,
     group_topic_metas: Vec<GroupTopicMeta>,
 }
 
@@ -56,6 +61,7 @@ impl From<brokercoosvc::GroupMeta> for GroupMeta {
 
         GroupMeta {
             id: v.id,
+            consumer_slide_window_size: v.consumer_slide_window_size,
             group_topic_metas: topic_metas,
         }
     }
@@ -75,6 +81,7 @@ impl From<&brokercoosvc::GroupMeta> for GroupMeta {
 
         GroupMeta {
             id: v.id,
+            consumer_slide_window_size: v.consumer_slide_window_size,
             group_topic_metas: topic_metas,
         }
     }
@@ -91,7 +98,7 @@ where
     group: Arc<DashMap<u32, GroupMeta>>,
 
     // <ClientAddr, SubSession>
-    sessions: Arc<DashMap<String, SubSession>>,
+    sessions: Arc<DashMap<String, ConsumerSession>>,
 
     // <ClientAddr, Instant>
     heartbeats: Arc<DashMap<String, Instant>>,
@@ -168,28 +175,29 @@ where
         let group = group.unwrap();
         let group_id = group.value();
 
-        let sub_topics = DashMap::new();
-        let group_meta = self.group.get(group_id).unwrap();
-        group_meta.group_topic_metas.iter().for_each(|v| {
-            v.list.iter().for_each(|tpd| {
-                sub_topics.insert(
-                    (tpd.topic.clone(), tpd.partition_id),
-                    (v.offset, tpd.clone()),
-                );
-            });
-        });
-
+        let group_meta = self.group.get(group_id);
+        if group_meta.is_none() {
+            return Err(anyhow!("not found the group meta"));
+        }
+        let group_meta = group_meta.unwrap();
         let srs = self
             .storage_reader
             .new_session(*group_id, group_meta.get_topic_read_positions())
             .await?;
 
-        let ss = SubSession::new(member_id, *group_id, sub_topics, client_addr.clone(), srs);
+        let ss = ConsumerSession::new(
+            member_id,
+            *group_id,
+            group_meta.value().clone(),
+            // sub_topics,
+            client_addr.clone(),
+            srs,
+        );
         self.sessions.insert(client_addr, ss);
         Ok(())
     }
 
-    pub fn get_session(&self, client_addr: &str) -> Option<SubSession> {
+    pub fn get_session(&self, client_addr: &str) -> Option<ConsumerSession> {
         if let Some(entry) = self.sessions.get(client_addr) {
             return Some(entry.value().clone());
         }
@@ -219,10 +227,10 @@ where
     }
 }
 
-// SubSession 从 Storage 中获取消息
+// ConsumerSession 从 Storage 中获取消息
 // 流量控制等
 #[derive(Clone)]
-pub struct SubSession {
+pub struct ConsumerSession {
     member_id: String,
     group_id: u32,
     // 该客户端分配到的可消费的(topic, partition_id)
@@ -239,16 +247,96 @@ pub struct SubSession {
 }
 
 #[derive(Clone)]
-struct SlideWindow {}
+struct SlideWindow {
+    // (topic,partition): Vec<SlideWindowBatchMessage>
+    partition_offsets: Arc<DashMap<(String, u32), Vec<SlideWindowBatchMessage>>>,
+    window_size: u64,
+    left_size: Arc<AtomicU64>,
+}
 
-impl SubSession {
+struct SlideWindowBatchMessage {
+    last_offset: SegmentOffset,
+    messge_size: u64,
+}
+
+impl SlideWindow {
+    fn handle_resp_message_batch(&self, mb: &MessageBatch) {
+        if mb.messages.is_empty() {
+            return;
+        }
+        let last_offset = mb.messages.last().unwrap().offset.unwrap();
+        let messge_size = mb.messages.iter().map(|v| v.payload.len()).sum::<usize>() as u64;
+        let key = (mb.topic.clone(), mb.partition_id);
+        self.partition_offsets
+            .entry(key)
+            .and_modify(|v| {
+                v.push(SlideWindowBatchMessage {
+                    last_offset,
+                    messge_size,
+                });
+            })
+            .or_insert(vec![SlideWindowBatchMessage {
+                last_offset,
+                messge_size,
+            }]);
+
+        if self.left_size.fetch_max(messge_size, Ordering::Relaxed) == messge_size {
+            self.left_size.store(0, Ordering::Relaxed);
+        } else {
+            self.left_size.fetch_sub(messge_size, Ordering::Relaxed);
+        }
+    }
+
+    fn handle_commit_offset(&self, topic: &str, partition_id: u32, mb: &SegmentOffset) {
+        self.partition_offsets
+            .entry((topic.to_string(), partition_id))
+            .and_modify(|v| {
+                for (idx, w) in v.iter().enumerate() {
+                    if compare_segment_offest(mb, &w.last_offset) <= 0 {
+                        break;
+                    }
+                    self.left_size.fetch_add(w.messge_size, Ordering::Relaxed);
+                }
+                v.retain(|x| compare_segment_offest(mb, &x.last_offset) > 0);
+            });
+    }
+}
+
+// if a > b; return 1
+// if a == b; return 0
+// if a < b; return -1
+fn compare_segment_offest(a: &SegmentOffset, b: &SegmentOffset) -> i8 {
+    if a.segment_id > b.segment_id {
+        1
+    } else if a.segment_id < b.segment_id {
+        -1
+    } else if a.offset > b.offset {
+        1
+    } else if a.offset < b.offset {
+        -1
+    } else {
+        0
+    }
+}
+
+impl ConsumerSession {
     pub fn new(
         member_id: String,
         group_id: u32,
-        sub_topics: DashMap<(String, u32), (u32, TopicPartitionDetail)>,
+        group_meta: GroupMeta,
         client_addr: String,
         storage: Box<dyn StorageReaderSession>,
     ) -> Self {
+        let sub_topics = DashMap::new();
+        group_meta.group_topic_metas.iter().for_each(|v| {
+            v.list.iter().for_each(|tpd| {
+                sub_topics.insert(
+                    (tpd.topic.clone(), tpd.partition_id),
+                    (v.offset, tpd.clone()),
+                );
+            });
+        });
+
         let ss = Self {
             member_id,
             group_id,
@@ -257,15 +345,22 @@ impl SubSession {
             window: Arc::new(Semaphore::new(10)),
             storage: Arc::new(storage),
             buf: Arc::default(),
-            slide_window: SlideWindow {},
+            slide_window: SlideWindow {
+                window_size: group_meta.consumer_slide_window_size,
+                left_size: Arc::new(AtomicU64::new(group_meta.consumer_slide_window_size)),
+                partition_offsets: Arc::default(),
+            },
         };
+
         ss
     }
 
-    pub fn handle_ack(&self, ack: Ack) {}
-
     pub async fn handle_fetch(&self, f: Fetch, tx: mpsc::Sender<Result<MessageBatch, Status>>) {
-        let mut left_bytes = f.max_partition_bytes;
+        // min(客户端:max_partition_bytes, slide_window:left_size)
+        let mut left_bytes = f
+            .max_partition_bytes
+            .min(self.slide_window.left_size.load(Ordering::Relaxed));
+
         let mut message_batch = MessageBatch {
             batch_id: nanoid::nanoid!(),
             topic: f.topic.clone(),
@@ -273,23 +368,23 @@ impl SubSession {
             messages: Vec::new(),
         };
 
-        let append_msg =
-            |batch: &mut MessageBatch, _f: &Fetch, msg: (Bytes, StorageSegmentOffset)| {
-                batch.messages.push(Message {
-                    topic: _f.topic.clone(),
-                    partition: _f.partition_id,
-                    message_id: String::new(),
-                    payload: msg.0.into(),
-                    offset: Some(SegmentOffset {
-                        segment: format!("{:?}", msg.1.filename),
-                        offset: msg.1.offset,
-                    }),
-                    metadata: HashMap::new(),
-                    credit_remaining: 0,
-                    credit_consumed: 0,
-                    recommended_next_bytes: 0,
-                });
-            };
+        let append_msg = |batch: &mut MessageBatch,
+                          _f: &Fetch,
+                          msg: (Bytes, StorageSegmentOffset)| {
+            let mr: MessageReq = bincode::decode_from_slice(&msg.0, bincode::config::standard())
+                .unwrap()
+                .0;
+
+            batch.messages.push(MessageResp {
+                message_id: std::mem::take(&mut Some(mr.message_id)),
+                payload: mr.payload,
+                metadata: mr.metadata,
+                offset: Some(SegmentOffset {
+                    segment_id: msg.1.segment_id,
+                    offset: msg.1.offset,
+                }),
+            });
+        };
 
         let mut has_full = false;
         // 先从 buf 中进行填充
@@ -345,9 +440,41 @@ impl SubSession {
                 }
             }
         }
+
+        self.slide_window.handle_resp_message_batch(&message_batch);
         if let Err(e) = tx.send(Ok(message_batch)).await {
             error!("send message_batch to consumer err: {e:?}");
         }
+    }
+
+    pub async fn handle_commit(
+        &self,
+        commit: Commit,
+        _tx: mpsc::Sender<Result<MessageBatch, Status>>,
+    ) {
+        let offset = StorageSegmentOffset {
+            segment_id: commit.commit_pos.as_ref().unwrap().segment_id,
+            offset: commit.commit_pos.as_ref().unwrap().offset,
+        };
+        if let Err(e) = self
+            .storage
+            .commit(&commit.topic, commit.partition_id, offset)
+            .await
+        {
+            error!(
+                "commit the topic-parittion[{}-{}] pos[{:?}] err: {e:?}",
+                &commit.topic,
+                commit.partition_id,
+                commit.commit_pos.unwrap()
+            );
+            return;
+        }
+
+        self.slide_window.handle_commit_offset(
+            &commit.topic,
+            commit.partition_id,
+            &commit.commit_pos.unwrap(),
+        );
     }
 
     // pub async fn next(&mut self) -> Result<Message, Status> {

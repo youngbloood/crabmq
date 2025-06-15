@@ -84,7 +84,8 @@ message SyncConsumerAssignmentsResp {
 
 message GroupMeta {
     uint32 id = 1;
-    repeated GroupTopicMeta group_topic_metas = 2;
+    uint64 consumer_slide_window_size = 2;
+    repeated GroupTopicMeta group_topic_metas = 3;
 }
 
 message GroupTopicMeta {

@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use grpcx::{
     brokercoosvc::{BrokerState, SyncConsumerAssignmentsResp},
     clientbrokersvc::{
-        Message, MessageBatch, PublishReq, PublishResp, Status as BrokerStatus, SubscribeReq,
+        MessageBatch, PublishReq, PublishResp, Status as BrokerStatus, SubscribeReq,
         client_broker_service_server::{ClientBrokerService, ClientBrokerServiceServer},
         subscribe_req,
     },
@@ -88,11 +88,7 @@ where
         let broker = self.clone();
         tokio::spawn(async move {
             while let Ok(Some(req)) = strm.message().await {
-                let result = broker.process_publish(req).await;
-                if let Err(ref e) = result {
-                    error!("broker[{broker_id}] process publish message err: {e:?}");
-                }
-                let _ = tx.send(result.map_err(Into::into)).await;
+                broker.process_publish(req, &tx).await;
             }
         });
 
@@ -264,20 +260,48 @@ where
         Ok(())
     }
 
-    async fn process_publish(&self, req: PublishReq) -> Result<PublishResp, BrokerError> {
+    async fn process_publish(
+        &self,
+        req: PublishReq,
+        tx: &mpsc::Sender<Result<PublishResp, Status>>,
+    ) {
         // 验证分区归属
         if !self.partitions.is_my_partition(&req.topic, req.partition) {
-            return Err(BrokerError::InvalidPartition);
+            let _ = tx.send(Err(BrokerError::InvalidPartition.into())).await;
+            return;
         }
         // println!(
         //     "broker[{}] 收到分区[{}]的消息",
         //     self.get_id(),
         //     req.partition
         // );
-        let payload = Bytes::from_owner(req.payload);
+
+        if req.ack() == grpcx::clientbrokersvc::PublishAckType::MasterMem {
+            let _ = tx
+                .send(Ok(PublishResp {
+                    batch_id: String::new(),
+                    overall_status: 0,
+                    message_acks: Vec::new(),
+                }))
+                .await;
+        }
+
+        let mut msgs = Vec::with_capacity(req.messages.len());
+        req.messages.iter().for_each(|v| {
+            let encoded = bincode::encode_to_vec(v, bincode::config::standard());
+            match encoded {
+                Ok(data) => msgs.push(Bytes::from_owner(data)),
+                Err(e) => {
+                    error!("bincode encode message err: {e:?}");
+                }
+            }
+        });
+
+        let req = Arc::new(req);
         // 存储消息
-        self.storage_writer
-            .store(&req.topic, req.partition, &[payload.clone()])
+        if let Err(e) = self
+            .storage_writer
+            .store(&req.topic, req.partition, &msgs)
             .await
             .map_err(|e| {
                 error!(
@@ -285,17 +309,23 @@ where
                     req.topic, req.partition, e,
                 );
                 BrokerError::StorageFailure
-            })?;
+            })
+        {}
+
+        if req.ack() == grpcx::clientbrokersvc::PublishAckType::MasterStorage {
+            let _ = tx
+                .send(Ok(PublishResp {
+                    batch_id: String::new(),
+                    overall_status: 0,
+                    message_acks: Vec::new(),
+                }))
+                .await;
+        }
 
         // 写入消息总线
         self.message_bus
-            .broadcast_producer_message(&req.topic, req.partition, payload)
+            .broadcast_producer_message(&req.topic, req.partition, req.clone())
             .await;
-
-        Ok(PublishResp {
-            message_id: String::new(),
-            status: BrokerStatus::Success.into(),
-        })
     }
 
     async fn process_subscribe(
@@ -328,7 +358,8 @@ where
                 sess.handle_fetch(fetch, tx).await;
             }
 
-            Some(subscribe_req::Request::Ack(ack)) => {
+            Some(subscribe_req::Request::Commit(commit)) => {
+                // 更新流量控制
                 let sess = self.consumers.get_session(client_addr);
                 if sess.is_none() {
                     // 统一由外部处理
@@ -339,11 +370,7 @@ where
                 }
                 let sess = sess.unwrap();
                 // 处理ACK逻辑
-                sess.handle_ack(ack);
-            }
-
-            Some(subscribe_req::Request::Commit(commit)) => {
-                // todo: 处理 commit 逻辑
+                sess.handle_commit(commit, tx).await;
             }
 
             Some(subscribe_req::Request::Heartbeat(hb)) => {}

@@ -1,10 +1,11 @@
 use bytes::Bytes;
 use dashmap::DashMap;
+use grpcx::clientbrokersvc::PublishReq;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 type MessageBusKey = (String, u32);
-type MessageBusValue = Arc<DashMap<String, mpsc::Sender<Bytes>>>;
+type MessageBusValue = Arc<DashMap<String, mpsc::Sender<Arc<PublishReq>>>>;
 
 #[derive(Debug, Clone)]
 pub struct MessageBus {
@@ -39,7 +40,7 @@ impl MessageBus {
         module_name: String,
         topic: &str,
         partition: u32,
-    ) -> mpsc::Receiver<Bytes> {
+    ) -> mpsc::Receiver<Arc<PublishReq>> {
         let key = (topic.to_string(), partition);
         let (tx, rx) = mpsc::channel(self.message_bus_producer_buffer_size);
         self.producers.entry(key).and_modify(|v| {
@@ -58,15 +59,17 @@ impl MessageBus {
     }
 
     // 生产者发送消息
-    pub async fn broadcast_producer_message(&self, topic: &str, partition: u32, payload: Bytes) {
+    pub async fn broadcast_producer_message(
+        &self,
+        topic: &str,
+        partition: u32,
+        data: Arc<PublishReq>,
+    ) {
         let entry = self.producers.get(&(topic.to_string(), partition)).or(None);
         if let Some(entry) = entry {
             let list: Vec<_> = entry.iter().enumerate().collect();
             for v in list {
-                let _ =
-                    v.1.value()
-                        .send_timeout(payload.clone(), self.timeout)
-                        .await;
+                let _ = v.1.value().send_timeout(data.clone(), self.timeout).await;
             }
         }
     }
@@ -79,7 +82,7 @@ impl MessageBus {
         module_name: String,
         topic: &str,
         partition: u32,
-    ) -> mpsc::Receiver<Bytes> {
+    ) -> mpsc::Receiver<Arc<PublishReq>> {
         let key = (topic.to_string(), partition);
         let (tx, rx) = mpsc::channel(self.message_bus_consumer_buffer_size);
         self.consumers.entry(key).and_modify(|v| {
@@ -97,14 +100,17 @@ impl MessageBus {
         });
     }
 
-    pub async fn broadcast_consumer_message(&self, topic: &str, partition: u32, payload: Bytes) {
+    pub async fn broadcast_consumer_message(
+        &self,
+        topic: &str,
+        partition: u32,
+        data: Arc<PublishReq>,
+    ) {
         let entry = self.consumers.get(&(topic.to_string(), partition)).or(None);
         if let Some(entry) = entry {
             let list: Vec<_> = entry.iter().enumerate().collect();
             for v in list {
-                v.1.value()
-                    .send_timeout(payload.clone(), self.timeout)
-                    .await;
+                v.1.value().send_timeout(data.clone(), self.timeout).await;
             }
         }
     }

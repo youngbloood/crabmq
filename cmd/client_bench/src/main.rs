@@ -1,8 +1,10 @@
 use bytes::Bytes;
 use futures::future::join_all;
+use grpcx::clientbrokersvc::{MessageReq, PublishAckType};
 use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -140,7 +142,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let content = vec![b'a' + (i % 26) as u8; message_size];
-                if let Err(e) = tx.send((key, Bytes::from(content))).await {
+                if let Err(e) = tx
+                    .send((
+                        key,
+                        PublishAckType::None,
+                        vec![MessageReq {
+                            message_id: nanoid::nanoid!(),
+                            payload: content,
+                            metadata: HashMap::new(),
+                        }],
+                    ))
+                    .await
+                {
                     eprintln!("Warm-up send error: {:?}", e);
                     break;
                 }
@@ -190,7 +203,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let byte = b'a' + (msg_id % 26) as u8;
                 let content = Bytes::from(vec![byte; message_size]);
 
-                if let Err(e) = tx.send((key, content)).await {
+                if let Err(e) = tx
+                    .send((
+                        key,
+                        PublishAckType::None,
+                        vec![MessageReq {
+                            message_id: nanoid::nanoid!(),
+                            payload: content.into(),
+                            metadata: HashMap::new(),
+                        }],
+                    ))
+                    .await
+                {
                     eprintln!("Producer {} send error: {:?}", producer_id, e);
                     break;
                 }

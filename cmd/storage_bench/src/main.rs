@@ -71,15 +71,15 @@ async fn main() -> Result<()> {
         // },
         // //
         // // 10k message_size
-        TestArgs {
-            partition_count: 10000,
-            message_size: 10 * 1024,
-            warmup_duration: Duration::from_secs(20),
-            current_rate: 450,
-            rate_step: 150,
-            test_duration: Duration::from_secs(20),
-            max_rate_mbps: 1500,
-        },
+        // TestArgs {
+        //     partition_count: 10000,
+        //     message_size: 10 * 1024,
+        //     warmup_duration: Duration::from_secs(20),
+        //     current_rate: 450,
+        //     rate_step: 150,
+        //     test_duration: Duration::from_secs(20),
+        //     max_rate_mbps: 1500,
+        // },
         // TestArgs {
         //     partition_count: 5000,
         //     message_size: 10 * 1024,
@@ -154,15 +154,15 @@ async fn main() -> Result<()> {
         //     test_duration: Duration::from_secs(15),
         //     max_rate_mbps: 1500,
         // },
-        // TestArgs {
-        //     partition_count: 500,
-        //     message_size: 100 * 1024,
-        //     warmup_duration: Duration::from_secs(15),
-        //     current_rate: 300,
-        //     rate_step: 150,
-        //     test_duration: Duration::from_secs(15),
-        //     max_rate_mbps: 1500,
-        // },
+        TestArgs {
+            partition_count: 500,
+            message_size: 100 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 300,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
         // //
         // // 1m message_size
         // TestArgs {

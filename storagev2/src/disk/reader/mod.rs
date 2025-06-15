@@ -230,7 +230,7 @@ impl DiskStorageReaderSessionPartition {
     async fn get_segment_offset(&self) -> SegmentOffset {
         let rl = self.reader_ptr.read().await;
         SegmentOffset {
-            filename: rl.filename.clone(),
+            segment_id: extract_segment_id_from_filename(&rl.filename),
             offset: rl.offset,
         }
     }
@@ -334,6 +334,22 @@ fn filename_factor_next_record(filename: &Path) -> PathBuf {
         .parse::<u64>()
         .unwrap();
     PathBuf::from(gen_record_filename(filename_factor + 1))
+}
+
+fn extract_segment_id_from_filename(p: &Path) -> u64 {
+    // 获取文件名（去除目录）
+    let file_name = p
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("0.record");
+
+    // 提取 xxxx.record 中的 xxxx
+    let segment_id = file_name
+        .strip_suffix(".record")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    segment_id
 }
 
 #[cfg(test)]

@@ -1,16 +1,15 @@
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
 use crossbeam::queue::SegQueue;
 use dashmap::{DashMap, DashSet};
 use grpcx::{
     clientbrokersvc::{
-        self, Ack, Commit, Fetch, Heartbeat, MessageBatch, PublishReq, PublishResp, SegmentOffset,
-        SubscribeReq, Subscription, client_broker_service_client::ClientBrokerServiceClient,
-        subscribe_req::Request,
+        self, Commit, Fetch, Heartbeat, MessageBatch, MessageReq, PublishAckType, PublishReq,
+        PublishResp, SegmentOffset, SubscribeReq, Subscription,
+        client_broker_service_client::ClientBrokerServiceClient, subscribe_req::Request,
     },
     clientcoosvc::{
-        AddPartitionsReq, GroupJoinRequest, GroupJoinSubTopic, NewTopicReq, PullReq,
-        SyncConsumerAssignmentsReq, client_coo_service_client::ClientCooServiceClient,
+        AddPartitionsReq, GroupJoinRequest, GroupJoinRequestOption, GroupJoinSubTopic, NewTopicReq,
+        PullReq, SyncConsumerAssignmentsReq, client_coo_service_client::ClientCooServiceClient,
         group_join_response,
     },
     commonsvc::{self},
@@ -28,7 +27,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     select,
@@ -449,7 +448,7 @@ impl Publisher {
     // }
     pub async fn publish<HR, HRFut>(
         self: &Arc<Self>,
-        mut rx: mpsc::Receiver<(String, Bytes)>, /* 当 rx 对端的 tx close/drop 时，publisher 的后台 task 结束 */
+        mut rx: mpsc::Receiver<(String, PublishAckType, Vec<MessageReq>)>, /* 当 rx 对端的 tx close/drop 时，publisher 的后台 task 结束 */
         handle_resp: HR,
         auto_create: bool,
     ) -> Result<()>
@@ -469,8 +468,20 @@ impl Publisher {
         tokio::spawn(async move {
             let mut index = 0;
             // TODO: 路由 key
-            while let Some((key, payload)) = rx.recv().await {
-                // 此 loop 是为了找到 !None 的 sender
+            while let Some((key, ack, messages)) = rx.recv().await {
+                // 校验
+                if ack != PublishAckType::None {
+                    for m in messages.iter() {
+                        if m.message_id.is_empty() {
+                            let _ = handle_resp(Err(anyhow!(
+                                "message_id not allow empty when need ack"
+                            )))
+                            .await;
+                        }
+                    }
+                }
+
+                // 此 loop 是为了找到 !None 的 sender，准备发送消息至 broker
                 loop {
                     let rl = publisher.success_partitions_sender.read().await;
                     if index >= rl.len() {
@@ -490,8 +501,9 @@ impl Publisher {
                         .send(PublishReq {
                             topic: topic.clone(),
                             partition: *partition_id,
-                            payload: payload.to_vec(),
-                            message_id: None,
+                            ack: ack.into(),
+                            batch_id: nanoid::nanoid!(),
+                            messages,
                         })
                         .await
                     {
@@ -675,6 +687,13 @@ impl Publisher {
 pub struct SubscriberConfig {
     pub group_id: u32,
     pub topics: Vec<(String, u32)>,
+
+    // 配置是否自动提交
+    pub auto_commit: bool,
+
+    // 配置 broker 端 read 和 commit 间的滑动窗口大小，为0时默认coo的配置
+    pub consumer_slide_window_size: u64,
+
     // 某些 broker 连不上时是否退出
     pub break_when_broker_disconnect: bool,
     /// 流量控制
@@ -702,6 +721,8 @@ pub struct SubscriberConfig {
 pub fn with_subscriber_config(group_id: u32, topics: Vec<String>) -> SubscriberConfig {
     SubscriberConfig {
         group_id,
+        auto_commit: true,
+        consumer_slide_window_size: 0,
         topics: topics.iter().map(|v| (v.clone(), 0_u32)).collect(),
         break_when_broker_disconnect: false,
         max_partition_fetch_bytes: Arc::new(AtomicU64::new(10000)),
@@ -784,6 +805,8 @@ struct SubscriberPartitionBuffer {
     conf: Arc<SubscriberConfig>,
     tpd: Arc<TopicPartitionDetail>,
     buf: Arc<SegQueue<MessageBatch>>,
+
+    last_position: Arc<RwLock<SegmentOffset>>,
     // iter_count: Arc<AtomicU64>,
     // 剩余可以拉去的bytes数
     left_fetch_bytes: Arc<AtomicU64>,
@@ -801,11 +824,20 @@ impl SubscriberPartitionBuffer {
             )),
             conf,
             next_fetch_after: Arc::default(),
+            last_position: Arc::default(),
         }
     }
 
-    fn push(&self, msg: MessageBatch) {
-        if msg.messages.is_empty() {
+    async fn get_last_position(&self) -> SegmentOffset {
+        let rl = self.last_position.read().await;
+        SegmentOffset {
+            segment_id: rl.segment_id,
+            offset: rl.offset,
+        }
+    }
+
+    async fn push(&self, msgs: MessageBatch) {
+        if msgs.messages.is_empty() {
             self.next_fetch_after.store(
                 chrono::Local::now().timestamp() as u64
                     + self
@@ -816,7 +848,7 @@ impl SubscriberPartitionBuffer {
             );
             return;
         }
-        let total_size = msg.messages.iter().map(|v| v.payload.len()).sum::<usize>() as u64;
+        let total_size = msgs.messages.iter().map(|v| v.payload.len()).sum::<usize>() as u64;
         if total_size == 0 {
             self.next_fetch_after.store(
                 chrono::Local::now().timestamp() as u64
@@ -828,7 +860,8 @@ impl SubscriberPartitionBuffer {
             );
             return;
         }
-        self.buf.push(msg);
+
+        self.buf.push(msgs);
         if self
             .left_fetch_bytes
             .fetch_min(total_size, Ordering::Relaxed)
@@ -866,15 +899,19 @@ impl Subscriber {
             .execute_unary(
                 GroupJoinRequest {
                     group_id: self.conf.group_id,
-                    sub_topics: self
-                        .conf
-                        .topics
-                        .iter()
-                        .map(|v| GroupJoinSubTopic {
-                            topic: v.0.clone(),
-                            offset: v.1,
-                        })
-                        .collect(),
+                    opt: Some(GroupJoinRequestOption {
+                        sub_topics: self
+                            .conf
+                            .topics
+                            .iter()
+                            .map(|v| GroupJoinSubTopic {
+                                topic: v.0.clone(),
+                                offset: v.1,
+                            })
+                            .collect(),
+                        auto_commit: self.conf.auto_commit,
+                        consumer_slide_window_size: self.conf.consumer_slide_window_size,
+                    }),
                 },
                 |chan, req, _addr| async {
                     ClientCooServiceClient::new(chan).join_group(req).await
@@ -895,17 +932,25 @@ impl Subscriber {
                 tokio::spawn(sub.sync_consumer_assignments());
                 Ok(())
             }
+            group_join_response::ErrorCode::FirstMemberMustSetConfig => Err(anyhow!(
+                "you are the first member in this group, should set opt",
+            )),
             group_join_response::ErrorCode::InvalidTopic => Err(anyhow!(format!(
                 "invalid topic, consumer group topics are: {:?}",
-                resp.assigned_topics
+                resp.opt.as_ref().unwrap().sub_topics
             ))),
             group_join_response::ErrorCode::SubscriptionConflict => Err(anyhow!(format!(
                 "subscription topics has conflict, consumer group topics are: {:?}",
-                resp.assigned_topics
+                resp.opt.as_ref().unwrap().sub_topics
             ))),
-            group_join_response::ErrorCode::InvalidGeneration => {
-                Err(anyhow!(resp.error().as_str_name()))
-            }
+            group_join_response::ErrorCode::AutoCommitConflict => Err(anyhow!(format!(
+                "auto_commit has conflict, should be: {:?}",
+                resp.opt.as_ref().unwrap().auto_commit
+            ))),
+            group_join_response::ErrorCode::SlideWindowConflict => Err(anyhow!(format!(
+                "consumer_slide_window_size has conflict, should be: {:?}",
+                resp.opt.as_ref().unwrap().consumer_slide_window_size
+            ))),
         }
     }
 
@@ -1011,6 +1056,12 @@ impl Subscriber {
             subscriber.spawn_heartbeat_task().await;
         });
 
+        // 4. 启动 autocommit
+        let subscriber = self.clone();
+        tokio::spawn(async move {
+            subscriber.spawn_autocommit_task().await;
+        });
+
         Ok(())
     }
 
@@ -1085,7 +1136,7 @@ impl Subscriber {
                                             if spb.tpd.topic == res.topic
                                                 && spb.tpd.partition_id == res.partition_id
                                             {
-                                                spb.push(res);
+                                                spb.push(res).await;
                                                 break;
                                             }
                                         }
@@ -1205,9 +1256,10 @@ impl Subscriber {
         let ack_commit_manager = self.subscribe_controll_manager.clone();
         let stop = self.stop.clone();
         let chans = self.chans.clone();
+        let auto_commit = self.conf.auto_commit;
 
         tokio::spawn(async move {
-            // 轮询所有分区的缓冲区
+            // 轮询所有分区的缓冲区，并将消息交给应用层处理
             while !stop.is_cancelled() {
                 let mut processed = false;
 
@@ -1233,25 +1285,27 @@ impl Subscriber {
                             processed = true;
                             // 创建ACK COMMIT句柄
                             let ack_handle = AckCommitHandle {
-                                // topic: messages.topic.clone(),
-                                // partition: messages.partition_id,
-                                batch_id: messages.batch_id.clone(),
+                                topic: messages.topic.clone(),
+                                partition_id: messages.partition_id,
                                 batch_message_size: message_size,
+                                auto_commit,
                                 spb: spb.clone(),
-                                last_offset: messages
-                                    .messages
-                                    .last()
-                                    .unwrap()
-                                    .offset
-                                    .clone()
-                                    .unwrap(),
+                                last_offset: messages.messages.last().unwrap().offset.unwrap(),
                                 notify: Arc::new(
                                     ack_commit_manager.get(&key).unwrap().value().clone(),
                                 ),
                             };
 
+                            let last_position = messages.messages.last().unwrap().offset.unwrap();
                             // 调用用户处理函数
                             handler(broker_info.clone(), messages, ack_handle).await;
+
+                            // 交给应用层处理后，才更新 last_position
+                            {
+                                let mut wl = spb.last_position.write().await;
+                                wl.segment_id = last_position.segment_id;
+                                wl.offset = last_position.offset;
+                            }
                         }
                     }
                 }
@@ -1289,31 +1343,69 @@ impl Subscriber {
             }
         }
     }
+
+    async fn spawn_autocommit_task(self: Arc<Self>) {
+        if !self.conf.auto_commit {
+            return;
+        }
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let chans = self.chans.clone();
+        let subscribe_controll_manager = self.subscribe_controll_manager.clone();
+        tokio::spawn(async move {
+            while !self.stop.is_cancelled() {
+                interval.tick().await;
+                for entry in chans.iter() {
+                    let (_, spbs) = entry.pair();
+                    for spb in spbs.iter() {
+                        let key = (spb.tpd.broker_leader_addr.clone(), spb.tpd.broker_leader_id);
+                        let entry = subscribe_controll_manager.get(&key);
+                        if entry.is_none() {
+                            warn!("not found the sender when auto commit to broker[{:?}]", key);
+                            continue;
+                        }
+                        let entry = entry.unwrap();
+                        let sender = entry.value();
+                        if let Err(e) = sender
+                            .send(SubscribeReq {
+                                request: Some(clientbrokersvc::subscribe_req::Request::Commit(
+                                    Commit {
+                                        topic: spb.tpd.topic.clone(),
+                                        partition_id: spb.tpd.partition_id,
+                                        commit_pos: Some(spb.get_last_position().await),
+                                    },
+                                )),
+                            })
+                            .await
+                        {
+                            error!(
+                                "send commit to broker[{:?}] topic-partition[{}-{}] err: {e:?}",
+                                key,
+                                spb.tpd.topic.clone(),
+                                spb.tpd.partition_id,
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 pub struct AckCommitHandle {
-    // topic: String,
-    // partition: u32,
-    // 用于批次 ack
-    batch_id: String,
+    topic: String,
+    partition_id: u32,
     // 该批次消息大小
     batch_message_size: u64,
     // 用于commit
+    auto_commit: bool,
     last_offset: SegmentOffset,
     spb: SubscriberPartitionBuffer,
     notify: Arc<mpsc::Sender<SubscribeReq>>,
 }
 
 impl AckCommitHandle {
-    pub async fn ack(self) -> Result<()> {
-        self.notify
-            .send(SubscribeReq {
-                request: Some(clientbrokersvc::subscribe_req::Request::Ack(Ack {
-                    batch_id: self.batch_id,
-                })),
-            })
-            .await?;
-
+    // release the fetch bytes
+    pub fn release(&self) {
         self.spb
             .left_fetch_bytes
             .fetch_add(self.batch_message_size, Ordering::Relaxed);
@@ -1323,19 +1415,17 @@ impl AckCommitHandle {
             self.batch_message_size,
             self.spb.left_fetch_bytes.load(Ordering::Relaxed)
         );
-        Ok(())
-    }
-
-    pub fn nack(self) {
-        // 如果需要重新投递，可以实现重新入队逻辑
-        // 当前设计不提供NACK功能，需要用户自己处理失败
-        // self.spb.push(msg);
     }
 
     pub async fn commit(self) -> Result<()> {
+        if self.auto_commit {
+            return Ok(());
+        }
         self.notify
             .send(SubscribeReq {
                 request: Some(clientbrokersvc::subscribe_req::Request::Commit(Commit {
+                    topic: self.topic,
+                    partition_id: self.partition_id,
                     commit_pos: Some(self.last_offset),
                 })),
             })

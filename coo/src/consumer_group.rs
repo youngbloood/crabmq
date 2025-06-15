@@ -1,8 +1,10 @@
 use crate::event_bus::EventBus;
 use anyhow::Result;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use grpcx::brokercoosvc::{self, GroupMeta, GroupTopicMeta};
-use grpcx::clientcoosvc::{self, GroupJoinResponse, group_join_response};
+use grpcx::clientcoosvc::{
+    self, GroupJoinRequestOption, GroupJoinResponse, GroupJoinSubTopic, group_join_response,
+};
 use grpcx::commonsvc::GroupStatus;
 use grpcx::topic_meta::TopicPartitionDetail;
 use std::collections::HashMap;
@@ -21,7 +23,9 @@ struct ConsumerMember {
 struct ConsumerGroup {
     id: u32,
     status: GroupStatus,
-    generation_id: i32,
+
+    auto_commit: bool,
+    consumer_slide_window_size: u64,
 
     // 该消费者组订阅的 topics
     topics: Arc<DashMap<String, u32>>,
@@ -38,6 +42,21 @@ impl ConsumerGroup {
                 pm.sub_member_ids.clear();
             });
         });
+    }
+
+    fn gen_option(&self) -> GroupJoinRequestOption {
+        let mut sub_topics = Vec::with_capacity(self.topics.len());
+        self.topics.iter().for_each(|t| {
+            sub_topics.push(GroupJoinSubTopic {
+                topic: t.key().clone(),
+                offset: *t.value(),
+            });
+        });
+        GroupJoinRequestOption {
+            sub_topics,
+            auto_commit: self.auto_commit,
+            consumer_slide_window_size: self.consumer_slide_window_size,
+        }
     }
 
     fn assign_all_partitions(
@@ -72,7 +91,6 @@ impl ConsumerGroup {
         if total_partitions == 0 {
             // 没有分区需要分配
             self.assignments = Arc::new(DashMap::new());
-            self.generation_id += 1;
             self.status = GroupStatus::Stable;
             return;
         }
@@ -97,7 +115,6 @@ impl ConsumerGroup {
 
         // 更新组状态
         self.assignments = Arc::new(new_assignments);
-        self.generation_id += 1;
         self.status = GroupStatus::Stable;
     }
 }
@@ -133,49 +150,85 @@ impl ConsumerGroupManager {
             .entry(req.group_id)
             .or_insert_with(|| -> ConsumerGroup {
                 let topics = DashMap::new();
-                req.sub_topics.iter().for_each(|v| {
-                    topics.insert(v.topic.clone(), v.offset);
-                });
-
+                if req.opt.is_some() {
+                    req.opt.as_ref().unwrap().sub_topics.iter().for_each(|v| {
+                        topics.insert(v.topic.clone(), v.offset);
+                    });
+                }
                 ConsumerGroup {
                     id: req.group_id,
                     status: GroupStatus::Empty,
-                    generation_id: 0,
                     topics: Arc::new(topics),
                     ..Default::default()
                 }
             });
 
-        let topics = DashSet::new();
-        req.sub_topics.iter().for_each(|v| {
-            topics.insert(v.topic.clone());
-        });
+        // 该group的首位成员
+        if group.members.is_empty() {
+            if req.opt.is_none() {
+                return Ok(GroupJoinResponse {
+                    error: group_join_response::ErrorCode::FirstMemberMustSetConfig.into(),
+                    ..Default::default()
+                });
+            }
 
-        // 检查所有topic是否存在
-        for topic in topics.iter() {
-            if !self.all_topics.contains_key(&*topic) {
+            let opt = req.opt.as_ref().unwrap();
+            let sub_topics = &opt.sub_topics;
+            // 检查所有topic是否存在
+            for st in sub_topics.iter() {
+                if !self.all_topics.contains_key(&*st.topic) {
+                    return Ok(GroupJoinResponse {
+                        error: group_join_response::ErrorCode::InvalidTopic.into(),
+                        ..Default::default()
+                    });
+                }
+            }
+            if opt.consumer_slide_window_size == 0 {
+                group.consumer_slide_window_size = 1024 * 1024 * 10;
+            } else {
+                group.consumer_slide_window_size = opt.consumer_slide_window_size
+            }
+        } else if req.opt.is_some() {
+            // 该group后续加入的成员
+            let opt = req.opt.as_ref().unwrap();
+            let sub_topics = &opt.sub_topics;
+            if sub_topics.len() != group.topics.len() {
                 return Ok(GroupJoinResponse {
                     error: group_join_response::ErrorCode::InvalidTopic.into(),
                     ..Default::default()
                 });
             }
-        }
 
-        // 校验订阅一致性
-        if !group.topics.is_empty() {
-            if group.topics.len() != topics.len() {
-                return Ok(GroupJoinResponse {
-                    error: group_join_response::ErrorCode::SubscriptionConflict.into(),
-                    ..Default::default()
-                });
-            }
-            for k in topics {
-                if !group.topics.contains_key(&k) {
+            // 校验订阅一致性
+            for st in sub_topics.iter() {
+                if !group.topics.contains_key(&st.topic) {
                     return Ok(GroupJoinResponse {
-                        error: group_join_response::ErrorCode::SubscriptionConflict.into(),
+                        error: group_join_response::ErrorCode::InvalidTopic.into(),
                         ..Default::default()
                     });
                 }
+                if *group.topics.get(&st.topic).unwrap().value() != st.offset {
+                    return Ok(GroupJoinResponse {
+                        error: group_join_response::ErrorCode::InvalidTopic.into(),
+                        ..Default::default()
+                    });
+                }
+            }
+
+            if opt.auto_commit != group.auto_commit {
+                return Ok(GroupJoinResponse {
+                    error: group_join_response::ErrorCode::AutoCommitConflict.into(),
+                    ..Default::default()
+                });
+            }
+
+            if opt.consumer_slide_window_size != 0
+                && opt.consumer_slide_window_size != group.consumer_slide_window_size
+            {
+                return Ok(GroupJoinResponse {
+                    error: group_join_response::ErrorCode::SlideWindowConflict.into(),
+                    ..Default::default()
+                });
             }
         }
 
@@ -254,11 +307,11 @@ impl ConsumerGroupManager {
         Ok(GroupJoinResponse {
             group_id: cg.id,
             member_id: member_id.to_string(),
-            generation_id: 0,
-            assigned_topics: topics,
+            opt: Some(cg.gen_option()),
             list: tpms,
             status: GroupStatus::Stable.into(),
             error: 0,
+            error_msg: "".to_string(),
         })
     }
 
@@ -359,6 +412,7 @@ impl ConsumerGroupManager {
                         brokercoosvc::SyncConsumerAssignmentsResp {
                             group_meta: Some(GroupMeta {
                                 id: group.id,
+                                consumer_slide_window_size: group.consumer_slide_window_size,
                                 group_topic_metas: vec![GroupTopicMeta {
                                     topic: topic.clone(),
                                     offset: *group.topics.get(topic).unwrap(),

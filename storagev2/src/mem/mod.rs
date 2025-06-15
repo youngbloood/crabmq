@@ -22,7 +22,7 @@ struct PartitionQueue {
 impl PartitionQueue {
     fn gen_segment_offset(&self) -> SegmentOffset {
         SegmentOffset {
-            filename: PathBuf::new(),
+            segment_id: 0,
             offset: self.read_pos.load(Ordering::Relaxed) as _,
         }
     }

@@ -13,23 +13,44 @@ service ClientBrokerService {
 message PublishReq {
   string topic = 1;
   uint32 partition = 2;      // 更合理的数值范围
-  bytes payload = 3;
-  optional string message_id = 4;  // 可选客户端生成ID
+  PublishAckType ack = 3;     // 设置消息的 ack 类型
+  string batch_id = 4; // 批量消息 ID
+  repeated MessageReq messages = 5; // 多条消息
+}
+
+message MessageReq {
+  string message_id = 1; // 客户端生成 ID
+  bytes payload = 2;
+  map<string, string> metadata = 3; // 可选元数据
+}
+
+// ack 类型，有宽松至严格
+enum PublishAckType {
+  None = 0; // 无需ack
+  MasterMem = 1; // master broker 内存收到即确认返回
+  MasterStorage = 2; // master storage 确认刷盘才返回
+  QUORUM = 3; // 多数派确认
 }
 
 message PublishResp {
-  string message_id = 1;    // Broker生成的唯一ID
-  Status status = 2;        // 统一状态返回
+  string batch_id = 1;
+  Status overall_status = 2; // 整体批次状态
+  // 详细消息响应
+  repeated MessageAck message_acks = 3; 
+}
+
+message MessageAck {
+  string message_id = 1;
+  Status status = 2;
 }
 
 // ========== 消费消息协议 ==========
 message SubscribeReq {
   oneof request {
     Subscription sub = 1;       // 初始化订阅
-    Fetch fetch = 2;
-    Ack ack = 3;                // 消息确认
-    Commit commit = 4;
-    Heartbeat heartbeat = 5;    // 新增：心跳包
+    Fetch fetch = 2; // 拉取消息配置
+    Commit commit = 3; // 确认消息已成功处理
+    Heartbeat heartbeat = 4;    // 心跳包，用于broker定期清理资源
   }
 }
 
@@ -44,13 +65,10 @@ message Fetch {
   uint64 max_partition_batch_count = 4;
 }
 
-message Ack {
-  string batch_id = 1;           // 批次ID
-}
-
-
 message Commit {
-  SegmentOffset commit_pos = 1;  // 提交位置
+  string topic = 1;
+  uint32 partition_id = 2;
+  SegmentOffset commit_pos = 3;  // 提交位置
 }
 
 message Heartbeat {
@@ -61,12 +79,12 @@ message Heartbeat {
 message MessageBatch {
   string batch_id = 1;     
   string topic = 2;
-  uint32 partition_id = 3;         
-  repeated Message messages = 4;
+  uint32 partition_id = 3;  
+  repeated MessageResp messages = 4;
 }
 
 message SegmentOffset {
-  string segment = 1;     // 段文件名称
+  uint64 segment_id = 1;     // 段id
   uint64 offset = 2;       // 段内偏移量
 }
 
@@ -74,17 +92,11 @@ message SegmentOffset {
 
 
 // ========== 通用结构 ==========
-message Message {
-  string topic = 1;
-  uint32 partition = 2;
-  string message_id = 3;
-  bytes payload = 4;
-  SegmentOffset offset = 5;         // Broker维护的位移
-  map<string,string> metadata = 6;  // 扩展元数据
-  // 新增流控元数据
-  uint32 credit_remaining = 7;      // Broker端剩余信用额度
-  uint32 credit_consumed = 8;       // 本条消息消耗的信用
-  uint32 recommended_next_bytes = 9; // 建议下次请求字节数
+message MessageResp {
+  optional string message_id = 1; // 客户端生成 ID
+  bytes payload = 2; // 消息体
+  map<string, string> metadata = 3; // 可选元数据
+  SegmentOffset offset = 4;         // Broker维护的位移
 }
 
 enum Status {
@@ -92,4 +104,5 @@ enum Status {
   INVALID_PARTITION = 1;    // 分区不属于当前节点
   STORAGE_ERROR = 2;
   RATE_LIMITED = 3;
+  PARTIAL_FAILURE = 4;
 }

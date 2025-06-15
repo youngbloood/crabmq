@@ -45,7 +45,7 @@ pub trait StorageReaderSession: Send + Sync + 'static {
 
 #[derive(Default, Debug)]
 pub struct SegmentOffset {
-    pub filename: PathBuf,
+    pub segment_id: u64,
     pub offset: u64,
 }
 

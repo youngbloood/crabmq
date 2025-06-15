@@ -13,6 +13,7 @@ grpcx = { version = "0.1.0", path = "../grpcx" }
 indexmap = { version = "2.9.0", features = ["quickcheck"] }
 log = "0.4.27"
 murmur3 = "0.5.2"
+nanoid = "0.4.0"
 tokio = "1.45.1"
 tokio-stream = "0.1.17"
 tokio-util = "0.7.15"
