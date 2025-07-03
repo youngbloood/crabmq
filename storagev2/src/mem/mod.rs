@@ -1,17 +1,12 @@
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::num::NonZero;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::select;
-use tokio::sync::{RwLock, Semaphore};
-use tokio_util::sync::CancellationToken;
-
-use crate::{ReadPosition, SegmentOffset, StorageReader, StorageReaderSession, StorageWriter};
+use tokio::sync::{oneshot, RwLock,};
+use crate::{ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession, StorageResult, StorageWriter};
 
 struct PartitionQueue {
     // sema: Arc<Semaphore>,
@@ -50,21 +45,21 @@ impl MemStorage {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> Result<(Bytes, SegmentOffset)> {
+    ) -> StorageResult<(Bytes, SegmentOffset)> {
         let topic_storage = self
             .topics
             .get(topic)
-            .ok_or_else(|| anyhow!("Topic {} not found", topic))?;
+            .ok_or_else(|| StorageError::TopicNotFound(topic.to_string()))?;
 
         let partition_queue = topic_storage
             .partitions
             .get_mut(&partition_id)
-            .ok_or_else(|| anyhow!("Partition {} not found", partition_id))?;
+            .ok_or_else(|| StorageError::PartitionNotFound(partition_id.to_string()))?;
 
         let msg = {
             let messages_rl = partition_queue.messages.read().await;
             if partition_queue.read_pos.load(Ordering::Relaxed) >= messages_rl.len() {
-                return Err(anyhow!("No more messages in {}/{}", topic, partition_id));
+                return Err(StorageError::NoMoreMessages(format!("No more messages in {}/{}", topic, partition_id)));
             }
             messages_rl[partition_queue.read_pos.load(Ordering::Relaxed)].clone()
         };
@@ -74,16 +69,16 @@ impl MemStorage {
     }
 
     /// 提交消费并移除已处理的消息
-    async fn commit(&self, topic: &str, partition: u32) -> Result<()> {
+    async fn commit(&self, topic: &str, partition: u32) -> StorageResult<()> {
         let topic_storage = self
             .topics
             .get(topic)
-            .ok_or_else(|| anyhow!("Topic {} not found", topic))?;
+            .ok_or_else(|| StorageError::TopicNotFound(topic.to_string()))?;
 
         let partition_queue = topic_storage
             .partitions
             .get(&partition)
-            .ok_or_else(|| anyhow!("Partition {} not found", partition))?;
+            .ok_or_else(|| StorageError::PartitionNotFound(partition.to_string()))?;
 
         {
             let mut messages_wl = partition_queue.messages.write().await;
@@ -103,7 +98,7 @@ impl MemStorage {
 #[async_trait]
 impl StorageWriter for MemStorage {
     /// 存储消息到指定 topic 和 partition
-    async fn store(&self, topic: &str, partition: u32, datas: &[Bytes]) -> Result<()> {
+    async fn store(&self, topic: &str, partition: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
         let topic_storage =
             self.topics
                 .entry(topic.to_string())
@@ -154,7 +149,7 @@ impl StorageReader for MemStorageReader {
         &self,
         _group_id: u32,
         _read_position: Vec<(String, ReadPosition)>,
-    ) -> Result<Box<dyn StorageReaderSession>> {
+    ) -> StorageResult<Box<dyn StorageReaderSession>> {
         if self
             .has_session
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -162,7 +157,7 @@ impl StorageReader for MemStorageReader {
         {
             return Ok(Box::new(MemStorageReaderSession::new(self.storage.clone())));
         }
-        Err(anyhow!("mem storage only open once session"))
+        Err(StorageError::Unknown("mem storage only open once session".to_string()))
     }
 
     /// Close a session by group_id.
@@ -190,7 +185,7 @@ impl StorageReaderSession for MemStorageReaderSession {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> Result<Vec<(Bytes, SegmentOffset)>> {
+    ) -> StorageResult<Vec<(Bytes, SegmentOffset)>> {
         let mut list = vec![];
         for _ in 0..n.into() {
             list.push(self.storage.next(topic, partition_id, n).await?);
@@ -199,7 +194,7 @@ impl StorageReaderSession for MemStorageReaderSession {
     }
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> Result<()> {
+    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> StorageResult<()> {
         self.storage.commit(topic, partition).await
     }
 }

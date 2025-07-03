@@ -4,8 +4,7 @@ mod flusher;
 
 use super::Config as DiskConfig;
 use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
-use crate::StorageWriter;
-use crate::disk::StorageError;
+use crate::{StorageError, StorageResult, StorageWriter};
 use crate::disk::meta::WriterPositionPtr;
 use crate::metrics::StorageWriterMetrics;
 use anyhow::{Result, anyhow};
@@ -20,21 +19,28 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Instant;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
 const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 
+// 定义批次任务结构
+struct WriteTask {
+    topic: String,
+    partition_id: u32,
+    datas: Vec<Bytes>,
+    notify: Option<oneshot::Sender<StorageResult<()>>>,
+}
+
 // Worker 结构
 #[derive(Clone)]
 struct Worker {
-    tx: mpsc::Sender<(String, u32, Vec<Bytes>)>,
+    tx: mpsc::Sender<WriteTask>,
 }
 
 impl Deref for Worker {
-    type Target = mpsc::Sender<(String, u32, Vec<Bytes>)>;
-
+    type Target = mpsc::Sender<WriteTask>;
     fn deref(&self) -> &Self::Target {
         &self.tx
     }
@@ -279,7 +285,7 @@ impl DiskStorageWriter {
 
         for work_id in 0..worker_tasks_num {
             let _stop = dsw.stop.clone();
-            let (tx_worker, mut rx_worker) = mpsc::channel::<(String, u32, Vec<Bytes>)>(100);
+            let (tx_worker, mut rx_worker) = mpsc::channel::<WriteTask>(100);
             let tpm = dsw.topic_partition_manager.clone();
             tokio::spawn(async move {
                 loop {
@@ -290,15 +296,18 @@ impl DiskStorageWriter {
                         _ = _stop.cancelled() => {
                             break;
                         }
-
-                        // TODO: recv_many()
                         res = rx_worker.recv() => {
                             if res.is_none(){
                                 continue;
                             }
-                            let (topic, partition_id, datas) = res.unwrap();
-                            if let Err(e) = tpm.send(&topic, partition_id, &datas).await{
-                                error!("send data to topic[{topic}]-partition[{partition_id}] err: {e:?}");
+                            let task = res.unwrap();
+                            let result = tpm.send(&task.topic, task.partition_id, &task.datas).await;
+                            let send_result = result.as_ref().map(|_| ());
+                            if let Some(notify) = task.notify {
+                                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));   
+                            }
+                            if let Err(e) = &result {
+                                error!("send data to topic[{}]-partition[{}] err: {:?}", task.topic, task.partition_id, e);
                             }
                         }
                     }
@@ -340,13 +349,16 @@ impl DiskStorageWriter {
         self.workers.iter().find(|_| true).unwrap().value().clone()
     }
 
-    async fn write_to_worker(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
-        let worker_id =
-            partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
+    async fn write_to_worker(&self, topic: &str, partition_id: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
+        let worker_id = partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
         let worker = self.get_worker(worker_id as _).await;
-        worker
-            .send((topic.to_string(), partition_id, datas.to_vec()))
-            .await?;
+        let task = WriteTask {
+            topic: topic.to_string(),
+            partition_id,
+            datas: datas.to_vec(),
+            notify,
+        };
+        worker.send(task).await.map_err(|e| StorageError::IoError(e.to_string()))?;
         Ok(())
     }
 
@@ -376,19 +388,24 @@ impl DiskStorageWriter {
 
 #[async_trait::async_trait]
 impl StorageWriter for DiskStorageWriter {
-    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
+    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
         if datas.is_empty() {
-            return Err(anyhow!("can't store empty data"));
+            if let Some(notify) = notify {
+                let _ = notify.send(Err(StorageError::EmptyData));
+            }
+            return Err(StorageError::EmptyData);
         }
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
-            pwb.write_batch(datas).await?;
-            self.topic_partition_manager
-                .update_last_write_time(topic, partition_id);
+            let result = pwb.write_batch(datas).await;
+            self.topic_partition_manager.update_last_write_time(topic, partition_id);
+            let send_result = result.as_ref().map(|_| ());
+            if let Some(notify) = notify {
+                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));       
+            }
+            Ok(())
         } else {
-            self.write_to_worker(topic, partition_id, datas).await?;
+            self.write_to_worker(topic, partition_id, datas, notify).await
         }
-
-        Ok(())
     }
 }
 
@@ -416,8 +433,8 @@ impl DiskStorageWriterWrapper {
 
 #[async_trait::async_trait]
 impl StorageWriter for DiskStorageWriterWrapper {
-    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
-        self.inner.store(topic, partition_id, datas).await
+    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
+        self.inner.store(topic, partition_id, datas, notify).await
     }
 }
 
@@ -513,6 +530,7 @@ mod test {
                             "topic111",
                             11,
                             &[Bytes::from_owner(_datas[idx % _datas.len()].as_bytes())],
+                            None,
                         )
                         .await
                     {

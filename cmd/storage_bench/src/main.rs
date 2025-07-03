@@ -274,7 +274,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         warmup_handles.push(tokio::spawn(async move {
             while warmup_start.elapsed() < warmup_duration {
                 let msg = message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                if let Err(e) = store.store(&topic, partition, &[msg]).await {
+                if let Err(e) = store.store(&topic, partition, &[msg],None).await {
                     eprintln!("store.store err: {e:?}");
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -347,7 +347,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
                     let msg_idx = rand::random::<u32>() as usize % message_pool.len();
                     let msg = message_pool[msg_idx].clone();
-                    if let Err(e) = store.store(&topic, partition, &[msg]).await {
+                    if let Err(e) = store.store(&topic, partition, &[msg],None).await {
                         eprintln!("store.store err: {e:?}");
                         break;
                     }

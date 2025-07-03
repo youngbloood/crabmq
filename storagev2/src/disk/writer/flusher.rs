@@ -1,7 +1,7 @@
 use super::buffer::PartitionWriterBuffer;
 use crate::{
-    disk::{StorageError, meta::WriterPositionPtr},
-    metrics::StorageWriterMetrics,
+    disk::meta::WriterPositionPtr,
+    metrics::StorageWriterMetrics, StorageError,
 };
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;

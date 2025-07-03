@@ -1,9 +1,9 @@
 use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
 use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
-use crate::{ReadPosition, SegmentOffset};
-use crate::{StorageReader, StorageReaderSession, disk::StorageError};
-use anyhow::{Result, anyhow};
+use crate::{ReadPosition, SegmentOffset, StorageError, StorageResult};
+use crate::{StorageReader, StorageReaderSession};
+use anyhow::{Result};
 use bytes::Bytes;
 use common::check_exist;
 use dashmap::DashMap;
@@ -37,7 +37,7 @@ impl StorageReader for DiskStorageReader {
         &self,
         group_id: u32,
         read_position: Vec<(String, ReadPosition)>,
-    ) -> Result<Box<dyn StorageReaderSession>> {
+    ) -> StorageResult<Box<dyn StorageReaderSession>> {
         let sess = self
             .sessions
             .entry(group_id)
@@ -98,7 +98,7 @@ impl StorageReaderSession for DiskStorageReaderSession {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> Result<Vec<(Bytes, SegmentOffset)>> {
+    ) -> StorageResult<Vec<(Bytes, SegmentOffset)>> {
         if self
             .readers
             .get(&(topic.to_string(), partition_id))
@@ -106,9 +106,9 @@ impl StorageReaderSession for DiskStorageReaderSession {
         {
             let partition_dir = self.dir.join(topic).join(partition_id.to_string());
             if !check_exist(&partition_dir) {
-                return Err(anyhow!(
-                    StorageError::PathNotExist(format!("{:?}", partition_dir)).to_string()
-                ));
+                return Err(
+                    StorageError::PathNotExist(format!("{:?}", partition_dir))
+                );
             }
 
             let mut partition =
@@ -136,7 +136,7 @@ impl StorageReaderSession for DiskStorageReaderSession {
     }
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> Result<()> {
+    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> StorageResult<()> {
         // TODO:
         Ok(())
     }
@@ -173,18 +173,18 @@ impl DiskStorageReaderSessionPartition {
         }
     }
 
-    async fn load_ptr(&mut self, read_position: &ReadPosition) -> Result<()> {
+    async fn load_ptr(&mut self, read_position: &ReadPosition) -> StorageResult<()> {
         if check_exist(&self.reader_ptr_filename) {
             self.reader_ptr = Arc::new(RwLock::new(
-                ReaderPositionPtr::load(&self.reader_ptr_filename).await?,
+                ReaderPositionPtr::load(&self.reader_ptr_filename).await.map_err(|e| StorageError::IoError(e.to_string()))?,
             ));
         } else if let Some(parent) = self.reader_ptr_filename.parent() {
             if read_position == &ReadPosition::Latest {
                 let writer_ptr_filename = parent.join(WRITER_PTR_FILENAME);
 
-                let data = tokio::fs::read_to_string(writer_ptr_filename).await?;
+                let data = tokio::fs::read_to_string(writer_ptr_filename).await.map_err(|e| StorageError::IoError(e.to_string()))?;
                 if !data.is_empty() {
-                    let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)?;
+                    let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data).map_err(|e| StorageError::SerializeError(e.to_string()))?;
                     let mut wl = self.reader_ptr.write().await;
                     wl.filename = sp.filename;
                     wl.offset = sp.offset;
@@ -194,7 +194,7 @@ impl DiskStorageReaderSessionPartition {
 
         if check_exist(&self.commit_ptr_filename) {
             self.commit_ptr = Arc::new(RwLock::new(
-                ReaderPositionPtr::load(&self.commit_ptr_filename).await?,
+                ReaderPositionPtr::load(&self.commit_ptr_filename).await.map_err(|e| StorageError::IoError(e.to_string()))?,
             ));
         } else if read_position == &ReadPosition::Latest {
             let (filename, offset) = {
@@ -237,7 +237,7 @@ impl DiskStorageReaderSessionPartition {
 
     /// returns:
     /// 消息体，该消息的 SegmentOffset 信息， 该消息是否是该文件的最后一个消息
-    async fn read(&self) -> Result<(Bytes, SegmentOffset, bool)> {
+    async fn read(&self) -> StorageResult<(Bytes, SegmentOffset, bool)> {
         let (filename, read_offset) = {
             let rl = self.reader_ptr.read().await;
             (rl.filename.clone(), rl.offset)
@@ -256,7 +256,7 @@ impl DiskStorageReaderSessionPartition {
             }
             Err(e) => {
                 error!("failed to read header length: {:?}", e);
-                return Err(anyhow!(e));
+                return Err(StorageError::IoError(e.to_string()));
             }
         }
 
@@ -278,7 +278,7 @@ impl DiskStorageReaderSessionPartition {
             }
             Err(e) => {
                 error!("failed to read message content: {:?}", e);
-                return Err(anyhow!(e));
+                return Err(StorageError::IoError(e.to_string()));
             }
         }
 
@@ -294,7 +294,7 @@ impl DiskStorageReaderSessionPartition {
         Ok((Bytes::from(buf), self.get_segment_offset().await, false))
     }
 
-    async fn next(&self) -> Result<(Bytes, SegmentOffset, bool)> {
+    async fn next(&self) -> StorageResult<(Bytes, SegmentOffset, bool)> {
         match self.read().await {
             Ok(data) => {
                 if !data.0.is_empty() {

@@ -301,7 +301,7 @@ where
         // 存储消息
         if let Err(e) = self
             .storage_writer
-            .store(&req.topic, req.partition, &msgs)
+            .store(&req.topic, req.partition, &msgs,None)
             .await
             .map_err(|e| {
                 error!(

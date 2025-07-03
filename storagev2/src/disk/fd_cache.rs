@@ -1,3 +1,5 @@
+use crate::{StorageError, StorageResult};
+
 use super::prealloc::preallocate;
 use anyhow::Result;
 use common::util::{check_and_create_dir, check_exist};
@@ -47,7 +49,7 @@ impl FdReaderCacheAync {
         &self,
         key: &Path,
         read_offset: u64,
-    ) -> Result<FileHandlerReaderAsync> {
+    ) -> StorageResult<FileHandlerReaderAsync> {
         // 第一次检查缓存
         if let Some(handler) = self.get(key).await {
             return Ok(handler);
@@ -57,9 +59,10 @@ impl FdReaderCacheAync {
         let mut read_fd = OpenOptions::new()
             .read(true)
             .open(key)
-            .map_err(|e| anyhow::anyhow!("Failed to open read file: {}", e))?;
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
         if read_offset != 0 {
-            read_fd.seek(SeekFrom::Start(read_offset))?;
+            read_fd.seek(SeekFrom::Start(read_offset))
+                .map_err(|e| StorageError::IoError(e.to_string()))?;
         }
         let async_read = Arc::new(RwLock::new(AsyncFile::from_std(read_fd)));
         let handler = FileHandlerReaderAsync { inner: async_read };
@@ -214,7 +217,7 @@ mod test {
         let fd_cache = FdReaderCacheAync::new(4);
         for i in 0..10 {
             let p = format!("../target/debug/{}", i);
-            fd_cache.get_or_create(Path::new(&p), 0).await?;
+            fd_cache.get_or_create(Path::new(&p), 0).await.map_err(|e| anyhow::anyhow!(e.to_string()))?;        
         }
         Ok(())
     }
