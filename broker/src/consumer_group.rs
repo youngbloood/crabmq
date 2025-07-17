@@ -1,9 +1,8 @@
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use grpcx::brokercoosvc::{self, SyncConsumerAssignmentsResp};
-use grpcx::clientbrokersvc::{Commit, Fetch, MessageBatch, MessageReq, MessageResp, SegmentOffset};
+use grpcx::clientbrokersvc::{Commit, Fetch, MessageBatch, MessageResp, SegmentOffset};
 use grpcx::topic_meta::TopicPartitionDetail;
 use log::{error, warn};
 use std::num::NonZero;
@@ -11,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use storagev2::{ReadPosition, SegmentOffset as StorageSegmentOffset};
+use storagev2::{MessagePayload, ReadPosition, SegmentOffset as StorageSegmentOffset};
 use storagev2::{StorageReader, StorageReaderSession};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time;
@@ -183,7 +182,8 @@ where
         let srs = self
             .storage_reader
             .new_session(*group_id, group_meta.get_topic_read_positions())
-            .await?;
+            .await
+            .map_err(|e| anyhow!("Failed to new session: {:?}", e))?;
 
         let ss = ConsumerSession::new(
             member_id,
@@ -242,7 +242,7 @@ pub struct ConsumerSession {
     window: Arc<Semaphore>,
     storage: Arc<Box<dyn StorageReaderSession>>,
 
-    buf: Arc<SegQueue<(Bytes, StorageSegmentOffset)>>,
+    buf: Arc<SegQueue<(MessagePayload, u64, StorageSegmentOffset)>>,
     slide_window: SlideWindow,
 }
 
@@ -369,15 +369,15 @@ impl ConsumerSession {
             messages: Vec::new(),
         };
 
-        let append_msg = |batch: &mut MessageBatch, msg: (Bytes, StorageSegmentOffset)| {
-            let mr: MessageReq = bincode::decode_from_slice(&msg.0, bincode::config::standard())
-                .unwrap()
-                .0;
+        let append_msg = |batch: &mut MessageBatch, msg: (MessagePayload, StorageSegmentOffset)| {
+            // let mr: MessageReq = bincode::decode_from_slice(&msg.0, bincode::config::standard())
+            //     .unwrap()
+            //     .0;
 
             batch.messages.push(MessageResp {
-                message_id: std::mem::take(&mut Some(mr.message_id)),
-                payload: mr.payload,
-                metadata: mr.metadata,
+                message_id: std::mem::take(&mut Some(msg.0.msg_id)),
+                payload: msg.0.payload,
+                metadata: msg.0.metadata,
                 offset: Some(SegmentOffset {
                     segment_id: msg.1.segment_id,
                     offset: msg.1.offset,
@@ -395,13 +395,13 @@ impl ConsumerSession {
                 let _ = tx.send(Ok(message_batch)).await;
                 return;
             }
-            let msgs_size = msg.0.len() as u64;
+            let msgs_size = msg.1;
             if msgs_size > left_bytes {
                 let _ = tx.send(Ok(message_batch)).await;
                 return;
             }
             left_bytes -= msgs_size;
-            append_msg(&mut message_batch, msg);
+            append_msg(&mut message_batch, (msg.0, msg.2));
             message_count += 1;
         }
 
@@ -420,14 +420,14 @@ impl ConsumerSession {
                             self.buf.push(msg);
                             continue;
                         }
-                        let msgs_size = msg.0.len() as u64;
+                        let msgs_size = msg.1;
                         if msgs_size > left_bytes {
                             has_full = true;
                             self.buf.push(msg);
                             continue;
                         }
                         left_bytes -= msgs_size;
-                        append_msg(&mut message_batch, msg);
+                        append_msg(&mut message_batch, (msg.0, msg.2));
                     }
                     // 跳出外层循环
                     if has_full {

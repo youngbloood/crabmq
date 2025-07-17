@@ -4,12 +4,12 @@ mod flusher;
 
 use super::Config as DiskConfig;
 use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
-use crate::{StorageError, StorageResult, StorageWriter};
+use crate::disk::PartitionIndexManager;
 use crate::disk::meta::WriterPositionPtr;
 use crate::metrics::StorageWriterMetrics;
+use crate::{MessagePayload, StorageError, StorageResult, StorageWriter};
 use anyhow::{Result, anyhow};
 use buffer::PartitionWriterBuffer;
-use bytes::Bytes;
 use dashmap::DashMap;
 use flusher::Flusher;
 use log::{error, info};
@@ -17,7 +17,7 @@ use murmur3::murmur3_32;
 use std::io::Cursor;
 use std::ops::Deref;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::{select, time};
@@ -29,7 +29,7 @@ const READER_SESSION_INTERVAL: u64 = 400; // 单位：ms
 struct WriteTask {
     topic: String,
     partition_id: u32,
-    datas: Vec<Bytes>,
+    payloads: Vec<MessagePayload>,
     notify: Option<oneshot::Sender<StorageResult<()>>>,
 }
 
@@ -91,6 +91,7 @@ impl TopicPartitionManager {
         let cleanup_interval = Duration::from_secs(self.conf.partition_cleanup_interval);
         let inactive_threshold = Duration::from_secs(self.conf.partition_inactive_threshold);
         let stop = self.stop.clone();
+        let partition_index_manager = self.flusher.partition_index_manager.clone();
 
         tokio::spawn(async move {
             let mut interval = time::interval(cleanup_interval);
@@ -121,6 +122,9 @@ impl TopicPartitionManager {
                             // 双重检查：在持有锁后再次检查活跃性
                             if let Some(last_write) = last_write_times.get(&(topic.clone(), pid)) {
                                 if Instant::now().duration_since(*last_write) > inactive_threshold {
+                                    // 移除其index的db
+                                    partition_index_manager.remove(&topic,pid);
+
                                     // 从各组件中移除分区
                                     let key = (topic.clone(), pid);
 
@@ -151,12 +155,12 @@ impl TopicPartitionManager {
     }
 
     #[inline]
-    async fn send(&self, topic: &str, partition_id: u32, datas: &[Bytes]) -> Result<()> {
+    async fn send(&self, topic: &str, partition_id: u32, batch: Vec<MessagePayload>) -> Result<()> {
         self.update_last_write_time(topic, partition_id);
         let pwb = self
             .get_or_create_topic_partition(topic, partition_id)
             .await?;
-        pwb.write_batch(datas).await?;
+        pwb.write_batch(batch).await?;
         Ok(())
     }
 
@@ -232,34 +236,31 @@ impl TopicPartitionManager {
 pub struct DiskStorageWriter {
     conf: Arc<DiskConfig>,
     topic_partition_manager: TopicPartitionManager,
-
     flusher: Arc<Flusher>,
     // NOTE: 会导致所有分区刷盘，慎用
     _flush_sender: mpsc::Sender<()>,
 
     workers: Arc<DashMap<usize, Worker>>, // worker 池
-    worker_locks: Arc<DashMap<usize, Mutex<()>>>,
 
     stop: CancellationToken,
 }
 
-impl Drop for DiskStorageWriter {
-    fn drop(&mut self) {
-        self.stop.cancel();
-    }
-}
-
 impl DiskStorageWriter {
-    pub fn new(cfg: DiskConfig) -> Result<Self> {
+    fn new(cfg: DiskConfig, stop: CancellationToken) -> Result<Self> {
         cfg.validate()?;
         let cfg = Arc::new(cfg);
 
-        let stop = CancellationToken::new();
+        let partition_index_manager = PartitionIndexManager::new(
+            cfg.storage_dir.clone(),
+            cfg.partition_index_num_per_topic as _,
+        );
         // 启动刷盘守护任务
         let flusher = Arc::new(Flusher::new(
             stop.clone(),
+            partition_index_manager,
             cfg.flusher_partition_writer_buffer_tasks_num,
             cfg.flusher_partition_writer_ptr_tasks_num,
+            cfg.flusher_partition_meta_tasks_num,
             Duration::from_millis(cfg.flusher_period),
             cfg.with_metrics,
         ));
@@ -267,7 +268,7 @@ impl DiskStorageWriter {
         let (flush_sender, flusher_signal) = mpsc::channel(1);
         tokio::spawn(async move { _flusher.run(flusher_signal).await });
 
-        let worker_tasks_num = cfg.worker_tasks_num;
+        let worker_tasks_num = cfg.writer_worker_tasks_num;
         let dsw = Self {
             topic_partition_manager: TopicPartitionManager::new(
                 Arc::new(cfg.storage_dir.clone()),
@@ -279,7 +280,6 @@ impl DiskStorageWriter {
             stop,
             _flush_sender: flush_sender,
             workers: Arc::new(DashMap::new()),
-            worker_locks: Arc::default(),
             conf: cfg,
         };
 
@@ -301,10 +301,10 @@ impl DiskStorageWriter {
                                 continue;
                             }
                             let task = res.unwrap();
-                            let result = tpm.send(&task.topic, task.partition_id, &task.datas).await;
+                            let result = tpm.send(&task.topic, task.partition_id, task.payloads).await;
                             let send_result = result.as_ref().map(|_| ());
                             if let Some(notify) = task.notify {
-                                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));   
+                                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));
                             }
                             if let Err(e) = &result {
                                 error!("send data to topic[{}]-partition[{}] err: {:?}", task.topic, task.partition_id, e);
@@ -349,16 +349,26 @@ impl DiskStorageWriter {
         self.workers.iter().find(|_| true).unwrap().value().clone()
     }
 
-    async fn write_to_worker(&self, topic: &str, partition_id: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
-        let worker_id = partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
+    async fn write_to_worker(
+        &self,
+        topic: &str,
+        partition_id: u32,
+        datas: Vec<MessagePayload>,
+        notify: Option<oneshot::Sender<StorageResult<()>>>,
+    ) -> StorageResult<()> {
+        let worker_id =
+            partition_to_worker(topic, partition_id, self.workers.len() as _).unwrap_or(0);
         let worker = self.get_worker(worker_id as _).await;
         let task = WriteTask {
             topic: topic.to_string(),
             partition_id,
-            datas: datas.to_vec(),
+            payloads: datas,
             notify,
         };
-        worker.send(task).await.map_err(|e| StorageError::IoError(e.to_string()))?;
+        worker
+            .send(task)
+            .await
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
         Ok(())
     }
 
@@ -388,23 +398,47 @@ impl DiskStorageWriter {
 
 #[async_trait::async_trait]
 impl StorageWriter for DiskStorageWriter {
-    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
-        if datas.is_empty() {
+    async fn store(
+        &self,
+        topic: &str,
+        partition_id: u32,
+        mut payloads: Vec<MessagePayload>,
+        notify: Option<oneshot::Sender<StorageResult<()>>>,
+    ) -> StorageResult<()> {
+        if payloads.is_empty() {
             if let Some(notify) = notify {
                 let _ = notify.send(Err(StorageError::EmptyData));
             }
             return Err(StorageError::EmptyData);
         }
+
+        for msg in &mut payloads {
+            if msg.msg_id.is_empty() {
+                return Err(StorageError::Unknown("msg_id 不能为空".to_string()));
+            }
+            if msg.payload.is_empty() {
+                return Err(StorageError::EmptyData);
+            }
+            if msg.timestamp == 0 {
+                msg.timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+            }
+        }
+
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
-            let result = pwb.write_batch(datas).await;
-            self.topic_partition_manager.update_last_write_time(topic, partition_id);
+            let result = pwb.write_batch(payloads).await;
+            self.topic_partition_manager
+                .update_last_write_time(topic, partition_id);
             let send_result = result.as_ref().map(|_| ());
             if let Some(notify) = notify {
-                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));       
+                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));
             }
             Ok(())
         } else {
-            self.write_to_worker(topic, partition_id, datas, notify).await
+            self.write_to_worker(topic, partition_id, payloads, notify)
+                .await
         }
     }
 }
@@ -412,6 +446,15 @@ impl StorageWriter for DiskStorageWriter {
 #[derive(Clone)]
 pub struct DiskStorageWriterWrapper {
     inner: Arc<DiskStorageWriter>,
+    stop: CancellationToken,
+}
+
+impl Drop for DiskStorageWriterWrapper {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) == 1 {
+            self.stop.cancel();
+        }
+    }
 }
 
 impl Deref for DiskStorageWriterWrapper {
@@ -424,17 +467,27 @@ impl Deref for DiskStorageWriterWrapper {
 
 impl DiskStorageWriterWrapper {
     pub fn new(cfg: DiskConfig) -> Result<Self> {
-        let dsw = DiskStorageWriter::new(cfg)?;
+        let stop = CancellationToken::new();
+        let dsw = DiskStorageWriter::new(cfg, stop.clone())?;
         Ok(Self {
             inner: Arc::new(dsw),
+            stop,
         })
     }
 }
 
 #[async_trait::async_trait]
 impl StorageWriter for DiskStorageWriterWrapper {
-    async fn store(&self, topic: &str, partition_id: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
-        self.inner.store(topic, partition_id, datas, notify).await
+    async fn store(
+        &self,
+        topic: &str,
+        partition_id: u32,
+        payloads: Vec<MessagePayload>,
+        notify: Option<oneshot::Sender<StorageResult<()>>>,
+    ) -> StorageResult<()> {
+        self.inner
+            .store(topic, partition_id, payloads, notify)
+            .await
     }
 }
 
@@ -457,15 +510,18 @@ fn partition_to_worker(topic: &str, partition_id: u32, worker_num: u32) -> Resul
 #[cfg(test)]
 mod test {
     use super::{DiskConfig, DiskStorageWriter};
-    use crate::{StorageWriter as _, disk::default_config};
+    use crate::{
+        MessagePayload, StorageWriter as _,
+        disk::{DiskStorageWriterWrapper, default_config},
+    };
     use anyhow::Result;
     use bytes::Bytes;
     use futures::future::join_all;
-    use std::{path::PathBuf, time::Duration};
+    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
     use tokio::time;
 
-    fn new_disk_storage() -> DiskStorageWriter {
-        DiskStorageWriter::new(DiskConfig {
+    fn new_disk_storage() -> DiskStorageWriterWrapper {
+        DiskStorageWriterWrapper::new(DiskConfig {
             storage_dir: PathBuf::from("./data"),
             flusher_period: 50,
             flusher_factor: 1024 * 1024 * 1, // 1M
@@ -476,10 +532,13 @@ mod test {
             create_next_record_file_threshold: 80,
             flusher_partition_writer_buffer_tasks_num: 10,
             flusher_partition_writer_ptr_tasks_num: 10,
+            flusher_partition_meta_tasks_num: 10,
             partition_writer_buffer_size: 100,
+            batch_pop_size_from_buffer: 36,
+            partition_index_num_per_topic: 1000,
             with_metrics: false,
             partition_writer_prealloc: false,
-            worker_tasks_num: 100,
+            writer_worker_tasks_num: 100,
             partition_cleanup_interval: 150,
             partition_inactive_threshold: 300,
         })
@@ -488,7 +547,7 @@ mod test {
 
     #[tokio::test]
     async fn storage_store_multi() -> Result<()> {
-        let store = DiskStorageWriter::new(default_config()).expect("error config");
+        let store = DiskStorageWriterWrapper::new(default_config()).expect("error config");
         let datas: Vec<&'static str> = vec![
             "Apple",
             "Banana",
@@ -525,15 +584,14 @@ mod test {
             handles.push(tokio::spawn(async move {
                 for _ in 0..100000 {
                     let idx = rand::random::<u32>() as usize;
-                    if let Err(e) = _store
-                        .store(
-                            "topic111",
-                            11,
-                            &[Bytes::from_owner(_datas[idx % _datas.len()].as_bytes())],
-                            None,
-                        )
-                        .await
-                    {
+                    let s = _datas[idx % _datas.len()];
+                    let msg = MessagePayload {
+                        msg_id: format!("id_{}_{}", idx, s),
+                        payload: s.as_bytes().to_vec(),
+                        timestamp: 0,
+                        metadata: HashMap::new(),
+                    };
+                    if let Err(e) = _store.store("topic111", 11, vec![msg], None).await {
                         eprintln!("e = {e:?}");
                     }
                 }

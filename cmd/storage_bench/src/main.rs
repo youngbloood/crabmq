@@ -1,12 +1,13 @@
 use anyhow::Result;
 use bytes::Bytes;
 use governor::{Quota, RateLimiter};
+use nanoid::nanoid;
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
 use storagev2::{
-    StorageWriter as _,
-    disk::{DiskStorageWriter, default_config},
+    MessagePayload, StorageWriter as _,
+    disk::{DiskStorageWriter, DiskStorageWriterWrapper, default_config},
 };
-use tokio::sync::Barrier;
+use tokio::sync::{Barrier, oneshot};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,53 +71,53 @@ async fn main() -> Result<()> {
         //     max_rate_mbps: 1500,
         // },
         // //
-        // // 10k message_size
-        // TestArgs {
-        //     partition_count: 10000,
-        //     message_size: 10 * 1024,
-        //     warmup_duration: Duration::from_secs(20),
-        //     current_rate: 450,
-        //     rate_step: 150,
-        //     test_duration: Duration::from_secs(20),
-        //     max_rate_mbps: 1500,
-        // },
-        // TestArgs {
-        //     partition_count: 5000,
-        //     message_size: 10 * 1024,
-        //     warmup_duration: Duration::from_secs(20),
-        //     current_rate: 450,
-        //     rate_step: 150,
-        //     test_duration: Duration::from_secs(20),
-        //     max_rate_mbps: 1500,
-        // },
-        // TestArgs {
-        //     partition_count: 2000,
-        //     message_size: 10 * 1024,
-        //     warmup_duration: Duration::from_secs(15),
-        //     current_rate: 450,
-        //     rate_step: 150,
-        //     test_duration: Duration::from_secs(15),
-        //     max_rate_mbps: 1500,
-        // },
-        // TestArgs {
-        //     partition_count: 1000,
-        //     message_size: 10 * 1024,
-        //     warmup_duration: Duration::from_secs(15),
-        //     current_rate: 450,
-        //     rate_step: 150,
-        //     test_duration: Duration::from_secs(15),
-        //     max_rate_mbps: 1500,
-        // },
-        // TestArgs {
-        //     partition_count: 500,
-        //     message_size: 10 * 1024,
-        //     warmup_duration: Duration::from_secs(15),
-        //     current_rate: 450,
-        //     rate_step: 150,
-        //     test_duration: Duration::from_secs(15),
-        //     max_rate_mbps: 1500,
-        // },
-        // //
+        // 10k message_size
+        TestArgs {
+            partition_count: 10000,
+            message_size: 10 * 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 450,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 5000,
+            message_size: 10 * 1024,
+            warmup_duration: Duration::from_secs(20),
+            current_rate: 450,
+            rate_step: 150,
+            test_duration: Duration::from_secs(20),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 2000,
+            message_size: 10 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 450,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 1000,
+            message_size: 10 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 450,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        TestArgs {
+            partition_count: 500,
+            message_size: 10 * 1024,
+            warmup_duration: Duration::from_secs(15),
+            current_rate: 450,
+            rate_step: 150,
+            test_duration: Duration::from_secs(15),
+            max_rate_mbps: 1500,
+        },
+        //
         // // 100k message_size
         // TestArgs {
         //     partition_count: 10000,
@@ -248,7 +249,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     config.partition_writer_buffer_size = 10000; // 大缓冲区防止阻塞
     config.with_metrics = true;
 
-    let store = Arc::new(DiskStorageWriter::new(config)?);
+    let store = DiskStorageWriterWrapper::new(config)?;
     // 测试参数
     let topic = format!("flush_speed_test_{}", partition_count);
 
@@ -274,8 +275,21 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         warmup_handles.push(tokio::spawn(async move {
             while warmup_start.elapsed() < warmup_duration {
                 let msg = message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                if let Err(e) = store.store(&topic, partition, &[msg],None).await {
+                let payload = MessagePayload {
+                    msg_id: nanoid!(),
+                    timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                    metadata: Default::default(),
+                    payload: msg.to_vec(),
+                };
+                let (notify_tx, notify_rx) = oneshot::channel();
+                if let Err(e) = store
+                    .store(&topic, partition, vec![payload], Some(notify_tx))
+                    .await
+                {
                     eprintln!("store.store err: {e:?}");
+                }
+                if let Err(e) = notify_rx.await {
+                    eprintln!("store err: {e:?}");
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -286,7 +300,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     println!("[预热] 完成");
 
     // 获取初始刷盘指标 - 确保分区已初始化
-    println!("等待分区初始化...");
+    println!("进入压测阶段...");
     tokio::time::sleep(Duration::from_secs(5)).await;
     // 速率测试控制
     let mut results = vec![];
@@ -347,7 +361,13 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
 
                     let msg_idx = rand::random::<u32>() as usize % message_pool.len();
                     let msg = message_pool[msg_idx].clone();
-                    if let Err(e) = store.store(&topic, partition, &[msg],None).await {
+                    let payload = MessagePayload {
+                        msg_id: nanoid!(),
+                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                        metadata: Default::default(),
+                        payload: msg.to_vec(),
+                    };
+                    if let Err(e) = store.store(&topic, partition, vec![payload], None).await {
                         eprintln!("store.store err: {e:?}");
                         break;
                     }
@@ -362,15 +382,12 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         barrier.wait().await;
         // 等待测试结束
         futures::future::join_all(send_handles).await;
+
+        // 发送数据耗时
         let elapsed = start_time.elapsed();
 
-        // 获取测试结束后的刷盘指标
-        // println!("等待刷盘完成...");
-        // tokio::time::sleep(Duration::from_secs(5)).await; // 确保所有刷盘完成
-        // 手动触发一次完整刷盘
-
+        // 发送数据完毕后，直接开始统计
         let end_metrics = store.get_metrics();
-
         // 计算总指标 - 使用分区路径匹配确保正确
         let sent_count = sent_counter.load(Ordering::Relaxed);
         let sent_bytes = sent_count * message_size as u64;
@@ -450,6 +467,7 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     }
 
     println!("\n清除测试数据...");
+    drop(store);
     // 清理测试数据
     tokio::fs::remove_dir_all(storage_dir).await?;
 

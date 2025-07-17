@@ -1,10 +1,13 @@
-use crate::disk::{
-    Config as DiskConfig,
-    fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
-    meta::{WriterPositionPtr, gen_record_filename},
-    writer::flusher::Flusher,
+use crate::{
+    MessageMeta, MessagePayload,
+    disk::{
+        Config as DiskConfig,
+        fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
+        meta::{WriterPositionPtr, gen_record_filename},
+        writer::flusher::Flusher,
+    },
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use common::dir_recursive;
 use crossbeam::queue::SegQueue;
@@ -21,12 +24,11 @@ use std::{
 use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 // use tokio_uring::fs::File as UringFile;
 
-const BATCH_POP_SIZE: usize = 36;
-
 struct SwitchQueue {
     switcher: Arc<AtomicBool>,
-    queue_a: Arc<SegQueue<(Bytes, Bytes)>>,
-    queue_b: Arc<SegQueue<(Bytes, Bytes)>>,
+    // Header_Length, Payload, MessageMeta
+    queue_a: Arc<SegQueue<(Bytes, Bytes, MessageMeta)>>,
+    queue_b: Arc<SegQueue<(Bytes, Bytes, MessageMeta)>>,
 }
 
 impl SwitchQueue {
@@ -43,7 +45,7 @@ impl SwitchQueue {
     }
 
     #[inline(always)]
-    fn push(&self, data: (Bytes, Bytes)) {
+    fn push(&self, data: (Bytes, Bytes, MessageMeta)) {
         let current = self.switcher.load(Self::RELAXED_ORDER);
         let queue = if current {
             &self.queue_b
@@ -54,7 +56,7 @@ impl SwitchQueue {
     }
 
     // 高性能批量弹出
-    fn pop_batch(&self, batch_size: usize) -> Vec<(Bytes, Bytes)> {
+    fn pop_batch(&self, batch_size: usize) -> Vec<(Bytes, Bytes, MessageMeta)> {
         let mut results = Vec::with_capacity(batch_size);
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
 
@@ -97,7 +99,7 @@ impl SwitchQueue {
     }
 
     // 弹出全部元素
-    fn pop_all(&self) -> Vec<(Bytes, Bytes)> {
+    fn pop_all(&self) -> Vec<(Bytes, Bytes, MessageMeta)> {
         let mut results = Vec::new();
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
 
@@ -135,10 +137,12 @@ impl SwitchQueue {
 #[derive(Clone)]
 pub(crate) struct PartitionWriterBuffer {
     pub(crate) dir: PathBuf,
+    pub(crate) topic: String,
+    pub(crate) partition_id: u32,
     conf: Arc<DiskConfig>,
 
     // 当前写的文件因子：用于构成写入的目标文件
-    current_factor: Arc<AtomicU64>,
+    current_segment: Arc<AtomicU64>,
 
     #[cfg(not(target_os = "linux"))]
     pub(crate) current_fd: FileHandlerWriterAsync,
@@ -147,7 +151,7 @@ pub(crate) struct PartitionWriterBuffer {
     pub(crate) current_fd: Arc<RwLock<UringFile>>,
 
     // 先将数据存入内存缓冲区
-    pub(crate) buffer: Arc<SwitchQueue>,
+    pub(crate) queue: Arc<SwitchQueue>,
 
     // 写相关的位置指针
     pub(crate) write_ptr: Arc<WriterPositionPtr>,
@@ -165,6 +169,12 @@ impl PartitionWriterBuffer {
         write_ptr: Arc<WriterPositionPtr>,
         flusher: Arc<Flusher>,
     ) -> Result<Self> {
+        let tp = parse_topic_partition_from_dir(&dir);
+        if tp.is_none() {
+            return Err(anyhow!("not found topic and partition_id in dir"));
+        }
+        let tp = tp.unwrap();
+
         let record_files = dir_recursive(dir.clone(), &[OsString::from("record")])?;
         // 只获取最大编号的文件
         let max_file = record_files
@@ -203,18 +213,16 @@ impl PartitionWriterBuffer {
 
         Ok(Self {
             dir: dir.clone(),
-            current_factor: Arc::new(factor),
+            topic: tp.0,
+            partition_id: tp.1,
+            current_segment: Arc::new(factor),
             #[cfg(not(target_os = "linux"))]
             current_fd,
             conf: conf.clone(),
-            buffer: Arc::new(SwitchQueue::new()),
+            queue: Arc::new(SwitchQueue::new()),
             write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
-            // metrics: Arc::new(BufferFlushMetrics {
-            //     min_start_timestamp: Arc::new(AtomicU64::new(u64::MAX)),
-            //     ..Default::default()
-            // }),
         })
     }
 
@@ -249,9 +257,9 @@ impl PartitionWriterBuffer {
     }
 
     async fn rotate_file(&self) {
-        self.current_factor.fetch_add(1, Ordering::Relaxed);
+        self.current_segment.fetch_add(1, Ordering::Relaxed);
         let next_filename = self.dir.join(gen_record_filename(
-            self.current_factor.load(Ordering::Relaxed),
+            self.current_segment.load(Ordering::Relaxed),
         ));
 
         let max_size_per_file = if self.conf.partition_writer_prealloc {
@@ -279,61 +287,79 @@ impl PartitionWriterBuffer {
     #[inline]
     async fn get_next_filename(&self) -> PathBuf {
         self.dir.join(gen_record_filename(
-            self.current_factor.load(Ordering::Relaxed) + 1,
+            self.current_segment.load(Ordering::Relaxed) + 1,
         ))
     }
 
     // 写入到 buffer 中
-    pub(crate) async fn write_batch(&self, batch: &[Bytes]) -> Result<u64> {
+    pub(crate) async fn write_batch(&self, batch: Vec<MessagePayload>) -> Result<u64> {
         if batch.is_empty() {
             return Ok(0);
         }
-        self.update_partition_state(batch.len());
-        let count = batch.len();
-        // 要加入每个消息的 8 bytes 长度头
-        let total_size: u64 = batch.iter().map(|v| v.len() as u64 + 8).sum();
-        // 检查是否需要滚动文件
-        let should_rotate = {
-            self.write_ptr.get_offset() + total_size > self.conf.max_size_per_file
-                || self.write_ptr.get_current_count() >= self.conf.max_msg_num_per_file
-        };
-        if should_rotate {
-            if self.conf.with_metrics {
-                self.flusher.metrics.update_min_start_timestamp();
-            }
-            let flush_bytes = self.flush(true).await?;
-            if self.conf.with_metrics {
-                self.flusher.metrics.inc_flush_count(1);
-                self.flusher.metrics.inc_flush_bytes(flush_bytes);
-                self.flusher.metrics.update_max_end_timestamp();
-            }
-            self.rotate_file().await;
-        }
+        let batch_len = batch.len();
+        self.update_partition_state(batch_len);
 
+        let mut now_total = self.write_ptr.get_offset();
+        let mut now_batch_total_size = 0;
+        let mut now_count = self.write_ptr.get_current_count();
         for data in batch {
+            let bts = data.to_bytes()?;
+            let should_rotate = {
+                now_total + (bts.len() as u64) > self.conf.max_size_per_file
+                    || now_count + 1 >= self.conf.max_msg_num_per_file
+            };
+            if should_rotate {
+                if self.conf.with_metrics {
+                    self.flusher.metrics.update_min_start_timestamp();
+                }
+                let (flush_bytes, mms) = self.flush(true, false).await?;
+                if self.conf.with_metrics {
+                    self.flusher.metrics.inc_flush_count(1);
+                    self.flusher.metrics.inc_flush_bytes(flush_bytes);
+                    self.flusher.metrics.update_max_end_timestamp();
+                }
+                self.flusher
+                    .flush_metas(false, self.topic.clone(), self.partition_id, mms)
+                    .await?;
+                self.rotate_file().await;
+                // 重置2个位置
+                now_total = self.write_ptr.get_offset();
+                now_count = self.write_ptr.get_current_count();
+            }
+
+            let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_total);
+
+            now_batch_total_size += bts.len() as u64;
+            now_total += bts.len() as u64;
+            now_count += 1;
+
             // 这里将 (消息头,消息体) 单次调用 push 写入，否则有并发问题
             // 创建消息头
-            let header = Bytes::from_owner(data.len().to_be_bytes());
+            let header = Bytes::from_owner(bts.len().to_be_bytes());
             // 存储消息头和消息体（零拷贝）
-            self.buffer.push((header, data.clone())); // data.clone() 是引用计数增量，非内存拷贝
+            self.queue.push((header, bts, mm)); // data.clone() 是引用计数增量，非内存拷贝
         }
+
         {
             // 更新指针（减少锁次数）
-            self.write_ptr.rotate_offset(total_size);
-            self.write_ptr.rotate_current_count(count as u64);
+            self.write_ptr.rotate_offset(now_batch_total_size);
+            self.write_ptr.rotate_current_count(batch_len as u64);
         }
 
         // 检查是否需要立即刷盘
-        if self.conf.flusher_factor != 0 && total_size > self.conf.flusher_factor {
+        if self.conf.flusher_factor != 0 && now_batch_total_size > self.conf.flusher_factor {
             if self.conf.with_metrics {
                 self.flusher.metrics.update_min_start_timestamp();
             }
-            let flush_bytes = self.flush(false).await?;
+            let (flush_bytes, mms) = self.flush(true, false).await?;
             if self.conf.with_metrics {
                 self.flusher.metrics.inc_flush_count(1);
                 self.flusher.metrics.inc_flush_bytes(flush_bytes);
                 self.flusher.metrics.update_max_end_timestamp();
             }
+            self.flusher
+                .flush_metas(false, self.topic.clone(), self.partition_id, mms)
+                .await?;
         }
 
         // 当前文件的使用率已经达到设置阈值，预创建下一个
@@ -361,22 +387,32 @@ impl PartitionWriterBuffer {
         //         });
         //     }
         // }
-        Ok(total_size)
+        Ok(now_batch_total_size)
     }
 
     // 将数据从内存刷盘
     #[cfg(not(target_os = "linux"))]
-    pub(crate) async fn flush(&self, fsync: bool) -> Result<u64> {
+    pub(crate) async fn flush(&self, all: bool, fsync: bool) -> Result<(u64, Vec<MessageMeta>)> {
         // 批量获取数据
-        let batch = self.buffer.pop_batch(BATCH_POP_SIZE);
+        let batch;
+        if all {
+            batch = self.queue.pop_all();
+        } else {
+            batch = self
+                .queue
+                .pop_batch(self.conf.batch_pop_size_from_buffer as usize);
+        }
+
         if batch.is_empty() {
-            return Ok(0);
+            return Ok((0, vec![]));
         }
 
         // 准备IO向量
         let mut iovecs = Vec::with_capacity(batch.len() * 2);
-        for (header, data) in batch {
+        let mut mms = Vec::with_capacity(batch.len());
+        for (header, data, mm) in batch {
             iovecs.extend_from_slice(&[header, data]);
+            mms.push(mm);
         }
         // 执行批量写入
         let slices: Vec<IoSlice> = iovecs.iter().map(|v| IoSlice::new(v)).collect();
@@ -393,7 +429,13 @@ impl PartitionWriterBuffer {
             });
         }
 
-        Ok(flushed_bytes)
+        // let (topic, partition_id) = self.parse_topic_partition_from_dir().unwrap();
+        // let index = get_global_partition_index()
+        //     .get_or_create(&topic, partition_id)
+        //     .await?;
+        // index.batch_put(partition_id, &mms)?;
+
+        Ok((flushed_bytes, mms))
     }
 
     // 将数据从内存刷盘
@@ -486,4 +528,21 @@ impl PartitionWriterBuffer {
         self.flusher
             .update_partition_write_count(&self.dir, batch_size as _);
     }
+}
+
+/// 从 self.dir 路径中解析出 topic 和 partition_id
+fn parse_topic_partition_from_dir(dir: &PathBuf) -> Option<(String, u32)> {
+    let components: Vec<_> = dir.components().collect();
+    if components.len() < 2 {
+        return None;
+    }
+    let partition_osstr = components.last()?;
+    let topic_osstr = components.get(components.len() - 2)?;
+    let partition_id = partition_osstr
+        .as_os_str()
+        .to_string_lossy()
+        .parse::<u32>()
+        .ok()?;
+    let topic = topic_osstr.as_os_str().to_string_lossy().to_string();
+    Some((topic, partition_id))
 }

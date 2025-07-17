@@ -3,7 +3,6 @@ use crate::{
     partition::PartitionManager,
 };
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
 use dashmap::DashMap;
 use grpcx::{
     brokercoosvc::{BrokerState, SyncConsumerAssignmentsResp},
@@ -17,7 +16,7 @@ use grpcx::{
 };
 use log::{debug, error, info};
 use std::{sync::Arc, time::Duration};
-use storagev2::{StorageReader, StorageWriter};
+use storagev2::{MessagePayload, StorageReader, StorageWriter};
 use sysinfo::System;
 use tokio::{
     sync::{RwLock, mpsc},
@@ -262,7 +261,7 @@ where
 
     async fn process_publish(
         &self,
-        req: PublishReq,
+        mut req: PublishReq,
         tx: &mpsc::Sender<Result<PublishResp, Status>>,
     ) {
         // 验证分区归属
@@ -287,21 +286,20 @@ where
         }
 
         let mut msgs = Vec::with_capacity(req.messages.len());
-        req.messages.iter().for_each(|v| {
-            let encoded = bincode::encode_to_vec(v, bincode::config::standard());
-            match encoded {
-                Ok(data) => msgs.push(Bytes::from_owner(data)),
-                Err(e) => {
-                    error!("bincode encode message err: {e:?}");
-                }
-            }
-        });
+        for v in req.messages.iter_mut() {
+            msgs.push(MessagePayload {
+                msg_id: std::mem::take(&mut v.message_id),
+                timestamp: 0,
+                metadata: std::mem::take(&mut v.metadata),
+                payload: std::mem::take(&mut v.payload),
+            });
+        }
 
         let req = Arc::new(req);
         // 存储消息
         if let Err(e) = self
             .storage_writer
-            .store(&req.topic, req.partition, &msgs,None)
+            .store(&req.topic, req.partition, msgs, None)
             .await
             .map_err(|e| {
                 error!(

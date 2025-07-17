@@ -1,9 +1,11 @@
 use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
+use crate::MessagePayload;
+use crate::disk::PartitionIndexManager;
 use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
 use crate::{ReadPosition, SegmentOffset, StorageError, StorageResult};
 use crate::{StorageReader, StorageReaderSession};
-use anyhow::{Result};
+use anyhow::Result;
 use bytes::Bytes;
 use common::check_exist;
 use dashmap::DashMap;
@@ -16,15 +18,17 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct DiskStorageReader {
+    // storage_dir
     dir: PathBuf,
-    // group_id: session
+    partition_index_num_per_topic: u32,
     sessions: Arc<DashMap<u32, DiskStorageReaderSession>>,
 }
 
 impl DiskStorageReader {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, partition_index_num_per_topic: u32) -> Self {
         Self {
             dir,
+            partition_index_num_per_topic,
             sessions: Arc::default(),
         }
     }
@@ -44,6 +48,7 @@ impl StorageReader for DiskStorageReader {
             .or_insert(DiskStorageReaderSession::new(
                 self.dir.clone(),
                 group_id,
+                self.partition_index_num_per_topic,
                 read_position,
             ));
         Ok(Box::new(sess.value().clone()))
@@ -57,26 +62,40 @@ impl StorageReader for DiskStorageReader {
 
 #[derive(Debug, Clone)]
 pub struct DiskStorageReaderSession {
-    // 消息文件存储路径
+    // 消息文件存储路径（storage_dir）
     dir: PathBuf,
     group_id: u32,
+
+    partition_index_num_per_topic: u32,
     read_positions: Arc<DashMap<String, ReadPosition>>,
     // (topic, partition_id) -> FdReaderCacheAync
     readers: Arc<DashMap<(String, u32), DiskStorageReaderSessionPartition>>,
+
+    partition_index_manager: PartitionIndexManager,
 }
 
 impl DiskStorageReaderSession {
-    pub fn new(dir: PathBuf, group_id: u32, read_positions: Vec<(String, ReadPosition)>) -> Self {
+    pub fn new(
+        dir: PathBuf,
+        group_id: u32,
+        partition_index_num_per_topic: u32,
+        read_positions: Vec<(String, ReadPosition)>,
+    ) -> Self {
         let m = DashMap::new();
         read_positions.iter().for_each(|(k, v)| {
             m.insert(k.clone(), v.clone());
         });
 
         Self {
-            dir,
+            dir: dir.clone(),
             group_id,
+            partition_index_num_per_topic,
             read_positions: Arc::new(m),
             readers: Arc::default(),
+            partition_index_manager: PartitionIndexManager::new(
+                dir,
+                partition_index_num_per_topic as _,
+            ),
         }
     }
 
@@ -98,7 +117,7 @@ impl StorageReaderSession for DiskStorageReaderSession {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> StorageResult<Vec<(Bytes, SegmentOffset)>> {
+    ) -> StorageResult<Vec<(MessagePayload, u64, SegmentOffset)>> {
         if self
             .readers
             .get(&(topic.to_string(), partition_id))
@@ -106,9 +125,7 @@ impl StorageReaderSession for DiskStorageReaderSession {
         {
             let partition_dir = self.dir.join(topic).join(partition_id.to_string());
             if !check_exist(&partition_dir) {
-                return Err(
-                    StorageError::PathNotExist(format!("{:?}", partition_dir))
-                );
+                return Err(StorageError::PathNotExist(format!("{:?}", partition_dir)));
             }
 
             let mut partition =
@@ -126,7 +143,13 @@ impl StorageReaderSession for DiskStorageReaderSession {
         let mut list = vec![];
         for _ in 0..n.into() {
             let (data, offset, last) = reader.next().await?;
-            list.push((data, offset));
+            if !data.is_empty() {
+                let payload: MessagePayload =
+                    bincode::decode_from_slice(&data, bincode::config::standard())
+                        .map_err(|e| StorageError::SerializeError(e.to_string()))?
+                        .0;
+                list.push((payload, data.len() as u64, offset));
+            }
             if last {
                 break;
             }
@@ -136,8 +159,32 @@ impl StorageReaderSession for DiskStorageReaderSession {
     }
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> StorageResult<()> {
-        // TODO:
+    async fn commit(
+        &self,
+        topic: &str,
+        partition_id: u32,
+        offset: SegmentOffset,
+    ) -> StorageResult<()> {
+        // 获取对应的 partition reader
+        let reader = self
+            .readers
+            .get(&(topic.to_string(), partition_id))
+            .ok_or_else(|| {
+                StorageError::PartitionNotFound(format!(
+                    "topic: {}, partition: {}",
+                    topic, partition_id
+                ))
+            })?;
+
+        let index = self
+            .partition_index_manager
+            .get_or_create(topic, partition_id)
+            .await
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let _ = index.get_msg_id_by_segment_offset(partition_id, &offset)?;
+        // 验证并更新 commit_ptr
+        reader.commit_offset(offset).await?;
+
         Ok(())
     }
 }
@@ -176,15 +223,20 @@ impl DiskStorageReaderSessionPartition {
     async fn load_ptr(&mut self, read_position: &ReadPosition) -> StorageResult<()> {
         if check_exist(&self.reader_ptr_filename) {
             self.reader_ptr = Arc::new(RwLock::new(
-                ReaderPositionPtr::load(&self.reader_ptr_filename).await.map_err(|e| StorageError::IoError(e.to_string()))?,
+                ReaderPositionPtr::load(&self.reader_ptr_filename)
+                    .await
+                    .map_err(|e| StorageError::IoError(e.to_string()))?,
             ));
         } else if let Some(parent) = self.reader_ptr_filename.parent() {
             if read_position == &ReadPosition::Latest {
                 let writer_ptr_filename = parent.join(WRITER_PTR_FILENAME);
 
-                let data = tokio::fs::read_to_string(writer_ptr_filename).await.map_err(|e| StorageError::IoError(e.to_string()))?;
+                let data = tokio::fs::read_to_string(writer_ptr_filename)
+                    .await
+                    .map_err(|e| StorageError::IoError(e.to_string()))?;
                 if !data.is_empty() {
-                    let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data).map_err(|e| StorageError::SerializeError(e.to_string()))?;
+                    let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)
+                        .map_err(|e| StorageError::SerializeError(e.to_string()))?;
                     let mut wl = self.reader_ptr.write().await;
                     wl.filename = sp.filename;
                     wl.offset = sp.offset;
@@ -194,7 +246,9 @@ impl DiskStorageReaderSessionPartition {
 
         if check_exist(&self.commit_ptr_filename) {
             self.commit_ptr = Arc::new(RwLock::new(
-                ReaderPositionPtr::load(&self.commit_ptr_filename).await.map_err(|e| StorageError::IoError(e.to_string()))?,
+                ReaderPositionPtr::load(&self.commit_ptr_filename)
+                    .await
+                    .map_err(|e| StorageError::IoError(e.to_string()))?,
             ));
         } else if read_position == &ReadPosition::Latest {
             let (filename, offset) = {
@@ -323,6 +377,66 @@ impl DiskStorageReaderSessionPartition {
             }
         }
     }
+
+    async fn commit_offset(&self, offset: SegmentOffset) -> StorageResult<()> {
+        // 获取当前 commit_ptr 位置
+        let current_commit = {
+            let commit_rl = self.commit_ptr.read().await;
+            SegmentOffset {
+                segment_id: extract_segment_id_from_filename(&commit_rl.filename),
+                offset: commit_rl.offset,
+            }
+        };
+
+        // 验证 offset 不能回退
+        if offset.segment_id < current_commit.segment_id
+            || (offset.segment_id == current_commit.segment_id
+                && offset.offset < current_commit.offset)
+        {
+            return Err(StorageError::OffsetMismatch(format!(
+                "Cannot commit offset {:?} which is before current commit offset {:?}",
+                offset, current_commit
+            )));
+        }
+
+        // 验证 offset 不能超过当前 reader_ptr
+        let current_reader = self.get_segment_offset().await;
+        if offset.segment_id > current_reader.segment_id
+            || (offset.segment_id == current_reader.segment_id
+                && offset.offset > current_reader.offset)
+        {
+            return Err(StorageError::OffsetMismatch(format!(
+                "Cannot commit offset {:?} which is beyond current reader offset {:?}",
+                offset, current_reader
+            )));
+        }
+
+        // 验证文件存在性
+        let target_filename = self.dir.join(gen_record_filename(offset.segment_id));
+        if !check_exist(&target_filename) {
+            return Err(StorageError::RecordNotFound(format!(
+                "Segment file not found: {:?}",
+                target_filename
+            )));
+        }
+
+        // 更新 commit_ptr
+        {
+            let mut commit_wl = self.commit_ptr.write().await;
+            commit_wl.filename = target_filename;
+            commit_wl.offset = offset.offset;
+        }
+
+        // 异步保存 commit_ptr
+        let reader = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = reader.save_commit_ptr().await {
+                error!("Failed to save commit pointer: {:?}", e);
+            }
+        });
+
+        Ok(())
+    }
 }
 
 fn filename_factor_next_record(filename: &Path) -> PathBuf {
@@ -359,7 +473,7 @@ mod test {
 
     #[tokio::test]
     async fn reader_session() {
-        let dsr = DiskStorageReader::new(PathBuf::from("./messages"));
+        let dsr = DiskStorageReader::new(PathBuf::from("./messages"), 100);
         let sess = dsr
             .new_session(1001, vec![])
             .await
@@ -369,20 +483,20 @@ mod test {
             .await
         {
             println!("data.len() = {}", data.len());
-            println!("bytes.len() = {}", data.first().unwrap().0.len());
+            println!("payload.len() = {}", data.first().unwrap().0.payload.len());
         }
     }
 
     #[tokio::test]
     async fn reader_session2() {
-        let dsr = DiskStorageReader::new(PathBuf::from("../data/message2"));
+        let dsr = DiskStorageReader::new(PathBuf::from("../data/message2"), 100);
         let sess = dsr
             .new_session(1000, vec![])
             .await
             .expect("new session failed");
         while let Ok(data) = sess.next("mytopic", 6, NonZero::new(1_u64).unwrap()).await {
             println!("data.len() = {}", data.len());
-            println!("bytes.len() = {}", data.first().unwrap().0.len());
+            println!("payload.len() = {}", data.first().unwrap().0.payload.len());
         }
     }
 }

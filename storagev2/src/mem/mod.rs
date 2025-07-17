@@ -1,16 +1,15 @@
 use async_trait::async_trait;
-use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{oneshot, RwLock,};
-use crate::{ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession, StorageResult, StorageWriter};
+use crate::{MessagePayload, ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession, StorageResult, StorageWriter};
 
 struct PartitionQueue {
     // sema: Arc<Semaphore>,
-    messages: Arc<RwLock<VecDeque<Bytes>>>,
+    messages: Arc<RwLock<VecDeque<MessagePayload>>>,
     read_pos: Arc<AtomicUsize>, // 当前读取位置
 }
 
@@ -45,7 +44,7 @@ impl MemStorage {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> StorageResult<(Bytes, SegmentOffset)> {
+    ) -> StorageResult<(MessagePayload, u64, SegmentOffset)> {
         let topic_storage = self
             .topics
             .get(topic)
@@ -64,8 +63,8 @@ impl MemStorage {
             messages_rl[partition_queue.read_pos.load(Ordering::Relaxed)].clone()
         };
         partition_queue.read_pos.fetch_add(1, Ordering::Relaxed); // 移动读取指针
-
-        Ok((msg, partition_queue.gen_segment_offset()))
+        let msg_len = msg.len().map_err(|e|StorageError::SerializeError(e.to_string()))? as u64;
+        Ok((msg, msg_len, partition_queue.gen_segment_offset()))
     }
 
     /// 提交消费并移除已处理的消息
@@ -98,7 +97,7 @@ impl MemStorage {
 #[async_trait]
 impl StorageWriter for MemStorage {
     /// 存储消息到指定 topic 和 partition
-    async fn store(&self, topic: &str, partition: u32, datas: &[Bytes], notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
+    async fn store(&self, topic: &str, partition: u32, payloads:Vec<MessagePayload>, notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
         let topic_storage =
             self.topics
                 .entry(topic.to_string())
@@ -116,8 +115,8 @@ impl StorageWriter for MemStorage {
             });
 
         let mut wl = partition_queue.messages.write().await;
-        for data in datas {
-            wl.push_back(data.clone());
+        for data in payloads {
+            wl.push_back(data);
         }
         // partition_queue.sema.add_permits(1);
         Ok(())
@@ -185,7 +184,7 @@ impl StorageReaderSession for MemStorageReaderSession {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> StorageResult<Vec<(Bytes, SegmentOffset)>> {
+    ) -> StorageResult<Vec<(MessagePayload, u64, SegmentOffset)>> {
         let mut list = vec![];
         for _ in 0..n.into() {
             list.push(self.storage.next(topic, partition_id, n).await?);
