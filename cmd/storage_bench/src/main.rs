@@ -393,10 +393,10 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
         let sent_bytes = sent_count * message_size as u64;
 
         // 墙钟时间(wall-clock time)
-        let min_start_timestamp = end_metrics.min_start_timestamp.load(Ordering::Relaxed);
-        let max_end_timestamp = end_metrics.max_end_timestamp.load(Ordering::Relaxed);
-        let total_flushed_bytes = end_metrics.flush_bytes.load(Ordering::Relaxed);
-        let _total_flush_count = end_metrics.flush_count.load(Ordering::Relaxed);
+        let min_start_timestamp = end_metrics.data_min_start_timestamp.load(Ordering::Relaxed);
+        let max_end_timestamp = end_metrics.data_max_end_timestamp.load(Ordering::Relaxed);
+        let total_flushed_bytes = end_metrics.data_flush_bytes.load(Ordering::Relaxed);
+        let _total_flush_count = end_metrics.data_flush_count.load(Ordering::Relaxed);
 
         // 计算性能指标
         let actual_rate = (sent_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64();

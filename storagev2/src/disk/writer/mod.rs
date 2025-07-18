@@ -6,10 +6,10 @@ use super::Config as DiskConfig;
 use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
 use crate::disk::PartitionIndexManager;
 use crate::disk::meta::WriterPositionPtr;
+use crate::disk::writer::buffer::PartitionBufferSet;
 use crate::metrics::StorageWriterMetrics;
 use crate::{MessagePayload, StorageError, StorageResult, StorageWriter};
 use anyhow::{Result, anyhow};
-use buffer::PartitionWriterBuffer;
 use dashmap::DashMap;
 use flusher::Flusher;
 use log::{error, info};
@@ -51,8 +51,8 @@ struct TopicPartitionManager {
     storage_dir: Arc<PathBuf>,
     conf: Arc<DiskConfig>,
     flusher: Arc<Flusher>,
-    // (topic, partition_id) -> PartitionWriterBuffer
-    partitions: Arc<DashMap<(String, u32), PartitionWriterBuffer>>,
+    // (topic, partition_id) -> PartitionBufferSet
+    partitions: Arc<DashMap<(String, u32), PartitionBufferSet>>,
     // 创建分区的互斥锁
     partition_create_locks: Arc<DashMap<u32, Mutex<()>>>,
 
@@ -129,9 +129,9 @@ impl TopicPartitionManager {
                                     let key = (topic.clone(), pid);
 
                                     // 1. 从分区映射中移除
-                                    if let Some((_, pwb)) = partitions.remove(&key) {
+                                    if let Some((_, pbs)) = partitions.remove(&key) {
                                         // 2. 从刷盘器移除
-                                        flusher.remove_partition_writer(&pwb.dir);
+                                        flusher.remove_partition_writer(&pbs.dir);
 
                                         // 3. 从时间跟踪器中移除
                                         last_write_times.remove(&key);
@@ -169,7 +169,7 @@ impl TopicPartitionManager {
         &self,
         topic: &str,
         partition_id: u32,
-    ) -> Option<PartitionWriterBuffer> {
+    ) -> Option<PartitionBufferSet> {
         let key = (topic.to_string(), partition_id);
         // 第一重检查：快速路径
         if let Some(pwb) = self.partitions.get(&key) {
@@ -182,7 +182,7 @@ impl TopicPartitionManager {
         &self,
         topic: &str,
         partition_id: u32,
-    ) -> Result<PartitionWriterBuffer> {
+    ) -> Result<PartitionBufferSet> {
         let key = (topic.to_string(), partition_id);
         // 第一重检查：快速路径
         if let Some(pwb) = self.partitions.get(&key) {
@@ -206,7 +206,7 @@ impl TopicPartitionManager {
 
         // 加载
         let wpp = Arc::new(wpp);
-        let pwb = PartitionWriterBuffer::new(
+        let pwb = PartitionBufferSet::new(
             dir.clone(),
             self.conf.clone(),
             wpp.clone(),
@@ -373,11 +373,7 @@ impl DiskStorageWriter {
     }
 
     #[inline]
-    fn get_cached_partition(
-        &self,
-        topic: &str,
-        partition_id: u32,
-    ) -> Option<PartitionWriterBuffer> {
+    fn get_cached_partition(&self, topic: &str, partition_id: u32) -> Option<PartitionBufferSet> {
         self.topic_partition_manager
             .get_cached_topic_partition(topic, partition_id)
     }

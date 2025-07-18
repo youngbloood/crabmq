@@ -1,7 +1,6 @@
-use super::buffer::PartitionWriterBuffer;
 use crate::{
     MessageMeta, StorageError,
-    disk::{PartitionIndexManager, meta::WriterPositionPtr},
+    disk::{PartitionIndexManager, meta::WriterPositionPtr, writer::buffer::PartitionBufferSet},
     metrics::StorageWriterMetrics,
 };
 use anyhow::{Result, anyhow};
@@ -33,7 +32,7 @@ pub(crate) enum FlushState {
     Stale, // 需要强制刷盘的分区
 }
 
-type FlushUnitPartitionWriterBuffer = (bool, Vec<Arc<PartitionWriterBuffer>>);
+type FlushUnitPartitionBufferSet = (bool, Vec<Arc<PartitionBufferSet>>);
 type FlushUnitWriterPositionPtr = (bool, Vec<Arc<WriterPositionPtr>>);
 
 #[derive(Clone)]
@@ -44,14 +43,14 @@ pub(crate) struct Flusher {
     pub(crate) partition_states: Arc<DashMap<PathBuf, PartitionState>>,
     pub(crate) partition_index_manager: PartitionIndexManager,
 
-    partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionWriterBuffer>>>,
+    partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionBufferSet>>>,
     partition_writer_ptrs: Arc<DashMap<PathBuf, Arc<WriterPositionPtr>>>,
     interval: Duration,
 
     // tasks 任务池
     partition_writer_buffer_tasks_num: usize,
     // 存储 PartitionWriterBuffer 异步刷盘任务的 sender
-    partition_writer_buffer_tasks: Arc<Vec<mpsc::Sender<FlushUnitPartitionWriterBuffer>>>,
+    partition_writer_buffer_tasks: Arc<Vec<mpsc::Sender<FlushUnitPartitionBufferSet>>>,
 
     partition_writer_ptr_tasks_num: usize,
     // 存储 PartitionWriterPtr 异步刷盘任务的 sender
@@ -59,7 +58,7 @@ pub(crate) struct Flusher {
 
     partition_meta_tasks_num: usize,
     // 存储 MessageMetas 异步刷盘任务的 sender
-    partition_meta_tasks: Arc<Vec<mpsc::Sender<(bool, String, u32, Vec<MessageMeta>)>>>,
+    partition_meta_tasks: Arc<Vec<mpsc::Sender<FlushUnitPartitionBufferSet>>>,
 }
 
 impl Drop for Flusher {
@@ -116,12 +115,15 @@ impl Flusher {
             ptr_tasks.push(tx);
         }
 
+        let metrics = StorageWriterMetrics::default();
+
         let mut meta_tasks = vec![];
         for i in 0..partition_meta_tasks_num {
             let _stop = stop.clone();
             let _partition_index_manager = partition_index_manager.clone();
+            let _metrics = metrics.clone();
             let (tx, mut rx) =
-                mpsc::channel::<(bool, String, u32, Vec<MessageMeta>)>(CHANNEL_BUFFER_SIZE);
+                mpsc::channel::<(bool, Vec<Arc<PartitionBufferSet>>)>(CHANNEL_BUFFER_SIZE);
             tokio::spawn(async move {
                 loop {
                     if rx.is_closed() {
@@ -137,13 +139,27 @@ impl Flusher {
                             if res.is_none(){
                                 continue;
                             }
-                            let (fsync, topic, partition_id, mms) = res.unwrap();
-                            if let Ok(index) = _partition_index_manager
-                                .get_or_create(&topic, partition_id)
-                                .await{
-                                if let Err(e) = index.batch_put(partition_id, &mms){
-                                    error!("partition_index[{}-{}].batch_put err: {e:?}", topic, partition_id);
+                            let (fsync, pbss) = res.unwrap();
+                            let mut flush_count = 0;
+                            if with_metrics {
+                                _metrics.update_index_min_start_timestamp();
+                            }
+                            for pbs in pbss {
+                                match pbs.flush_data(false, fsync).await {
+                                    Ok(num) => {
+                                        flush_count += 1;
+                                        if with_metrics {
+                                            _metrics.inc_flush_bytes(0, num);
+                                        }
+                                    },
+                                    Err(e) => {
+                                        error!("Flusher: partition_writer_buffer_tasks[{i}] flush err: {e:?}");
+                                    }
                                 }
+                            }
+                            if with_metrics {
+                                _metrics.inc_flush_count(0, flush_count);
+                                _metrics.update_index_max_end_timestamp();
                             }
                         }
                     }
@@ -153,15 +169,13 @@ impl Flusher {
         }
 
         let meta_tasks = Arc::new(meta_tasks);
-
-        let metrics = StorageWriterMetrics::default();
         let mut buffer_tasks = vec![];
         for i in 0..partition_writer_buffer_tasks_num {
             let _stop = stop.clone();
             let _meta_tasks = meta_tasks.clone();
             let _metrics = metrics.clone();
             let (tx, mut rx) =
-                mpsc::channel::<(bool, Vec<Arc<PartitionWriterBuffer>>)>(CHANNEL_BUFFER_SIZE);
+                mpsc::channel::<(bool, Vec<Arc<PartitionBufferSet>>)>(CHANNEL_BUFFER_SIZE);
             tokio::spawn(async move {
                 loop {
                     if rx.is_closed() {
@@ -177,26 +191,18 @@ impl Flusher {
                             if res.is_none(){
                                 continue;
                             }
-                            let (fsync, pwbs) = res.unwrap();
+                            let (fsync, pbss) = res.unwrap();
                             let mut flush_count = 0;
                             if with_metrics {
-                                _metrics.update_min_start_timestamp();
+                                _metrics.update_data_min_start_timestamp();
                             }
-                            for pwb in pwbs {
-                                match pwb.flush(false, fsync).await {
-                                    Ok((num, mms)) => {
+                            for pbs in pbss {
+                                match pbs.flush_data(false, fsync).await {
+                                    Ok(num) => {
                                         flush_count += 1;
                                         if with_metrics {
-                                            _metrics.inc_flush_bytes(num);
+                                            _metrics.inc_flush_bytes(num, 0);
                                         }
-
-                                        // 将 mms 随机分发至后端 task 进行处理
-                                        let idx = rand::random::<u32>() as usize;
-                                        if let Err(e) = _meta_tasks[idx % partition_meta_tasks_num]
-                                            .send((fsync, pwb.topic.clone(), pwb.partition_id, mms))
-                                            .await{
-                                                error!("Flusher: partition_meta[{}] send err: {e:?}", idx % partition_meta_tasks_num);
-                                            }
                                     },
                                     Err(e) => {
                                         error!("Flusher: partition_writer_buffer_tasks[{i}] flush err: {e:?}");
@@ -204,8 +210,8 @@ impl Flusher {
                                 }
                             }
                             if with_metrics {
-                                _metrics.inc_flush_count(flush_count);
-                                _metrics.update_max_end_timestamp();
+                                _metrics.inc_flush_count(flush_count, 0);
+                                _metrics.update_data_max_end_timestamp();
                             }
                         }
                     }
@@ -280,7 +286,7 @@ impl Flusher {
     }
 
     #[inline]
-    pub(crate) fn add_partition_writer(&self, key: PathBuf, writer: PartitionWriterBuffer) {
+    pub(crate) fn add_partition_writer(&self, key: PathBuf, writer: PartitionBufferSet) {
         self.partition_writer_buffers
             .insert(key.clone(), Arc::new(writer));
         self.partition_states.insert(
@@ -403,7 +409,7 @@ impl Flusher {
 
     // fsync = false 时，交给操作系统刷脏页落盘
     fn flush_by_state(&self, state: FlushState, fsync: bool) {
-        let writers: Vec<Arc<PartitionWriterBuffer>> = self
+        let writers: Vec<Arc<PartitionBufferSet>> = self
             .partition_writer_buffers
             .iter()
             .filter(|entry| {
@@ -430,17 +436,13 @@ impl Flusher {
         }
     }
 
-    pub(crate) async fn flush_metas(
-        &self,
-        fsync: bool,
-        topic: String,
-        partition_id: u32,
-        mms: Vec<MessageMeta>,
-    ) -> Result<()> {
+    pub(crate) async fn flush_metas(&self, fsync: bool, dir: &PathBuf) -> Result<()> {
         let idx = rand::random::<u32>() as usize;
-        self.partition_meta_tasks[idx % self.partition_meta_tasks_num]
-            .send((fsync, topic.to_string(), partition_id, mms))
-            .await?;
+        if let Some(pbs) = self.partition_writer_buffers.get(dir) {
+            self.partition_meta_tasks[idx % self.partition_meta_tasks_num]
+                .send((fsync, vec![pbs.value().clone()]))
+                .await?;
+        }
         Ok(())
     }
 }
