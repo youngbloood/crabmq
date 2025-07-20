@@ -1,6 +1,6 @@
 use crate::{
-    MessageMeta, StorageError,
-    disk::{PartitionIndexManager, meta::WriterPositionPtr, writer::buffer::PartitionBufferSet},
+    StorageError,
+    disk::{meta::WriterPositionPtr, writer::buffer::PartitionBufferSet},
     metrics::StorageWriterMetrics,
 };
 use anyhow::{Result, anyhow};
@@ -41,7 +41,6 @@ pub(crate) struct Flusher {
 
     pub(crate) metrics: StorageWriterMetrics,
     pub(crate) partition_states: Arc<DashMap<PathBuf, PartitionState>>,
-    pub(crate) partition_index_manager: PartitionIndexManager,
 
     partition_writer_buffers: Arc<DashMap<PathBuf, Arc<PartitionBufferSet>>>,
     partition_writer_ptrs: Arc<DashMap<PathBuf, Arc<WriterPositionPtr>>>,
@@ -75,7 +74,6 @@ impl Drop for Flusher {
 impl Flusher {
     pub(crate) fn new(
         stop: CancellationToken,
-        partition_index_manager: PartitionIndexManager,
         partition_writer_buffer_tasks_num: usize,
         partition_writer_ptr_tasks_num: usize,
         partition_meta_tasks_num: usize,
@@ -117,10 +115,10 @@ impl Flusher {
 
         let metrics = StorageWriterMetrics::default();
 
+        // 刷 dataIndex
         let mut meta_tasks = vec![];
         for i in 0..partition_meta_tasks_num {
             let _stop = stop.clone();
-            let _partition_index_manager = partition_index_manager.clone();
             let _metrics = metrics.clone();
             let (tx, mut rx) =
                 mpsc::channel::<(bool, Vec<Arc<PartitionBufferSet>>)>(CHANNEL_BUFFER_SIZE);
@@ -141,11 +139,12 @@ impl Flusher {
                             }
                             let (fsync, pbss) = res.unwrap();
                             let mut flush_count = 0;
+                            let mut flush_err_count = 0;
                             if with_metrics {
                                 _metrics.update_index_min_start_timestamp();
                             }
                             for pbs in pbss {
-                                match pbs.flush_data(false, fsync).await {
+                                match pbs.flush_index(false, fsync).await {
                                     Ok(num) => {
                                         flush_count += 1;
                                         if with_metrics {
@@ -153,12 +152,13 @@ impl Flusher {
                                         }
                                     },
                                     Err(e) => {
-                                        error!("Flusher: partition_writer_buffer_tasks[{i}] flush err: {e:?}");
+                                        error!("Flusher: partition_meta_tasks[{i}] flush err: {e:?}");
+                                        flush_err_count += 1;
                                     }
                                 }
                             }
                             if with_metrics {
-                                _metrics.inc_flush_count(0, flush_count);
+                                _metrics.inc_index_flush_count(flush_count, flush_err_count);
                                 _metrics.update_index_max_end_timestamp();
                             }
                         }
@@ -168,11 +168,10 @@ impl Flusher {
             meta_tasks.push(tx);
         }
 
-        let meta_tasks = Arc::new(meta_tasks);
+        // 刷 data
         let mut buffer_tasks = vec![];
         for i in 0..partition_writer_buffer_tasks_num {
             let _stop = stop.clone();
-            let _meta_tasks = meta_tasks.clone();
             let _metrics = metrics.clone();
             let (tx, mut rx) =
                 mpsc::channel::<(bool, Vec<Arc<PartitionBufferSet>>)>(CHANNEL_BUFFER_SIZE);
@@ -193,6 +192,7 @@ impl Flusher {
                             }
                             let (fsync, pbss) = res.unwrap();
                             let mut flush_count = 0;
+                            let mut flush_err_count = 0;
                             if with_metrics {
                                 _metrics.update_data_min_start_timestamp();
                             }
@@ -206,11 +206,12 @@ impl Flusher {
                                     },
                                     Err(e) => {
                                         error!("Flusher: partition_writer_buffer_tasks[{i}] flush err: {e:?}");
+                                        flush_err_count += 1;
                                     }
                                 }
                             }
                             if with_metrics {
-                                _metrics.inc_flush_count(flush_count, 0);
+                                _metrics.inc_data_flush_count(flush_count, flush_err_count);
                                 _metrics.update_data_max_end_timestamp();
                             }
                         }
@@ -225,14 +226,13 @@ impl Flusher {
             partition_writer_buffers: Arc::new(DashMap::new()),
             partition_states: Arc::default(),
             interval,
-            partition_index_manager,
             partition_writer_ptrs: Arc::default(),
             partition_writer_buffer_tasks_num,
             partition_writer_buffer_tasks: Arc::new(buffer_tasks),
             partition_writer_ptr_tasks_num,
             partition_writer_ptr_tasks: Arc::new(ptr_tasks),
             partition_meta_tasks_num,
-            partition_meta_tasks: meta_tasks,
+            partition_meta_tasks: Arc::new(meta_tasks),
             metrics,
             // partition_writer_ptr_tasks: Arc::default(),
         }
@@ -282,7 +282,7 @@ impl Flusher {
         self.partition_states.remove(path);
         self.partition_writer_ptrs.remove(path);
 
-        log::debug!("Removed partition from flusher: {:?}", path);
+        log::debug!("Removed partition from flusher: {path:?}");
     }
 
     #[inline]

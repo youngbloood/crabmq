@@ -1,30 +1,41 @@
 use super::BufferFlushable;
 use crate::disk::partition_index::PartitionIndexManager;
-use crate::{MessageMeta, disk::writer::buffer::switch_queue::SwitchQueue};
+use crate::{
+    MessageMeta, disk::Config as DiskConfig, disk::writer::buffer::switch_queue::SwitchQueue,
+};
 use anyhow::Result;
+use std::sync::Arc;
 
 pub struct PartitionIndexWriterBuffer {
     pub topic: String,
     pub partition_id: u32,
+    conf: Arc<DiskConfig>,
     queue: SwitchQueue<MessageMeta>,
     index_manager: PartitionIndexManager,
 }
 
 impl PartitionIndexWriterBuffer {
-    pub fn new(topic: String, partition_id: u32, index_manager: PartitionIndexManager) -> Self {
+    pub fn new(
+        topic: String,
+        partition_id: u32,
+        conf: Arc<DiskConfig>,
+        index_manager: PartitionIndexManager,
+    ) -> Self {
         Self {
             topic,
             partition_id,
+            conf,
             queue: SwitchQueue::new(),
             index_manager,
         }
     }
 
     /// 写入一批索引
-    pub fn push_batch(&self, metas: Vec<MessageMeta>) {
+    pub fn push_batch(&self, metas: Vec<MessageMeta>) -> Result<()> {
         for meta in metas {
             self.queue.push(meta);
         }
+        Ok(())
     }
 }
 
@@ -39,7 +50,8 @@ impl BufferFlushable for PartitionIndexWriterBuffer {
         let batch = if all {
             self.queue.pop_all()
         } else {
-            self.queue.pop_batch(1024) // 可配置
+            self.queue
+                .pop_batch(self.conf.batch_pop_size_from_buffer as usize)
         };
         if batch.is_empty() {
             return Ok(0);
@@ -50,8 +62,6 @@ impl BufferFlushable for PartitionIndexWriterBuffer {
             .get_or_create(&self.topic, self.partition_id)
             .await?;
 
-        mgr.batch_put(self.partition_id, &batch)?;
-
-        Ok(batch.len() as u64)
+        Ok(mgr.batch_put(self.partition_id, &batch)?)
     }
 }

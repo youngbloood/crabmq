@@ -179,30 +179,30 @@ impl PartitionMetaManager {
     }
 
     /// 批量写入
-    pub fn batch_put(&self, partition_id: u32, mms: &[MessageMeta]) -> anyhow::Result<()> {
+    pub fn batch_put(&self, partition_id: u32, mms: &[MessageMeta]) -> anyhow::Result<u64> {
         let mut batch = WriteBatch::default();
+        let mut bytes_num = 0;
         for mm in mms {
             // 1. 按 msg_id 建索引
-            batch.put(
-                format!("id_{}:{}", partition_id, mm.msg_id),
-                bincode::serde::encode_to_vec(mm, bincode::config::standard())?,
-            );
+            let encode_vec = bincode::serde::encode_to_vec(mm, bincode::config::standard())?;
+            bytes_num += 3 * encode_vec.len();
+            batch.put(format!("id_{}:{}", partition_id, mm.msg_id), &encode_vec);
             // 2. 按时间建索引
             batch.put(
                 format!(
                     "ts_{}:{:020}:{}:{}",
                     partition_id, mm.timestamp, mm.segment_id, mm.offset
                 ),
-                bincode::serde::encode_to_vec(mm, bincode::config::standard())?,
+                &encode_vec,
             );
             // 3. 按 segment_offset 建索引（可选）
             batch.put(
                 format!("so_{}:{:08}:{:016}", partition_id, mm.segment_id, mm.offset),
-                bincode::serde::encode_to_vec(mm, bincode::config::standard())?,
+                &encode_vec,
             );
         }
         self.db.write(batch)?;
-        Ok(())
+        Ok(bytes_num as u64)
     }
 
     /// 按 msg_id 查询

@@ -45,6 +45,7 @@ impl PartitionBufferSet {
         let partition_index_writer_buffer = PartitionIndexWriterBuffer::new(
             tp.0,
             tp.1,
+            conf.clone(),
             PartitionIndexManager::new(
                 conf.storage_dir.clone(),
                 conf.partition_index_num_per_topic as _,
@@ -62,20 +63,49 @@ impl PartitionBufferSet {
 
     // will flush data and index
     pub async fn flush(&self, all: bool, fsync: bool) -> Result<u64> {
-        Ok(0)
+        // 1. 先刷数据
+        let data_bytes = self.data.flush(all, fsync).await?;
+
+        // 2. 再刷索引（索引刷盘可以稍微延迟，因为主要用于查询）
+        let index_bytes = self.index.flush(all, fsync).await?;
+
+        Ok(data_bytes + index_bytes)
     }
 
     // only flush data
     pub async fn flush_data(&self, all: bool, fsync: bool) -> Result<u64> {
-        Ok(0)
+        self.data.flush(all, fsync).await
     }
 
     // only flush index
     pub async fn flush_index(&self, all: bool, fsync: bool) -> Result<u64> {
-        Ok(0)
+        self.index.flush(all, fsync).await
     }
 
-    pub async fn write_batch(&self, batch: Vec<MessagePayload>) -> Result<()> {
+    pub async fn write_batch(
+        &self,
+        batch: Vec<MessagePayload>,
+        flush_index_on_rotation: bool,
+    ) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // 1. 先写入数据缓冲区，获取写入结果和元数据
+        // 注意：这里需要知道是否发生了翻页
+        let (_data_bytes, message_metas, did_rotate) =
+            self.data.write_batch_with_metas_and_rotation(batch).await?;
+
+        // 2. 如果发生了翻页，需要同时刷盘索引
+        if flush_index_on_rotation && did_rotate && self.index.is_dirty().await {
+            // 翻页时，确保索引也刷盘到 RocksDB，保证数据一致性
+            self.index.flush(true, false).await?;
+        }
+
+        // 3. 将索引元数据写入索引缓冲区
+        if !message_metas.is_empty() {
+            self.index.push_batch(message_metas)?;
+        }
         Ok(())
     }
 }

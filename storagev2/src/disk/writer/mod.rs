@@ -91,7 +91,6 @@ impl TopicPartitionManager {
         let cleanup_interval = Duration::from_secs(self.conf.partition_cleanup_interval);
         let inactive_threshold = Duration::from_secs(self.conf.partition_inactive_threshold);
         let stop = self.stop.clone();
-        let partition_index_manager = self.flusher.partition_index_manager.clone();
 
         tokio::spawn(async move {
             let mut interval = time::interval(cleanup_interval);
@@ -122,9 +121,6 @@ impl TopicPartitionManager {
                             // 双重检查：在持有锁后再次检查活跃性
                             if let Some(last_write) = last_write_times.get(&(topic.clone(), pid)) {
                                 if Instant::now().duration_since(*last_write) > inactive_threshold {
-                                    // 移除其index的db
-                                    partition_index_manager.remove(&topic,pid);
-
                                     // 从各组件中移除分区
                                     let key = (topic.clone(), pid);
 
@@ -160,7 +156,7 @@ impl TopicPartitionManager {
         let pwb = self
             .get_or_create_topic_partition(topic, partition_id)
             .await?;
-        pwb.write_batch(batch).await?;
+        pwb.write_batch(batch, true).await?;
         Ok(())
     }
 
@@ -257,7 +253,6 @@ impl DiskStorageWriter {
         // 启动刷盘守护任务
         let flusher = Arc::new(Flusher::new(
             stop.clone(),
-            partition_index_manager,
             cfg.flusher_partition_writer_buffer_tasks_num,
             cfg.flusher_partition_writer_ptr_tasks_num,
             cfg.flusher_partition_meta_tasks_num,
@@ -408,6 +403,7 @@ impl StorageWriter for DiskStorageWriter {
             return Err(StorageError::EmptyData);
         }
 
+        // pre check
         for msg in &mut payloads {
             if msg.msg_id.is_empty() {
                 return Err(StorageError::Unknown("msg_id 不能为空".to_string()));
@@ -424,7 +420,7 @@ impl StorageWriter for DiskStorageWriter {
         }
 
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
-            let result = pwb.write_batch(payloads).await;
+            let result = pwb.write_batch(payloads, true).await;
             self.topic_partition_manager
                 .update_last_write_time(topic, partition_id);
             let send_result = result.as_ref().map(|_| ());

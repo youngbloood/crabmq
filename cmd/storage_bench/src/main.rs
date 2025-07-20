@@ -249,6 +249,12 @@ async fn test_flush_speed_with_dynamic_rate_multi_partition(
     config.partition_writer_buffer_size = 10000; // 大缓冲区防止阻塞
     config.with_metrics = true;
 
+    // 修改刷盘配置，使其更容易触发刷盘
+    config.flusher_factor = 1024 * 1024; // 降低到 1MB
+    config.flusher_period = 10; // 降低到 10ms，更频繁检查
+    config.max_size_per_file = 1024 * 1024 * 10; // 降低到 10MB
+    config.max_msg_num_per_file = 1000; // 降低到 1000 条消息
+
     let store = DiskStorageWriterWrapper::new(config)?;
     // 测试参数
     let topic = format!("flush_speed_test_{}", partition_count);

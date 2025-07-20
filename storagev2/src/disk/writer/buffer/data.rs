@@ -242,53 +242,59 @@ impl PartitionWriterBuffer {
         ))
     }
 
-    // 写入到 buffer 中
-    pub(crate) async fn write_batch(&self, batch: Vec<MessagePayload>) -> Result<u64> {
+    pub(crate) async fn write_batch_with_metas_and_rotation(
+        &self,
+        batch: Vec<MessagePayload>,
+    ) -> Result<(u64, Vec<MessageMeta>, bool)> {
         if batch.is_empty() {
-            return Ok(0);
+            return Ok((0, Vec::new(), false));
         }
+
         let batch_len = batch.len();
         self.update_partition_state(batch_len);
 
         let mut now_total = self.write_ptr.get_offset();
         let mut now_batch_total_size = 0;
         let mut now_count = self.write_ptr.get_current_count();
+        let mut message_metas = Vec::with_capacity(batch_len);
+        let mut did_rotate = false;
+
         for data in batch {
             let bts = data.to_bytes()?;
             let should_rotate = {
                 now_total + (bts.len() as u64) > self.conf.max_size_per_file
                     || now_count + 1 >= self.conf.max_msg_num_per_file
             };
+
             if should_rotate {
+                did_rotate = true;
                 if self.conf.with_metrics {
                     self.flusher.metrics.update_data_min_start_timestamp();
                 }
                 let flush_bytes = self.flush(true, false).await?;
                 if self.conf.with_metrics {
-                    self.flusher.metrics.inc_flush_count(1, 0);
+                    self.flusher.metrics.inc_data_flush_count(1, 0);
                     self.flusher.metrics.inc_flush_bytes(flush_bytes, 0);
                     self.flusher.metrics.update_data_max_end_timestamp();
                 }
-                // self.flusher
-                //     .flush_metas(false, self.topic.clone(), self.partition_id, mms)
-                //     .await?;
+
                 self.rotate_file().await;
-                // 重置2个位置
+                // 重置位置信息
                 now_total = self.write_ptr.get_offset();
                 now_count = self.write_ptr.get_current_count();
             }
 
+            // 生成消息元数据（包含文件段、偏移量等信息）
             let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_total);
+            message_metas.push(mm);
 
             now_batch_total_size += bts.len() as u64;
             now_total += bts.len() as u64;
             now_count += 1;
 
-            // 这里将 (消息头,消息体) 单次调用 push 写入，否则有并发问题
-            // 创建消息头
+            // 创建消息头并存储到缓冲区
             let header = Bytes::from_owner(bts.len().to_be_bytes());
-            // 存储消息头和消息体（零拷贝）
-            self.queue.push((header, bts)); // data.clone() 是引用计数增量，非内存拷贝
+            self.queue.push((header, bts));
         }
 
         {
@@ -304,53 +310,39 @@ impl PartitionWriterBuffer {
             }
             let flush_bytes = self.flush(true, false).await?;
             if self.conf.with_metrics {
-                self.flusher.metrics.inc_flush_count(1, 0);
+                self.flusher.metrics.inc_data_flush_count(1, 0);
                 self.flusher.metrics.inc_flush_bytes(flush_bytes, 0);
                 self.flusher.metrics.update_data_max_end_timestamp();
             }
             self.flusher.flush_metas(false, &self.dir).await?;
         }
 
-        // 当前文件的使用率已经达到设置阈值，预创建下一个
-        // let should_pre_create = {
-        //     ((self.write_ptr.get_offset() as f64 / self.conf.max_size_per_file as f64) * 100.0)
-        //         as u64
-        //         >= self.conf.create_next_record_file_threshold as u64
-        //         && self
-        //             .has_create_next_record_file
-        //             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        //             .is_ok()
-        // };
+        Ok((now_batch_total_size, message_metas, did_rotate))
+    }
 
-        // if should_pre_create {
-        //     let next_filename = self.get_next_filename().await;
-        //     let writer_ptr = self.write_ptr.clone();
-        //     if self.fd_cache.get(&next_filename).is_none() {
-        //         let _fd_cache = self.fd_cache.clone();
-        //         tokio::spawn(async move {
-        //             if _fd_cache.get_or_create(&next_filename, true).is_ok() {
-        //                 // let mut wl = writer_ptr.write().await;
-        //                 // wl.next_filename = next_filename;
-        //                 // wl.offset = 0;
-        //             }
-        //         });
-        //     }
-        // }
-        Ok(now_batch_total_size)
+    pub(crate) async fn write_batch_with_metas(
+        &self,
+        batch: Vec<MessagePayload>,
+    ) -> Result<(u64, Vec<MessageMeta>)> {
+        let (bytes, metas, _) = self.write_batch_with_metas_and_rotation(batch).await?;
+        Ok((bytes, metas))
+    }
+
+    pub(crate) async fn write_batch(&self, batch: Vec<MessagePayload>) -> Result<u64> {
+        let (bytes, _) = self.write_batch_with_metas(batch).await?;
+        Ok(bytes)
     }
 
     // 将数据从内存刷盘
     #[cfg(not(target_os = "linux"))]
     pub(crate) async fn flush(&self, all: bool, fsync: bool) -> Result<u64> {
         // 批量获取数据
-        let batch;
-        if all {
-            batch = self.queue.pop_all();
+        let batch = if all {
+            self.queue.pop_all()
         } else {
-            batch = self
-                .queue
-                .pop_batch(self.conf.batch_pop_size_from_buffer as usize);
-        }
+            self.queue
+                .pop_batch(self.conf.batch_pop_size_from_buffer as usize)
+        };
 
         if batch.is_empty() {
             return Ok(0);

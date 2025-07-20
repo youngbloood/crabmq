@@ -4,9 +4,9 @@ use coo::coo::Coordinator;
 use logic_node::Slave;
 use std::path::PathBuf;
 use std::{net::SocketAddr, path::Path, sync::Arc};
-use storagev2::disk::DiskStorageReader;
 use storagev2::disk::DiskStorageWriter;
 use storagev2::disk::default_config;
+use storagev2::disk::{DiskStorageReader, DiskStorageWriterWrapper};
 use structopt::StructOpt;
 use tokio::sync::Mutex;
 
@@ -160,12 +160,13 @@ async fn main() -> Result<()> {
     if args.broker_args.broker.is_some() {
         let conf =
             default_config().with_storage_dir(PathBuf::from(format!("./data/message{}", args.id)));
+        let partition_index_num_per_topic = conf.partition_index_num_per_topic;
         let broker = Broker::new(
             broker::default_config()
                 .with_id(args.id)
                 .with_broker_addr(args.broker_args.broker.unwrap()),
-            DiskStorageWriter::new(conf.clone())?,
-            DiskStorageReader::new(conf.storage_dir),
+            DiskStorageWriterWrapper::new(conf.clone())?,
+            DiskStorageReader::new(conf.storage_dir, partition_index_num_per_topic),
         );
         builder = builder.broker(broker);
     }
