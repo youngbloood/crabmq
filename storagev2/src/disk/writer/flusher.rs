@@ -14,7 +14,7 @@ use std::{
 use tokio::{select, sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 
-const FLUSH_CHUNK_SIZE: usize = 50;
+const DEFAULT_CHUNK_SIZE: usize = 50;
 const CHANNEL_BUFFER_SIZE: usize = 1;
 
 #[derive(Clone, Debug)]
@@ -102,8 +102,17 @@ impl Flusher {
                             }
                             let (fsync, pwps) = res.unwrap();
                             for pwp in pwps {
-                                if let Err(e) = pwp.save(fsync).await {
-                                    error!("pwp[{:?}].save_to err: {e:?}", pwp.get_filename().await);
+                                select! {
+                                    _ = _stop.cancelled() => {
+                                        warn!("Flusher: partition_writer_ptr_tasks[{i}] receive stop signal, exit.");
+                                        break;
+                                    }
+
+                                    save_res = pwp.save(fsync) => {
+                                        if let Err(e) = save_res {
+                                            error!("pwp[{:?}].save_to err: {e:?}", pwp.get_filename().await);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -144,16 +153,25 @@ impl Flusher {
                                 _metrics.update_index_min_start_timestamp();
                             }
                             for pbs in pbss {
-                                match pbs.flush_index(false, fsync).await {
-                                    Ok(num) => {
-                                        flush_count += 1;
-                                        if with_metrics {
-                                            _metrics.inc_flush_bytes(0, num);
+                                select! {
+                                    _ = _stop.cancelled() => {
+                                        warn!("Flusher: partition_meta_tasks[{i}] receive stop signal, exit.");
+                                        break;
+                                    }
+
+                                    flush_res = pbs.flush_index(false, fsync) => {
+                                        match flush_res {
+                                            Ok(num) => {
+                                                flush_count += 1;
+                                                if with_metrics {
+                                                    _metrics.inc_flush_bytes(0, num);
+                                                }
+                                            },
+                                            Err(e) => {
+                                                error!("Flusher: partition_meta_tasks[{i}] flush err: {e:?}");
+                                                flush_err_count += 1;
+                                            }
                                         }
-                                    },
-                                    Err(e) => {
-                                        error!("Flusher: partition_meta_tasks[{i}] flush err: {e:?}");
-                                        flush_err_count += 1;
                                     }
                                 }
                             }
@@ -197,16 +215,25 @@ impl Flusher {
                                 _metrics.update_data_min_start_timestamp();
                             }
                             for pbs in pbss {
-                                match pbs.flush_data(false, fsync).await {
-                                    Ok(num) => {
-                                        flush_count += 1;
-                                        if with_metrics {
-                                            _metrics.inc_flush_bytes(num, 0);
+                                select! {
+                                    _ = _stop.cancelled() => {
+                                        warn!("Flusher: partition_writer_buffer_tasks[{i}] receive stop signal, exit.");
+                                        break;
+                                    }
+
+                                    flush_res = pbs.flush_data(false, fsync) => {
+                                        match flush_res {
+                                            Ok(num) => {
+                                                flush_count += 1;
+                                                if with_metrics {
+                                                    _metrics.inc_flush_bytes(num, 0);
+                                                }
+                                            },
+                                            Err(e) => {
+                                                error!("Flusher: partition_writer_buffer_tasks[{i}] flush err: {e:?}");
+                                                flush_err_count += 1;
+                                            }
                                         }
-                                    },
-                                    Err(e) => {
-                                        error!("Flusher: partition_writer_buffer_tasks[{i}] flush err: {e:?}");
-                                        flush_err_count += 1;
                                     }
                                 }
                             }
@@ -239,10 +266,10 @@ impl Flusher {
     }
 
     pub(crate) async fn run(&self, mut flush_signal: mpsc::Receiver<()>) {
-        let mut state_updater = tokio::time::interval(Duration::from_secs(5));
+        let mut state_updater = tokio::time::interval(Duration::from_secs(2)); // 更频繁的状态更新
         let mut hot_ticker = time::interval(self.interval);
-        let mut warm_ticker = time::interval(self.interval * 10 * 10);
-        let mut cold_ticker = time::interval(self.interval * 10 * 10 * 2);
+        let mut warm_ticker = time::interval(self.interval * 10);
+        let mut cold_ticker = time::interval(self.interval * 10 * 10);
         loop {
             select! {
                 _ = hot_ticker.tick() => {
@@ -326,11 +353,13 @@ impl Flusher {
 
     pub(crate) fn calculate_flush_state(last_write_time: Instant) -> FlushState {
         let now = Instant::now();
-        if now.duration_since(last_write_time) < Duration::from_secs(10) {
+        let duration = now.duration_since(last_write_time);
+        if duration < Duration::from_secs(10) {
             FlushState::Hot
-        } else if now.duration_since(last_write_time) < Duration::from_secs(60) {
+        } else if duration < Duration::from_secs(60) {
             FlushState::Warm
-        } else if now.duration_since(last_write_time) > Duration::from_secs(60) {
+        } else if duration > Duration::from_secs(300) {
+            // 5分钟未写入才标记为Stale
             FlushState::Stale
         } else {
             FlushState::Cold
@@ -382,14 +411,14 @@ impl Flusher {
             .iter()
             .map(|e| e.value().clone())
             .collect();
-
-        let chunks = partition_writer_ptrs.chunks(FLUSH_CHUNK_SIZE);
-        for chunk in chunks {
-            let idx = rand::random::<u32>() as usize;
-            if let Err(e) = self.partition_writer_ptr_tasks
-                [idx % self.partition_writer_ptr_tasks_num]
-                .try_send((fsync, chunk.to_vec()))
-            {
+        let chunk_size = (partition_writer_ptrs
+            .len()
+            .div_ceil(self.partition_writer_ptr_tasks_num))
+        .max(DEFAULT_CHUNK_SIZE);
+        let chunks = partition_writer_ptrs.chunks(chunk_size);
+        for (i, chunk) in chunks.enumerate() {
+            let idx = i % self.partition_writer_ptr_tasks_num;
+            if let Err(e) = self.partition_writer_ptr_tasks[idx].try_send((fsync, chunk.to_vec())) {
                 error!("Flusher: flush_all send PartitionWriterPtr err: {e:?}")
             }
         }
@@ -421,14 +450,23 @@ impl Flusher {
             .map(|entry| entry.value().clone())
             .collect();
 
+        let chunk_size = (writers
+            .len()
+            .div_ceil(self.partition_writer_buffer_tasks_num))
+        .max(DEFAULT_CHUNK_SIZE);
         // 每个task最大批次处理 FLUSH_CHUNK_SIZE 大小的刷盘任务
-        let chunks = writers.chunks(FLUSH_CHUNK_SIZE);
-        for chunk in chunks {
-            /* 计算任务索引 */
-            let idx = rand::random::<u32>() as usize;
-            if let Err(e) = self.partition_writer_buffer_tasks
-                [idx % self.partition_writer_buffer_tasks_num]
-                .try_send((fsync, chunk.to_vec()))
+        let chunks = writers.chunks(chunk_size);
+        for (i, chunk) in chunks.enumerate() {
+            /* 使用轮询分配任务，确保负载均衡 */
+            let idx = i % self.partition_writer_buffer_tasks_num;
+            if let Err(e) =
+                self.partition_writer_buffer_tasks[idx].try_send((fsync, chunk.to_vec()))
+            // 发送不成功就进入下次循环发送，不阻塞
+            {
+                error!("Flush error: {:?}", e);
+            }
+
+            if let Err(e) = self.partition_meta_tasks[idx].try_send((fsync, chunk.to_vec()))
             // 发送不成功就进入下次循环发送，不阻塞
             {
                 error!("Flush error: {:?}", e);

@@ -145,9 +145,8 @@ impl StorageReaderSession for DiskStorageReaderSession {
             let (data, offset, last) = reader.next().await?;
             if !data.is_empty() {
                 let payload: MessagePayload =
-                    bincode::decode_from_slice(&data, bincode::config::standard())
-                        .map_err(|e| StorageError::SerializeError(e.to_string()))?
-                        .0;
+                    rkyv::from_bytes::<MessagePayload, rkyv::rancor::Error>(&data)
+                        .map_err(|e| StorageError::SerializeError(e.to_string()))?;
                 list.push((payload, data.len() as u64, offset));
             }
             if last {
@@ -494,9 +493,21 @@ mod test {
             .new_session(1000, vec![])
             .await
             .expect("new session failed");
-        while let Ok(data) = sess.next("mytopic", 6, NonZero::new(1_u64).unwrap()).await {
+
+        let topic: &'static str = "mytopic";
+        let partition_id = 6;
+
+        while let Ok(data) = sess
+            .next(&topic, partition_id, NonZero::new(1_u64).unwrap())
+            .await
+        {
             println!("data.len() = {}", data.len());
             println!("payload.len() = {}", data.first().unwrap().0.payload.len());
+            for d in data {
+                if let Err(e) = sess.commit(&topic, partition_id, d.2).await {
+                    eprintln!("commit err: {e:?}");
+                }
+            }
         }
     }
 }

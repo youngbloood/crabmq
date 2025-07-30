@@ -96,7 +96,7 @@ impl PartitionBufferSet {
         let (_data_bytes, message_metas, did_rotate) =
             self.data.write_batch_with_metas_and_rotation(batch).await?;
 
-        // 2. 如果发生了翻页，需要同时刷盘索引
+        // 2. 如果发生了翻页，先刷盘数据索引
         if flush_index_on_rotation && did_rotate && self.index.is_dirty().await {
             // 翻页时，确保索引也刷盘到 RocksDB，保证数据一致性
             self.index.flush(true, false).await?;

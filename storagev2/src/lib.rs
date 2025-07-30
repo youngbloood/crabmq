@@ -1,12 +1,12 @@
 pub mod disk;
 pub mod mem;
 pub mod metrics;
-use bincode::{Decode, Encode};
 pub use mem::*;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::{collections::HashMap, num::NonZero};
 use tokio::sync::oneshot;
 
@@ -19,7 +19,8 @@ pub struct MessageMeta {
     pub msg_len: u32,
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+// TODO: 使用 rkyv 替换 bincode, 使用 rkyv 的 string 类型，msg_id 使用零拷贝
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct MessagePayload {
     pub msg_id: String,
     pub timestamp: u64,
@@ -29,24 +30,24 @@ pub struct MessagePayload {
 
 impl MessagePayload {
     pub(crate) fn to_vec(&self) -> Result<Vec<u8>> {
-        let bts = bincode::encode_to_vec(self, bincode::config::standard())?;
-        Ok(bts)
+        let bts = rkyv::to_bytes::<rkyv::rancor::Error>(self)?;
+        Ok(bts.to_vec())
     }
 
     pub(crate) fn to_bytes(&self) -> Result<Bytes> {
-        let bts = bincode::encode_to_vec(self, bincode::config::standard())?;
+        let bts = self.to_vec()?;
         let b = Bytes::from_owner(bts);
         Ok(b)
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
-        let bts = bincode::encode_to_vec(self, bincode::config::standard())?;
+        let bts = self.to_vec()?;
         Ok(bts.len())
     }
 
     pub(crate) fn gen_meta(&self, segment_id: u64, offset: u64) -> MessageMeta {
         MessageMeta {
-            msg_id: self.msg_id.clone(),
+            msg_id: self.msg_id.as_str().to_string(),
             timestamp: self.timestamp,
             segment_id,
             offset,

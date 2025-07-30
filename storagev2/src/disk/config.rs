@@ -3,6 +3,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub storage_dir: PathBuf,
+
     // 刷盘相关配置
     // 刷盘周期，单位 ms
     pub flusher_period: u64,
@@ -16,8 +17,6 @@ pub struct Config {
     pub flusher_partition_meta_tasks_num: usize,
 
     // 每个分区配置
-    // PartitionWriter 中内存缓冲区长度，每个分区缓存写入消息的长度
-    pub partition_writer_buffer_size: usize,
     // partition record file prealloc
     pub partition_writer_prealloc: bool,
     // 分区活跃检查间隔(秒)
@@ -38,8 +37,6 @@ pub struct Config {
     pub max_size_per_file: u64,
     pub compress_type: u8,
 
-    pub fd_cache_size: u64,
-
     // 预创建下一个消息文件的阈值，默认: 90，即当前文件已写了90%，开启下一个文件的预创建
     pub create_next_record_file_threshold: u8,
 
@@ -59,7 +56,6 @@ impl Config {
         must_gt_zero("flusher_factor", self.flusher_factor)?;
         must_gt_zero("max_msg_num_per_file", self.max_msg_num_per_file)?;
         must_gt_zero("max_size_per_file", self.max_size_per_file)?;
-        must_gt_zero("fd_cache_size", self.fd_cache_size)?;
         must_gt_zero(
             "create_next_record_file_threshold",
             self.create_next_record_file_threshold as _,
@@ -83,17 +79,15 @@ pub fn default_config() -> Config {
         flusher_partition_writer_buffer_tasks_num: 64,
         flusher_partition_writer_ptr_tasks_num: 64,
         flusher_partition_meta_tasks_num: 64,
-        partition_writer_buffer_size: 100,
         partition_writer_prealloc: false,
         partition_cleanup_interval: 150,
         partition_inactive_threshold: 300,
-        batch_pop_size_from_buffer: 200,
+        batch_pop_size_from_buffer: 500,
         partition_index_num_per_topic: 100,
         max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
         max_size_per_file: 1024 * 1024 * 1024, // 1G
         compress_type: 0,
         writer_worker_tasks_num: 100,
-        fd_cache_size: 256,
         create_next_record_file_threshold: 90,
         with_metrics: false,
     }

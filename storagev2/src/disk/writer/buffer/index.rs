@@ -61,7 +61,10 @@ impl BufferFlushable for PartitionIndexWriterBuffer {
             .index_manager
             .get_or_create(&self.topic, self.partition_id)
             .await?;
-
-        Ok(mgr.batch_put(self.partition_id, &batch)?)
+        let bytes_len = mgr.batch_put(self.partition_id, &batch)?;
+        if _fsync {
+            mgr.db.flush()?;
+        }
+        Ok(bytes_len)
     }
 }
