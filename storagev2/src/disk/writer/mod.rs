@@ -246,10 +246,6 @@ impl DiskStorageWriter {
         cfg.validate()?;
         let cfg = Arc::new(cfg);
 
-        let partition_index_manager = PartitionIndexManager::new(
-            cfg.storage_dir.clone(),
-            cfg.partition_index_num_per_topic as _,
-        );
         // 启动刷盘守护任务
         let flusher = Arc::new(Flusher::new(
             stop.clone(),
@@ -315,7 +311,7 @@ impl DiskStorageWriter {
     }
 
     // 单独刷盘某个 topic-partition
-    async fn flush_topic_partition_force(&self, topic: &str, partition_id: u32) -> Result<()> {
+    pub async fn flush_topic_partition_force(&self, topic: &str, partition_id: u32) -> Result<()> {
         if self
             .topic_partition_manager
             .get_cached_topic_partition(topic, partition_id)
@@ -459,6 +455,12 @@ impl Deref for DiskStorageWriterWrapper {
 
 impl DiskStorageWriterWrapper {
     pub fn new(cfg: DiskConfig) -> Result<Self> {
+        // 初始化全局 PartitionIndexManager
+        crate::disk::partition_index::init_global_partition_index_manager(
+            cfg.storage_dir.clone(),
+            cfg.partition_index_num_per_topic as _,
+        )?;
+
         let stop = CancellationToken::new();
         let dsw = DiskStorageWriter::new(cfg, stop.clone())?;
         Ok(Self {

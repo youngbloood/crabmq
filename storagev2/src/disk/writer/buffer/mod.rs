@@ -46,10 +46,7 @@ impl PartitionBufferSet {
             tp.0,
             tp.1,
             conf.clone(),
-            PartitionIndexManager::new(
-                conf.storage_dir.clone(),
-                conf.partition_index_num_per_topic as _,
-            ),
+            crate::disk::partition_index::get_global_partition_index_manager_unchecked(),
         );
         let partition_writer_buffer =
             PartitionWriterBuffer::new(dir.clone(), conf, write_ptr, flusher).await?;

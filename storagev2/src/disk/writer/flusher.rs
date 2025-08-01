@@ -368,17 +368,25 @@ impl Flusher {
 
     // 刷指定的 topic-parition 消息文件
     pub(crate) async fn flush_topic_partition(&self, p: &PathBuf, fsync: bool) -> Result<()> {
-        let pwb = self.partition_writer_buffers.get(p);
-        if pwb.is_none() {
+        let pbs = self.partition_writer_buffers.get(p);
+        if pbs.is_none() {
             return Err(anyhow!(
                 StorageError::PartitionNotFound("Flusher".to_string()).to_string()
             ));
         }
-        let pwb = pwb.unwrap();
+        let pbs = pbs.unwrap();
         let idx = rand::random::<u32>() as usize;
+
+        // 刷盘数据
         self.partition_writer_buffer_tasks[idx % self.partition_writer_buffer_tasks_num]
-            .send((fsync, vec![pwb.value().clone()]))
+            .send((fsync, vec![pbs.value().clone()]))
             .await?;
+
+        // 刷盘索引
+        self.partition_meta_tasks[idx % self.partition_meta_tasks_num]
+            .send((fsync, vec![pbs.value().clone()]))
+            .await?;
+
         Ok(())
     }
 

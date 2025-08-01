@@ -3,12 +3,38 @@ use crate::{MessageMeta, SegmentOffset, StorageError, StorageResult};
 use anyhow::Result;
 use dashmap::DashMap;
 use murmur3::murmur3_32;
+use once_cell::sync::OnceCell;
 use rocksdb::{DB, DBCompressionType, IteratorMode, Options, WriteBatch};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
+
+// 全局 PartitionIndexManager 实例
+static GLOBAL_PARTITION_INDEX_MANAGER: OnceCell<Arc<PartitionIndexManager>> = OnceCell::new();
+
+/// 初始化全局 PartitionIndexManager 实例
+pub fn init_global_partition_index_manager(dir: PathBuf, size: usize) -> Result<()> {
+    let manager = Arc::new(PartitionIndexManager::new(dir, size));
+    GLOBAL_PARTITION_INDEX_MANAGER
+        .set(manager)
+        .map_err(|_| anyhow::anyhow!("Global PartitionIndexManager already initialized"))?;
+    Ok(())
+}
+
+/// 获取全局 PartitionIndexManager 实例
+pub fn get_global_partition_index_manager() -> Option<Arc<PartitionIndexManager>> {
+    GLOBAL_PARTITION_INDEX_MANAGER.get().cloned()
+}
+
+/// 获取全局 PartitionIndexManager 实例，如果未初始化则panic
+pub fn get_global_partition_index_manager_unchecked() -> Arc<PartitionIndexManager> {
+    GLOBAL_PARTITION_INDEX_MANAGER
+        .get()
+        .expect("Global PartitionIndexManager not initialized")
+        .clone()
+}
 
 #[derive(Debug)]
 struct RefCountedPartitionMetaManager {

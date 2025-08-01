@@ -253,7 +253,7 @@ impl PartitionWriterBuffer {
         let batch_len = batch.len();
         self.update_partition_state(batch_len);
 
-        let mut now_total = self.write_ptr.get_offset();
+        let mut now_ptr_offset = self.write_ptr.get_offset();
         let mut now_batch_total_size = 0;
         let mut now_count = self.write_ptr.get_current_count();
         let mut message_metas = Vec::with_capacity(batch_len);
@@ -262,7 +262,7 @@ impl PartitionWriterBuffer {
         for data in batch {
             let bts = data.to_bytes()?;
             let should_rotate = {
-                now_total + (bts.len() as u64) > self.conf.max_size_per_file
+                now_ptr_offset + (bts.len() as u64) > self.conf.max_size_per_file
                     || now_count + 1 >= self.conf.max_msg_num_per_file
             };
 
@@ -280,16 +280,16 @@ impl PartitionWriterBuffer {
 
                 self.rotate_file().await;
                 // 重置位置信息
-                now_total = self.write_ptr.get_offset();
+                now_ptr_offset = self.write_ptr.get_offset();
                 now_count = self.write_ptr.get_current_count();
             }
 
             // 生成消息元数据（包含文件段、偏移量等信息）
-            let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_total);
+            let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_ptr_offset);
             message_metas.push(mm);
 
-            now_batch_total_size += bts.len() as u64;
-            now_total += bts.len() as u64;
+            now_batch_total_size += 8 + bts.len() as u64;
+            now_ptr_offset += 8 + bts.len() as u64;
             now_count += 1;
 
             // 创建消息头并存储到缓冲区

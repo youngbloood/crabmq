@@ -11,7 +11,7 @@ pub struct PartitionIndexWriterBuffer {
     pub partition_id: u32,
     conf: Arc<DiskConfig>,
     queue: SwitchQueue<MessageMeta>,
-    index_manager: PartitionIndexManager,
+    index_manager: Arc<PartitionIndexManager>,
 }
 
 impl PartitionIndexWriterBuffer {
@@ -19,7 +19,7 @@ impl PartitionIndexWriterBuffer {
         topic: String,
         partition_id: u32,
         conf: Arc<DiskConfig>,
-        index_manager: PartitionIndexManager,
+        index_manager: Arc<PartitionIndexManager>,
     ) -> Self {
         Self {
             topic,
