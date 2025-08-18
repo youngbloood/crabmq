@@ -441,6 +441,9 @@ impl Drop for DiskStorageWriterWrapper {
     fn drop(&mut self) {
         if Arc::strong_count(&self.inner) == 1 {
             self.stop.cancel();
+            // 释放全局 PartitionIndexManager
+            let storage_dir = self.inner.conf.storage_dir.clone();
+            crate::disk::partition_index::release_global_partition_index_manager(&storage_dir);
         }
     }
 }

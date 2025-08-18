@@ -93,7 +93,8 @@ impl DiskStorageReaderSession {
             read_positions: Arc::new(m),
             readers: Arc::default(),
             partition_index_manager:
-                crate::disk::partition_index::get_global_partition_index_manager_unchecked(),
+                crate::disk::partition_index::get_global_partition_index_manager_for_root(&dir)
+                    .expect("PartitionIndexManager should be initialized"),
         }
     }
 

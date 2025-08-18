@@ -371,38 +371,48 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
 
     // 预热阶段
     println!("[预热] 开始预热 {} 个分区...", partition_count);
-    let warmup_start = Instant::now();
-    let mut warmup_handles = vec![];
 
-    for partition in 0..partition_count {
-        let store = store.clone();
-        let message_pool = message_pool.clone();
-        let topic = topic.clone();
-        warmup_handles.push(tokio::spawn(async move {
-            while warmup_start.elapsed() < warmup_duration {
-                let msg = message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                let payload = MessagePayload {
-                    msg_id: nanoid!(),
-                    timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                    metadata: Default::default(),
-                    payload: msg.to_vec(),
-                };
-                let (notify_tx, notify_rx) = oneshot::channel();
-                if let Err(e) = store
-                    .store(&topic, partition, vec![payload], Some(notify_tx))
-                    .await
-                {
-                    eprintln!("store.store err: {e:?}");
+    // 限制预热并发，每批 32 个分区
+    const WARMUP_BATCH_SIZE: usize = 32;
+    for partition_batch in (0..partition_count).step_by(WARMUP_BATCH_SIZE) {
+        let mut batch_handles = vec![];
+        let batch_end = (partition_batch + WARMUP_BATCH_SIZE).min(partition_count as usize);
+        println!("[预热] 开始预热分区 {}-{}", partition_batch, batch_end);
+
+        for partition in partition_batch..batch_end {
+            let store = store.clone();
+            let message_pool = message_pool.clone();
+            let topic = topic.clone();
+            batch_handles.push(tokio::spawn(async move {
+                // 每个分区只写入 10 条消息
+                for _ in 0..10 {
+                    let msg = message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
+                    let payload = MessagePayload {
+                        msg_id: nanoid!(),
+                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                        metadata: Default::default(),
+                        payload: msg.to_vec(),
+                    };
+                    let (notify_tx, notify_rx) = oneshot::channel();
+                    if let Err(e) = store
+                        .store(&topic, partition as u32, vec![payload], Some(notify_tx))
+                        .await
+                    {
+                        eprintln!("store.store err: {e:?}");
+                    }
+                    if let Err(e) = notify_rx.await {
+                        eprintln!("store err: {e:?}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                if let Err(e) = notify_rx.await {
-                    eprintln!("store err: {e:?}");
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }));
+            }));
+        }
+
+        // 等待当前批次完成
+        futures::future::join_all(batch_handles).await;
+        println!("[预热] 完成分区 {}-{}", partition_batch, batch_end);
     }
 
-    futures::future::join_all(warmup_handles).await;
     println!("[预热] 完成");
 
     // 初始化火焰图控制器

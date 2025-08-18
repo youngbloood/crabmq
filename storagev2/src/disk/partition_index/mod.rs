@@ -3,7 +3,6 @@ use crate::{MessageMeta, SegmentOffset, StorageError, StorageResult};
 use anyhow::Result;
 use dashmap::DashMap;
 use murmur3::murmur3_32;
-use once_cell::sync::OnceCell;
 use rocksdb::{DB, DBCompressionType, IteratorMode, Options, WriteBatch};
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -11,29 +10,41 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
-// 全局 PartitionIndexManager 实例
-static GLOBAL_PARTITION_INDEX_MANAGER: OnceCell<Arc<PartitionIndexManager>> = OnceCell::new();
+// 基于 storage 根目录的全局 PartitionIndexManager 注册表
+// key: storage_root_dir
+static GLOBAL_PARTITION_INDEX_MANAGERS: once_cell::sync::Lazy<
+    DashMap<PathBuf, (Arc<PartitionIndexManager>, AtomicUsize)>,
+> = once_cell::sync::Lazy::new(|| DashMap::new());
 
-/// 初始化全局 PartitionIndexManager 实例
+/// 初始化或增加指定 storage 根目录下的 PartitionIndexManager 引用计数
 pub fn init_global_partition_index_manager(dir: PathBuf, size: usize) -> Result<()> {
-    let manager = Arc::new(PartitionIndexManager::new(dir, size));
-    GLOBAL_PARTITION_INDEX_MANAGER
-        .set(manager)
-        .map_err(|_| anyhow::anyhow!("Global PartitionIndexManager already initialized"))?;
+    if let Some(mut entry) = GLOBAL_PARTITION_INDEX_MANAGERS.get_mut(&dir) {
+        entry.value().1.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
+    let mgr = Arc::new(PartitionIndexManager::new(dir.clone(), size));
+    GLOBAL_PARTITION_INDEX_MANAGERS.insert(dir, (mgr, AtomicUsize::new(1)));
     Ok(())
 }
 
-/// 获取全局 PartitionIndexManager 实例
-pub fn get_global_partition_index_manager() -> Option<Arc<PartitionIndexManager>> {
-    GLOBAL_PARTITION_INDEX_MANAGER.get().cloned()
+/// 获取指定 storage 根目录的 PartitionIndexManager
+pub fn get_global_partition_index_manager_for_root(
+    root: &PathBuf,
+) -> Option<Arc<PartitionIndexManager>> {
+    GLOBAL_PARTITION_INDEX_MANAGERS
+        .get(root)
+        .map(|v| v.value().0.clone())
 }
 
-/// 获取全局 PartitionIndexManager 实例，如果未初始化则panic
-pub fn get_global_partition_index_manager_unchecked() -> Arc<PartitionIndexManager> {
-    GLOBAL_PARTITION_INDEX_MANAGER
-        .get()
-        .expect("Global PartitionIndexManager not initialized")
-        .clone()
+/// 释放（减少引用计数），引用为 0 时移除并触发 Drop
+pub fn release_global_partition_index_manager(root: &PathBuf) {
+    if let Some(mut entry) = GLOBAL_PARTITION_INDEX_MANAGERS.get_mut(root) {
+        let remain = entry.value().1.fetch_sub(1, Ordering::Release) - 1;
+        if remain == 0 {
+            // 移除，从而触发 Arc 最终 Drop
+            GLOBAL_PARTITION_INDEX_MANAGERS.remove(root);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -108,20 +119,28 @@ impl PartitionIndexManager {
             return Ok(rcpm.value().pmm.clone());
         }
 
-        // 获取或创建partition级别的锁
+        // 1. 获取锁（短时间）
         let _partition_lock = self
             .partitions_lock
             .entry(key.clone())
             .or_insert_with(|| Mutex::new(()));
-        let _topic_partition_lock = _partition_lock.value().lock().await;
-        // 第二重检查：在持有锁后再次检查
+
+        // 2. 再次检查（不持锁）
         if let Some(rcpm) = self.partitions.get(&key) {
-            return Ok(rcpm.pmm.clone());
+            rcpm.value().inc();
+            return Ok(rcpm.value().pmm.clone());
         }
-        // 无：初始化并插入
-        let pm = Arc::new(PartitionMetaManager::open(&key)?);
-        let rcpm = RefCountedPartitionMetaManager::new(pm.clone());
-        self.partitions.insert(key, rcpm);
+
+        // 3. 初始化（不持锁）
+        let key_clone = key.clone();
+        let partitions = self.partitions.clone();
+        let pm = tokio::task::spawn_blocking(move || {
+            let pm = Arc::new(PartitionMetaManager::open(&key_clone)?);
+            let rcpm = RefCountedPartitionMetaManager::new(pm.clone());
+            partitions.insert(key_clone, rcpm);
+            Ok::<_, anyhow::Error>(pm)
+        })
+        .await??;
         Ok(pm)
     }
 
