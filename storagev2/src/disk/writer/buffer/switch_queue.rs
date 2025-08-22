@@ -91,7 +91,7 @@ impl<T> SwitchQueue<T> {
         let mut results = Vec::new();
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
 
-        let (active_queue, inactive_queue) = if current {
+        let (active_queue, _inactive_queue) = if current {
             (&self.queue_b, &self.queue_a)
         } else {
             (&self.queue_a, &self.queue_b)

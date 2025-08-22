@@ -1,5 +1,5 @@
 use super::BufferFlushable;
-use crate::disk::partition_index::PartitionIndexManager;
+use crate::disk::partition_index::ReadWritePartitionIndexManager;
 use crate::{
     MessageMeta, disk::Config as DiskConfig, disk::writer::buffer::switch_queue::SwitchQueue,
 };
@@ -11,7 +11,8 @@ pub struct PartitionIndexWriterBuffer {
     pub partition_id: u32,
     conf: Arc<DiskConfig>,
     queue: SwitchQueue<MessageMeta>,
-    index_manager: Arc<PartitionIndexManager>,
+    // 使用读写分离的索引管理器，专门用于写入
+    read_write_index_manager: Arc<ReadWritePartitionIndexManager>,
 }
 
 impl PartitionIndexWriterBuffer {
@@ -19,14 +20,20 @@ impl PartitionIndexWriterBuffer {
         topic: String,
         partition_id: u32,
         conf: Arc<DiskConfig>,
-        index_manager: Arc<PartitionIndexManager>,
+        storage_dir: std::path::PathBuf,
     ) -> Self {
+        // 创建读写分离的索引管理器，专门用于写入操作
+        let read_write_index_manager = Arc::new(ReadWritePartitionIndexManager::new(
+            storage_dir,
+            conf.partition_index_num_per_topic as _,
+        ));
+
         Self {
             topic,
             partition_id,
             conf,
             queue: SwitchQueue::new(),
-            index_manager,
+            read_write_index_manager,
         }
     }
 
@@ -36,6 +43,11 @@ impl PartitionIndexWriterBuffer {
             self.queue.push(meta);
         }
         Ok(())
+    }
+
+    /// 获取读写分离的索引管理器（用于外部访问）
+    pub fn get_read_write_index_manager(&self) -> Arc<ReadWritePartitionIndexManager> {
+        self.read_write_index_manager.clone()
     }
 }
 
@@ -56,15 +68,23 @@ impl BufferFlushable for PartitionIndexWriterBuffer {
         if batch.is_empty() {
             return Ok(0);
         }
-        // 批量写入 rocksdb
-        let mgr = self
-            .index_manager
-            .get_or_create(&self.topic, self.partition_id)
+
+        // 使用读写分离的索引管理器进行批量写入
+        let bytes_len = self
+            .read_write_index_manager
+            .batch_put(&self.topic, self.partition_id, &batch)
             .await?;
-        let bytes_len = mgr.batch_put(self.partition_id, &batch)?;
+
+        // 如果需要强制刷盘
         if _fsync {
-            mgr.db.flush()?;
+            // 获取写实例并强制刷盘
+            let write_instance = self
+                .read_write_index_manager
+                .get_write_instance(&self.topic, self.partition_id)
+                .await?;
+            write_instance.db.flush()?;
         }
+
         Ok(bytes_len)
     }
 }

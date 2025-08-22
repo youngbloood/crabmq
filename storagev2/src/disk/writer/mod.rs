@@ -4,7 +4,6 @@ mod flusher;
 
 use super::Config as DiskConfig;
 use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
-use crate::disk::PartitionIndexManager;
 use crate::disk::meta::WriterPositionPtr;
 use crate::disk::writer::buffer::PartitionBufferSet;
 use crate::metrics::StorageWriterMetrics;
@@ -383,8 +382,7 @@ impl DiskStorageWriter {
     }
 }
 
-#[async_trait::async_trait]
-impl StorageWriter for DiskStorageWriter {
+impl DiskStorageWriter {
     async fn store(
         &self,
         topic: &str,
@@ -439,11 +437,14 @@ pub struct DiskStorageWriterWrapper {
 
 impl Drop for DiskStorageWriterWrapper {
     fn drop(&mut self) {
+        // 只有当 Arc 的引用计数为 1 时，说明这是最后一个 DiskStorageWriterWrapper
+        // 此时才应该触发 stop.cancel()
         if Arc::strong_count(&self.inner) == 1 {
             self.stop.cancel();
-            // 释放全局 PartitionIndexManager
+            // 清理 RocksDB 实例
             let storage_dir = self.inner.conf.storage_dir.clone();
-            crate::disk::partition_index::release_global_partition_index_manager(&storage_dir);
+            crate::disk::partition_index::get_global_rocksdb_instance_manager()
+                .cleanup_storage_root(&storage_dir);
         }
     }
 }
@@ -458,11 +459,7 @@ impl Deref for DiskStorageWriterWrapper {
 
 impl DiskStorageWriterWrapper {
     pub fn new(cfg: DiskConfig) -> Result<Self> {
-        // 初始化全局 PartitionIndexManager
-        crate::disk::partition_index::init_global_partition_index_manager(
-            cfg.storage_dir.clone(),
-            cfg.partition_index_num_per_topic as _,
-        )?;
+        // 不再需要初始化全局 PartitionIndexManager，因为现在使用读写分离的架构
 
         let stop = CancellationToken::new();
         let dsw = DiskStorageWriter::new(cfg, stop.clone())?;

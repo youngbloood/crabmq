@@ -136,7 +136,7 @@ mod generic {
             return Ok(());
         }
 
-        let mut buf = vec![0u8; BLOCK_SIZE];
+        let buf = vec![0u8; BLOCK_SIZE];
         let mut pos = current_len;
 
         while pos < len {

@@ -5,7 +5,7 @@ mod switch_queue;
 use crate::{
     MessagePayload,
     disk::{
-        Config as DiskConfig, PartitionIndexManager,
+        Config as DiskConfig,
         meta::WriterPositionPtr,
         writer::{
             buffer::{data::PartitionWriterBuffer, index::PartitionIndexWriterBuffer},
@@ -22,6 +22,7 @@ pub trait BufferFlushable {
     async fn is_dirty(&self) -> bool;
 }
 
+// 每个 topic-partition 对应一个缓冲区集合
 #[derive(Clone)]
 pub struct PartitionBufferSet {
     pub(crate) dir: PathBuf,
@@ -42,14 +43,12 @@ impl PartitionBufferSet {
         }
         let tp = tp.unwrap();
 
+        // 使用读写分离的索引管理器，不再依赖全局变量
         let partition_index_writer_buffer = PartitionIndexWriterBuffer::new(
             tp.0,
             tp.1,
             conf.clone(),
-            crate::disk::partition_index::get_global_partition_index_manager_for_root(
-                &conf.storage_dir,
-            )
-            .expect("PartitionIndexManager should be initialized"),
+            conf.storage_dir.clone(), // 直接传递存储目录
         );
         let partition_writer_buffer =
             PartitionWriterBuffer::new(dir.clone(), conf, write_ptr, flusher).await?;
@@ -107,6 +106,13 @@ impl PartitionBufferSet {
             self.index.push_batch(message_metas)?;
         }
         Ok(())
+    }
+
+    /// 获取读写分离的索引管理器（用于外部访问）
+    pub fn get_read_write_index_manager(
+        &self,
+    ) -> Arc<crate::disk::partition_index::ReadWritePartitionIndexManager> {
+        self.index.get_read_write_index_manager()
     }
 }
 

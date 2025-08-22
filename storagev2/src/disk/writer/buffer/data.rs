@@ -154,7 +154,7 @@ impl PartitionWriterBuffer {
             factor.fetch_add(1, Ordering::Relaxed);
         }
 
-        let max_size_per_file = if conf.partition_writer_prealloc {
+        let _max_size_per_file = if conf.partition_writer_prealloc {
             conf.max_size_per_file
         } else {
             0

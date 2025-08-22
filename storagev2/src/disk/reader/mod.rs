@@ -1,7 +1,6 @@
 use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
 use crate::MessagePayload;
-use crate::disk::PartitionIndexManager;
 use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
 use crate::{ReadPosition, SegmentOffset, StorageError, StorageResult};
 use crate::{StorageReader, StorageReaderSession};
@@ -71,7 +70,8 @@ pub struct DiskStorageReaderSession {
     // (topic, partition_id) -> FdReaderCacheAync
     readers: Arc<DashMap<(String, u32), DiskStorageReaderSessionPartition>>,
 
-    partition_index_manager: Arc<PartitionIndexManager>,
+    // 使用读写分离的索引管理器，专门用于读取操作
+    read_write_index_manager: Arc<crate::disk::partition_index::ReadWritePartitionIndexManager>,
 }
 
 impl DiskStorageReaderSession {
@@ -86,15 +86,21 @@ impl DiskStorageReaderSession {
             m.insert(k.clone(), v.clone());
         });
 
+        // 创建读写分离的索引管理器，专门用于读取操作
+        let read_write_index_manager = Arc::new(
+            crate::disk::partition_index::ReadWritePartitionIndexManager::new(
+                dir.clone(),
+                partition_index_num_per_topic as _,
+            ),
+        );
+
         Self {
             dir: dir.clone(),
             group_id,
             partition_index_num_per_topic,
             read_positions: Arc::new(m),
             readers: Arc::default(),
-            partition_index_manager:
-                crate::disk::partition_index::get_global_partition_index_manager_for_root(&dir)
-                    .expect("PartitionIndexManager should be initialized"),
+            read_write_index_manager,
         }
     }
 
@@ -103,6 +109,13 @@ impl DiskStorageReaderSession {
             return v.value().clone();
         }
         ReadPosition::Begin
+    }
+
+    /// 获取读写分离的索引管理器（用于外部访问）
+    pub fn get_read_write_index_manager(
+        &self,
+    ) -> Arc<crate::disk::partition_index::ReadWritePartitionIndexManager> {
+        self.read_write_index_manager.clone()
     }
 }
 
@@ -174,16 +187,11 @@ impl StorageReaderSession for DiskStorageReaderSession {
                 ))
             })?;
 
-        // 使用 partition_index_manager 验证 offset 的有效性
-        let index = self
-            .partition_index_manager
-            .get_or_create(topic, partition_id)
+        // 使用读写分离的索引管理器验证 offset 的有效性
+        let _ = self
+            .read_write_index_manager
+            .get_msg_id_by_segment_offset(topic, partition_id, &offset)
             .await
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
-
-        // 验证 offset 是否对应一个真实的消息
-        let _ = index
-            .get_msg_id_by_segment_offset(partition_id, &offset)
             .map_err(|e| {
                 StorageError::OffsetMismatch(format!("Invalid offset {:?}: {:?}", offset, e))
             })?;
@@ -367,7 +375,7 @@ impl DiskStorageReaderSessionPartition {
                     return Ok(data);
                 }
                 // 文件滚动
-                let (current_filename, next_filename) = {
+                let (_current_filename, next_filename) = {
                     let reader_ptr_rl = self.reader_ptr.read().await;
                     let next = self
                         .dir

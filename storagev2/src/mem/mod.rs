@@ -1,11 +1,14 @@
+use crate::{
+    MessagePayload, ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession,
+    StorageResult, StorageWriter,
+};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::sync::{oneshot, RwLock,};
-use crate::{MessagePayload, ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession, StorageResult, StorageWriter};
+use tokio::sync::{RwLock, oneshot};
 
 struct PartitionQueue {
     // sema: Arc<Semaphore>,
@@ -43,7 +46,7 @@ impl MemStorage {
         &self,
         topic: &str,
         partition_id: u32,
-        n: NonZero<u64>,
+        _n: NonZero<u64>,
     ) -> StorageResult<(MessagePayload, u64, SegmentOffset)> {
         let topic_storage = self
             .topics
@@ -58,12 +61,17 @@ impl MemStorage {
         let msg = {
             let messages_rl = partition_queue.messages.read().await;
             if partition_queue.read_pos.load(Ordering::Relaxed) >= messages_rl.len() {
-                return Err(StorageError::NoMoreMessages(format!("No more messages in {}/{}", topic, partition_id)));
+                return Err(StorageError::NoMoreMessages(format!(
+                    "No more messages in {}/{}",
+                    topic, partition_id
+                )));
             }
             messages_rl[partition_queue.read_pos.load(Ordering::Relaxed)].clone()
         };
         partition_queue.read_pos.fetch_add(1, Ordering::Relaxed); // 移动读取指针
-        let msg_len = msg.len().map_err(|e|StorageError::SerializeError(e.to_string()))? as u64;
+        let msg_len = msg
+            .len()
+            .map_err(|e| StorageError::SerializeError(e.to_string()))? as u64;
         Ok((msg, msg_len, partition_queue.gen_segment_offset()))
     }
 
@@ -97,7 +105,13 @@ impl MemStorage {
 #[async_trait]
 impl StorageWriter for MemStorage {
     /// 存储消息到指定 topic 和 partition
-    async fn store(&self, topic: &str, partition: u32, payloads:Vec<MessagePayload>, notify: Option<oneshot::Sender<StorageResult<()>>>) -> StorageResult<()> {
+    async fn store(
+        &self,
+        topic: &str,
+        partition: u32,
+        payloads: Vec<MessagePayload>,
+        _notify: Option<oneshot::Sender<StorageResult<()>>>,
+    ) -> StorageResult<()> {
         let topic_storage =
             self.topics
                 .entry(topic.to_string())
@@ -156,7 +170,9 @@ impl StorageReader for MemStorageReader {
         {
             return Ok(Box::new(MemStorageReaderSession::new(self.storage.clone())));
         }
-        Err(StorageError::Unknown("mem storage only open once session".to_string()))
+        Err(StorageError::Unknown(
+            "mem storage only open once session".to_string(),
+        ))
     }
 
     /// Close a session by group_id.
@@ -193,7 +209,12 @@ impl StorageReaderSession for MemStorageReaderSession {
     }
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset) -> StorageResult<()> {
+    async fn commit(
+        &self,
+        topic: &str,
+        partition: u32,
+        _offset: SegmentOffset,
+    ) -> StorageResult<()> {
         self.storage.commit(topic, partition).await
     }
 }
