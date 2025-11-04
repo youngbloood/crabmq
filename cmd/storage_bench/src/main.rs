@@ -376,7 +376,7 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
     const WARMUP_BATCH_SIZE: usize = 32;
     for partition_batch in (0..partition_count).step_by(WARMUP_BATCH_SIZE) {
         let mut batch_handles = vec![];
-        let batch_end = (partition_batch + WARMUP_BATCH_SIZE).min(partition_count as usize);
+        let batch_end = (partition_batch + WARMUP_BATCH_SIZE as u32).min(partition_count as u32);
         println!("[预热] 开始预热分区 {}-{}", partition_batch, batch_end);
 
         for partition in partition_batch..batch_end {
@@ -386,7 +386,8 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
             batch_handles.push(tokio::spawn(async move {
                 // 每个分区只写入 10 条消息
                 for _ in 0..10 {
-                    let msg = message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
+                    let msg =
+                        message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
                     let payload = MessagePayload {
                         msg_id: nanoid!(),
                         timestamp: chrono::Utc::now().timestamp_millis() as u64,
