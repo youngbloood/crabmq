@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use log::{error, warn};
 use std::num::NonZero;
 use std::path::Path;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::{Arc, atomic::AtomicUsize}};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::RwLock;
 
@@ -156,9 +156,18 @@ impl StorageReaderSession for DiskStorageReaderSession {
         for _ in 0..n.into() {
             let (data, offset, last) = reader.next().await?;
             if !data.is_empty() {
-                let payload: MessagePayload =
-                    rkyv::from_bytes::<MessagePayload, rkyv::rancor::Error>(&data)
+                // 反序列化内部数据
+                let inner: crate::MessagePayloadInner =
+                    rkyv::from_bytes::<crate::MessagePayloadInner, rkyv::rancor::Error>(&data)
                         .map_err(|e| StorageError::SerializeError(e.to_string()))?;
+
+                // 构造 MessagePayload（不公开 inner）
+                let payload = MessagePayload::new(
+                    inner.msg_id,
+                    inner.timestamp,
+                    inner.metadata,
+                    inner.payload,
+                );
                 list.push((payload, data.len() as u64, offset));
             }
             if last {
@@ -252,7 +261,8 @@ impl DiskStorageReaderSessionPartition {
                     let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)
                         .map_err(|e| StorageError::SerializeError(e.to_string()))?;
                     let mut wl = self.reader_ptr.write().await;
-                    wl.filename = sp.filename;
+                    // 从 segment_id 重建 filename
+                    wl.filename = parent.join(crate::disk::meta::gen_record_filename(sp.segment_id));
                     wl.offset = sp.offset;
                 }
             }
@@ -523,24 +533,24 @@ mod test {
 
         // 写入多条消息
         let messages = vec![
-            MessagePayload {
-                msg_id: "msg_1".to_string(),
-                timestamp: 1000,
-                metadata: Default::default(),
-                payload: b"Hello World 1".to_vec(),
-            },
-            MessagePayload {
-                msg_id: "msg_2".to_string(),
-                timestamp: 1001,
-                metadata: Default::default(),
-                payload: b"Hello World 2".to_vec(),
-            },
-            MessagePayload {
-                msg_id: "msg_3".to_string(),
-                timestamp: 1002,
-                metadata: Default::default(),
-                payload: b"Hello World 3".to_vec(),
-            },
+            MessagePayload::new(
+                "msg_1".to_string(),
+                1000,
+                Default::default(),
+                b"Hello World 1".to_vec(),
+            ),
+            MessagePayload::new(
+                "msg_2".to_string(),
+                1001,
+                Default::default(),
+                b"Hello World 2".to_vec(),
+            ),
+            MessagePayload::new(
+                "msg_3".to_string(),
+                1002,
+                Default::default(),
+                b"Hello World 3".to_vec(),
+            ),
         ];
 
         // 写入消息
@@ -769,12 +779,12 @@ mod test {
         let writer = DiskStorageWriterWrapper::new(config).expect("Failed to create writer");
 
         // 写入一条消息
-        let msg = MessagePayload {
-            msg_id: "edge_test_msg".to_string(),
-            timestamp: 2000,
-            metadata: Default::default(),
-            payload: b"Edge test message".to_vec(),
-        };
+        let msg = MessagePayload::new(
+            "edge_test_msg".to_string(),
+            2000,
+            Default::default(),
+            b"Edge test message".to_vec(),
+        );
 
         writer
             .store(topic, partition_id, vec![msg.clone()], None)

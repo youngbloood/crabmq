@@ -110,7 +110,7 @@ impl Flusher {
 
                                     save_res = pwp.save(fsync) => {
                                         if let Err(e) = save_res {
-                                            error!("pwp[{:?}].save_to err: {e:?}", pwp.get_filename().await);
+                                            error!("pwp[{:?}].save_to err: {e:?}", pwp.get_filename());
                                         }
                                     }
                                 }

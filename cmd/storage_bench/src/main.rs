@@ -388,12 +388,12 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
                 for _ in 0..10 {
                     let msg =
                         message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                    let payload = MessagePayload {
-                        msg_id: nanoid!(),
-                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                        metadata: Default::default(),
-                        payload: msg.to_vec(),
-                    };
+                    let payload = MessagePayload::new(
+                        nanoid!(),
+                        chrono::Utc::now().timestamp_millis() as u64,
+                        Default::default(),
+                        msg.to_vec(),
+                    );
                     let (notify_tx, notify_rx) = oneshot::channel();
                     if let Err(e) = store
                         .store(&topic, partition as u32, vec![payload], Some(notify_tx))
@@ -484,12 +484,12 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
 
                     let msg_idx = rand::random::<u32>() as usize % message_pool.len();
                     let msg = message_pool[msg_idx].clone();
-                    let payload = MessagePayload {
-                        msg_id: nanoid!(),
-                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                        metadata: Default::default(),
-                        payload: msg.to_vec(),
-                    };
+                    let payload = MessagePayload::new(
+                        nanoid!(),
+                        chrono::Utc::now().timestamp_millis() as u64,
+                        Default::default(),
+                        msg.to_vec(),
+                    );
                     if let Err(e) = store.store(&topic, partition, vec![payload], None).await {
                         eprintln!("store.store err: {e:?}");
                         break;

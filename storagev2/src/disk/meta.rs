@@ -3,10 +3,9 @@ use bincode::{Decode, Encode};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::{fs, fs::File as AsyncFile, sync::RwLock};
+use tokio::{fs, fs::File as AsyncFile};
 
 use crate::disk::fd_cache::create_writer_fd;
 
@@ -71,7 +70,7 @@ impl TopicMeta {
 
         // 序列化并保存
         let data = serde_json::to_string_pretty(&serialized)?;
-        let mut wl = self.fd.write().await;
+        let mut wl = self.fd.lock().await;
         // 截断文件，确保清除旧内容
         wl.set_len(0).await?;
         // 将指针移到开头
@@ -129,8 +128,11 @@ impl TopicMeta {
 pub struct WriterPositionPtr {
     fd: FileHandlerWriterAsync, // 存放该 ptr 信息的文件
     // ============== 写入文件内容 ===============
-    // 写入指针文件：当前写的 record 文件
-    filename: Arc<RwLock<PathBuf>>,
+    // 优化：使用 segment_id 代替 filename，避免 RwLock
+    // filename = dir.join(format!("{:0>20}.record", segment_id))
+    base_dir: Arc<PathBuf>,
+    current_segment_id: Arc<AtomicU64>,
+
     // 写入指针文件：当前文件的写位置
     offset: Arc<AtomicU64>,
     // 写入指针文件：当前文件含有的消息数量
@@ -139,14 +141,11 @@ pub struct WriterPositionPtr {
 
     // 刷盘写的偏移量
     flush_offset: Arc<AtomicU64>,
-    //  预创建的下一个文件的信息
-    // pub next_filename: PathBuf, // 下一个文件名
-    // pub next_offset: u64,       // 写一个文件的写偏移量
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct WriterPositionPtrSnapshot {
-    pub filename: PathBuf,  // 当前写的文件
+    pub segment_id: u64,    // 当前segment ID
     pub offset: u64,        // 当前文件的写位置
     pub current_count: u64, // 当前文件消息数量
 }
@@ -154,74 +153,94 @@ pub struct WriterPositionPtrSnapshot {
 impl WriterPositionPtr {
     pub fn new(ptr_filename: PathBuf, record_filename: PathBuf) -> Result<Self> {
         let fd = FileHandlerWriterAsync::new(create_writer_fd(&ptr_filename)?);
+
+        // 从 record_filename 提取 segment_id
+        let segment_id = extract_segment_id_from_filename(&record_filename);
+
+        // 从 ptr_filename 推导 base_dir (去掉最后的 .writer.ptr)
+        let base_dir = ptr_filename.parent().unwrap().to_path_buf();
+
         Ok(Self {
             fd,
-            filename: Arc::new(RwLock::new(record_filename)),
+            base_dir: Arc::new(base_dir),
+            current_segment_id: Arc::new(AtomicU64::new(segment_id)),
             offset: Arc::default(),
             current_count: Arc::default(),
             flush_offset: Arc::default(),
         })
     }
 
-    #[inline]
-    pub async fn get_filename(&self) -> PathBuf {
-        self.filename.read().await.clone()
+    // ============== 完全无锁的热路径方法 ===============
+
+    #[inline(always)]
+    pub fn get_filename(&self) -> PathBuf {
+        // 完全无锁：直接从 segment_id 构造
+        let segment_id = self.current_segment_id.load(Ordering::Acquire);
+        self.base_dir.join(gen_record_filename(segment_id))
     }
 
-    #[inline]
+    #[inline(always)]
+    pub fn get_segment_id(&self) -> u64 {
+        self.current_segment_id.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
     pub fn rotate_offset(&self, num: u64) {
-        self.offset.fetch_add(num, Ordering::Relaxed);
+        self.offset.fetch_add(num, Ordering::Release);
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn rotate_current_count(&self, count: u64) {
-        self.current_count.fetch_add(count, Ordering::Relaxed);
+        self.current_count.fetch_add(count, Ordering::Release);
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn rotate_flush_offset(&self, num: u64) {
-        self.flush_offset.fetch_add(num, Ordering::Relaxed);
+        self.flush_offset.fetch_add(num, Ordering::Release);
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_offset(&self) -> u64 {
-        self.offset.load(Ordering::Relaxed)
+        self.offset.load(Ordering::Acquire)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_current_count(&self) -> u64 {
-        self.current_count.load(Ordering::Relaxed)
+        self.current_count.load(Ordering::Acquire)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_flush_offset(&self) -> u64 {
-        self.flush_offset.load(Ordering::Relaxed)
+        self.flush_offset.load(Ordering::Acquire)
     }
 
-    pub async fn reset_with_filename(&self, filename: PathBuf) {
-        *self.filename.write().await = filename;
-        self.offset.store(0, Ordering::Relaxed);
-        self.current_count.store(0, Ordering::Relaxed);
-        self.flush_offset.store(0, Ordering::Relaxed);
+    pub fn reset_with_filename(&self, filename: PathBuf) {
+        // 完全无锁：从文件名提取 segment_id
+        let segment_id = extract_segment_id_from_filename(&filename);
+        self.current_segment_id.store(segment_id, Ordering::Release);
+        self.offset.store(0, Ordering::Release);
+        self.current_count.store(0, Ordering::Release);
+        self.flush_offset.store(0, Ordering::Release);
     }
 
-    pub async fn snapshot(&self) -> WriterPositionPtrSnapshot {
+    pub fn snapshot(&self) -> WriterPositionPtrSnapshot {
         WriterPositionPtrSnapshot {
-            filename: self.filename.read().await.clone(),
-            offset: self.offset.load(Ordering::Relaxed),
-            current_count: self.current_count.load(Ordering::Relaxed),
+            segment_id: self.current_segment_id.load(Ordering::Acquire),
+            offset: self.offset.load(Ordering::Acquire),
+            current_count: self.current_count.load(Ordering::Acquire),
         }
     }
 
     pub async fn load(path: &PathBuf) -> Result<Self> {
         let data = tokio::fs::read_to_string(path).await?;
         let fd = FileHandlerWriterAsync::new(create_writer_fd(path)?);
+        let base_dir = path.parent().unwrap().to_path_buf();
+
         if data.is_empty() {
             return Ok(WriterPositionPtr {
-                filename: Arc::new(RwLock::new(
-                    path.parent().unwrap().join(gen_record_filename(0)),
-                )),
                 fd,
+                base_dir: Arc::new(base_dir),
+                current_segment_id: Arc::new(AtomicU64::new(0)),
                 offset: Arc::default(),
                 current_count: Arc::default(),
                 flush_offset: Arc::default(),
@@ -230,18 +249,18 @@ impl WriterPositionPtr {
 
         let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)?;
         Ok(WriterPositionPtr {
-            filename: Arc::new(RwLock::new(sp.filename)),
             fd,
+            base_dir: Arc::new(base_dir),
+            current_segment_id: Arc::new(AtomicU64::new(sp.segment_id)),
             offset: Arc::new(AtomicU64::new(sp.offset)),
             current_count: Arc::new(AtomicU64::new(sp.current_count)),
-            // 初始化为 offset
             flush_offset: Arc::new(AtomicU64::new(sp.offset)),
         })
     }
 
     pub async fn save(&self, fsync: bool) -> Result<()> {
-        let json_data = serde_json::to_string_pretty(&self.snapshot().await)?;
-        let mut wl = self.fd.write().await;
+        let json_data = serde_json::to_string_pretty(&self.snapshot())?;
+        let mut wl = self.fd.lock().await;
         // 截断文件，确保清除旧内容
         wl.set_len(0).await?;
         // 将指针移到开头
@@ -250,7 +269,7 @@ impl WriterPositionPtr {
         if fsync {
             let _fd = self.fd.clone();
             tokio::spawn(async move {
-                let _ = _fd.write().await.sync_data().await;
+                let _ = _fd.lock().await.sync_data().await;
             });
         }
 
@@ -303,4 +322,15 @@ pub fn gen_filename(factor: u64) -> String {
 
 pub fn gen_record_filename(factor: u64) -> String {
     format!("{}.record", gen_filename(factor))
+}
+
+/// 从文件名提取 segment_id
+/// 例如："/path/to/00000000000000000123.record" -> 123
+fn extract_segment_id_from_filename(filename: &std::path::Path) -> u64 {
+    filename
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|s| s.strip_suffix(".record"))
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
 }

@@ -80,11 +80,11 @@ impl FdReaderCacheAync {
 // 写文件句柄
 #[derive(Clone, Debug)]
 pub struct FileHandlerWriterAsync {
-    inner: Arc<RwLock<AsyncFile>>,
+    inner: Arc<tokio::sync::Mutex<AsyncFile>>,
 }
 
 impl Deref for FileHandlerWriterAsync {
-    type Target = Arc<RwLock<AsyncFile>>;
+    type Target = Arc<tokio::sync::Mutex<AsyncFile>>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -94,12 +94,12 @@ impl Deref for FileHandlerWriterAsync {
 impl FileHandlerWriterAsync {
     pub fn new(f: AsyncFile) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(f)),
+            inner: Arc::new(tokio::sync::Mutex::new(f)),
         }
     }
 
     pub async fn reset(&self, f: AsyncFile) {
-        *self.inner.write().await = f
+        *self.inner.lock().await = f;
     }
 }
 
@@ -127,7 +127,7 @@ impl FdWriterCacheAync {
     pub async fn get_or_create(
         &self,
         key: &Path,
-        prealloc_size: bool,
+        prealloc_size: u64,
     ) -> Result<FileHandlerWriterAsync> {
         // 第一次检查缓存
         if let Some(handler) = self.get(key).await {
@@ -152,9 +152,8 @@ impl FdWriterCacheAync {
         let mut write_fd = write_opt
             .open(key)
             .map_err(|e| anyhow::anyhow!("Failed to open write file: {}", e))?;
-        if prealloc_size {
-            // preallocate(&write_fd, self.prealloc_size as _)?;
-            preallocate(&write_fd, 20000)?;
+        if prealloc_size > 0 {
+            preallocate(&write_fd, prealloc_size as _)?;
         }
         write_fd.seek(std::io::SeekFrom::Start(0))?;
 

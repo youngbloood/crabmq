@@ -46,8 +46,8 @@ pub(crate) struct PartitionWriterBuffer {
     #[cfg(target_os = "linux")]
     pub(crate) current_fd: Arc<RwLock<UringFile>>,
 
-    // 先将数据存入内存缓冲区
-    pub(crate) queue: Arc<SwitchQueue<(Bytes, Bytes)>>,
+    // 先将数据存入内存缓冲区 - 优化：只存消息体，header 在 flush 时动态生成
+    pub(crate) queue: Arc<SwitchQueue<Bytes>>,
 
     // 写相关的位置指针
     pub(crate) write_ptr: Arc<WriterPositionPtr>,
@@ -77,17 +77,23 @@ impl BufferFlushable for PartitionWriterBuffer {
             return Ok(0);
         }
 
-        // 准备IO向量
+        // 准备IO向量 - 优化：动态生成 header，避免预先分配
+        // 先生成所有 header，保证生命周期
+        let headers: Vec<[u8; 8]> = batch
+            .iter()
+            .map(|data| (data.len() as u64).to_be_bytes())
+            .collect();
+
+        // 构造 IoSlice 数组
         let mut iovecs = Vec::with_capacity(batch.len() * 2);
-        // let mut mms = Vec::with_capacity(batch.len());
-        for (header, data) in batch {
-            iovecs.extend_from_slice(&[header, data]);
-            // mms.push(mm);
+        for (i, data) in batch.iter().enumerate() {
+            iovecs.push(IoSlice::new(&headers[i]));
+            iovecs.push(IoSlice::new(&data[..]));
         }
+
         // 执行批量写入
-        let slices: Vec<IoSlice> = iovecs.iter().map(|v| IoSlice::new(v)).collect();
-        let mut fd_wl = self.current_fd.write().await;
-        let flushed_bytes = fd_wl.write_vectored(&slices).await? as u64;
+        let mut fd_wl = self.current_fd.lock().await;
+        let flushed_bytes = fd_wl.write_vectored(&iovecs).await? as u64;
 
         // 更新刷盘位置
         self.write_ptr.rotate_flush_offset(flushed_bytes);
@@ -95,7 +101,7 @@ impl BufferFlushable for PartitionWriterBuffer {
         if fsync {
             let fd = self.current_fd.clone();
             tokio::spawn(async move {
-                let _ = fd.write().await.sync_data().await;
+                let _ = fd.lock().await.sync_data().await;
             });
         }
 
@@ -146,11 +152,9 @@ impl PartitionWriterBuffer {
         let max_record_filename = dir.join(gen_record_filename(max_file));
         // 判断 WriterPositionPtr.filename 与最大 record文件 不一致的情况
         // 此时表示文件可能为外界条件破坏。以下一个 record 文件重新开始
-        if !write_ptr.get_filename().await.eq(&max_record_filename) {
+        if write_ptr.get_filename().ne(&max_record_filename) {
             max_file += 1;
-            write_ptr
-                .reset_with_filename(dir.join(gen_record_filename(max_file)))
-                .await;
+            write_ptr.reset_with_filename(dir.join(gen_record_filename(max_file)));
             factor.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -189,7 +193,7 @@ impl PartitionWriterBuffer {
 
         // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
         current_fd
-            .write()
+            .lock()
             .await
             .seek(SeekFrom::Start(offset))
             .await?;
@@ -222,7 +226,7 @@ impl PartitionWriterBuffer {
         match create_writer_fd_with_prealloc(&next_filename, max_size_per_file) {
             Ok(async_file) => {
                 self.current_fd.reset(async_file).await;
-                self.write_ptr.reset_with_filename(next_filename).await;
+                self.write_ptr.reset_with_filename(next_filename);
             }
             Err(e) => {
                 error!("create_writer_fd err: {e:?}");
@@ -261,8 +265,10 @@ impl PartitionWriterBuffer {
 
         for data in batch {
             let bts = data.to_bytes()?;
+            let bts_len = bts.len() as u64;
+
             let should_rotate = {
-                now_ptr_offset + (bts.len() as u64) > self.conf.max_size_per_file
+                now_ptr_offset + bts_len > self.conf.max_size_per_file
                     || now_count + 1 >= self.conf.max_msg_num_per_file
             };
 
@@ -288,13 +294,13 @@ impl PartitionWriterBuffer {
             let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_ptr_offset);
             message_metas.push(mm);
 
-            now_batch_total_size += 8 + bts.len() as u64;
-            now_ptr_offset += 8 + bts.len() as u64;
+            let msg_total_size = 8 + bts_len;
+            now_batch_total_size += msg_total_size;
+            now_ptr_offset += msg_total_size;
             now_count += 1;
 
-            // 创建消息头并存储到缓冲区
-            let header = Bytes::from_owner(bts.len().to_be_bytes());
-            self.queue.push((header, bts));
+            // 存储到缓冲区 - 优化：只存消息体，header 在 flush 时动态生成
+            self.queue.push(bts);
         }
 
         {
@@ -348,17 +354,23 @@ impl PartitionWriterBuffer {
             return Ok(0);
         }
 
-        // 准备IO向量
+        // 准备IO向量 - 优化：动态生成 header，避免预先分配
+        // 先生成所有 header，保证生命周期
+        let headers: Vec<[u8; 8]> = batch
+            .iter()
+            .map(|data| (data.len() as u64).to_be_bytes())
+            .collect();
+
+        // 构造 IoSlice 数组
         let mut iovecs = Vec::with_capacity(batch.len() * 2);
-        // let mut mms = Vec::with_capacity(batch.len());
-        for (header, data) in batch {
-            iovecs.extend_from_slice(&[header, data]);
-            // mms.push(mm);
+        for (i, data) in batch.iter().enumerate() {
+            iovecs.push(IoSlice::new(&headers[i]));
+            iovecs.push(IoSlice::new(&data[..]));
         }
+
         // 执行批量写入
-        let slices: Vec<IoSlice> = iovecs.iter().map(|v| IoSlice::new(v)).collect();
-        let mut fd_wl = self.current_fd.write().await;
-        let flushed_bytes = fd_wl.write_vectored(&slices).await? as u64;
+        let mut fd_wl = self.current_fd.lock().await;
+        let flushed_bytes = fd_wl.write_vectored(&iovecs).await? as u64;
 
         // 更新刷盘位置
         self.write_ptr.rotate_flush_offset(flushed_bytes);
@@ -366,7 +378,7 @@ impl PartitionWriterBuffer {
         if fsync {
             let fd = self.current_fd.clone();
             tokio::spawn(async move {
-                let _ = fd.write().await.sync_data().await;
+                let _ = fd.lock().await.sync_data().await;
             });
         }
 
@@ -413,7 +425,7 @@ impl PartitionWriterBuffer {
         if fsync {
             let fd = self.current_fd.clone();
             tokio::spawn(async move {
-                let _ = fd.write().await.sync_data().await;
+                let _ = fd.lock().await.sync_data().await;
             });
         }
 

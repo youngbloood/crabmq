@@ -16,6 +16,7 @@ use murmur3::murmur3_32;
 use std::io::Cursor;
 use std::ops::Deref;
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -577,12 +578,12 @@ mod test {
                 for _ in 0..100000 {
                     let idx = rand::random::<u32>() as usize;
                     let s = _datas[idx % _datas.len()];
-                    let msg = MessagePayload {
-                        msg_id: format!("id_{}_{}", idx, s),
-                        payload: s.as_bytes().to_vec(),
-                        timestamp: 0,
-                        metadata: HashMap::new(),
-                    };
+                    let msg = MessagePayload::new(
+                        format!("id_{}_{}", idx, s),
+                        0,
+                        HashMap::new(),
+                        s.as_bytes().to_vec(),
+                    );
                     if let Err(e) = _store.store("topic111", 11, vec![msg], None).await {
                         eprintln!("e = {e:?}");
                     }
