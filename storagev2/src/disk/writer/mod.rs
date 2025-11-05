@@ -512,10 +512,11 @@ mod test {
     use anyhow::Result;
     use bytes::Bytes;
     use futures::future::join_all;
-    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+    use std::{collections::HashMap, default, path::PathBuf, sync::Arc, time::Duration};
     use tokio::time;
 
     fn new_disk_storage() -> DiskStorageWriterWrapper {
+        let cfg = default_config();
         DiskStorageWriterWrapper::new(DiskConfig {
             storage_dir: PathBuf::from("./data"),
             flusher_period: 50,
@@ -534,6 +535,19 @@ mod test {
             writer_worker_tasks_num: 100,
             partition_cleanup_interval: 150,
             partition_inactive_threshold: 300,
+            iov_max: 2048,
+            enable_index: true,
+            rocksdb_max_open_files: cfg.rocksdb_max_open_files,
+            rocksdb_write_buffer_size: cfg.rocksdb_write_buffer_size,
+            rocksdb_max_write_buffer_number: cfg.rocksdb_max_write_buffer_number,
+            rocksdb_target_file_size_base: cfg.rocksdb_target_file_size_base,
+            rocksdb_max_background_jobs: cfg.rocksdb_max_background_jobs,
+            rocksdb_level_zero_file_num_compaction_trigger: cfg
+                .rocksdb_level_zero_file_num_compaction_trigger,
+            rocksdb_level_zero_slowdown_writes_trigger: cfg
+                .rocksdb_level_zero_slowdown_writes_trigger,
+            rocksdb_level_zero_stop_writes_trigger: cfg.rocksdb_level_zero_stop_writes_trigger,
+            rocksdb_disable_wal: cfg.rocksdb_disable_wal,
         })
         .expect("error config")
     }

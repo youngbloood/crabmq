@@ -12,6 +12,7 @@ use crate::{
             flusher::Flusher,
         },
     },
+    serializer::{MessageSerializer, SgIoSerializer},
 };
 use anyhow::{Result, anyhow};
 use std::{path::PathBuf, sync::Arc};
@@ -26,6 +27,7 @@ pub trait BufferFlushable {
 #[derive(Clone)]
 pub struct PartitionBufferSet {
     pub(crate) dir: PathBuf,
+    conf: Arc<DiskConfig>,
     data: Arc<PartitionWriterBuffer>,
     index: Arc<PartitionIndexWriterBuffer>,
 }
@@ -50,11 +52,16 @@ impl PartitionBufferSet {
             conf.clone(),
             conf.storage_dir.clone(), // 直接传递存储目录
         );
+
+        // 创建序列化器（默认使用S-G IO，可以修改为RkyvSerializer进行对比）
+        let serializer: Arc<dyn MessageSerializer> = Arc::new(SgIoSerializer);
+
         let partition_writer_buffer =
-            PartitionWriterBuffer::new(dir.clone(), conf, write_ptr, flusher).await?;
+            PartitionWriterBuffer::new(dir.clone(), conf.clone(), write_ptr, flusher, serializer).await?;
 
         Ok(Self {
             dir,
+            conf,
             data: Arc::new(partition_writer_buffer),
             index: Arc::new(partition_index_writer_buffer),
         })
@@ -62,13 +69,30 @@ impl PartitionBufferSet {
 
     // will flush data and index
     pub async fn flush(&self, all: bool, fsync: bool) -> Result<u64> {
-        // 1. 先刷数据
+        // 1. 先刷数据（同步等待，确保数据落盘）
         let data_bytes = self.data.flush(all, fsync).await?;
 
-        // 2. 再刷索引（索引刷盘可以稍微延迟，因为主要用于查询）
-        let index_bytes = self.index.flush(all, fsync).await?;
+        // 2. 根据配置决定是否刷索引
+        if self.conf.enable_index {
+            // 异步刷索引（性能优化：不等待索引完成）
+            // 原因：
+            //   - 数据已经刷盘，安全性有保证
+            //   - 索引用于查询，可以稍微延迟
+            //   - 即使索引丢失，也可以从数据重建
+            // 一致性保证：
+            //   - 数据已落盘（同步等待）
+            //   - 索引晚于数据刷盘（异步）
+            //   - 恢复时：数据一定存在，索引可能缺失但可重建
+            let index = self.index.clone();
+            tokio::spawn(async move {
+                if let Err(e) = index.flush(all, fsync).await {
+                    log::error!("Async index flush failed: {:?}", e);
+                }
+            });
+        }
 
-        Ok(data_bytes + index_bytes)
+        // 只返回数据字节数（索引异步，不计入返回值）
+        Ok(data_bytes)
     }
 
     // only flush data

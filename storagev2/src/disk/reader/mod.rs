@@ -2,6 +2,7 @@ use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
 use crate::MessagePayload;
 use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
+use crate::serializer::{MessageSerializer, SgIoSerializer};
 use crate::{ReadPosition, SegmentOffset, StorageError, StorageResult};
 use crate::{StorageReader, StorageReaderSession};
 use anyhow::Result;
@@ -11,7 +12,10 @@ use dashmap::DashMap;
 use log::{error, warn};
 use std::num::NonZero;
 use std::path::Path;
-use std::{path::PathBuf, sync::{Arc, atomic::AtomicUsize}};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicUsize},
+};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::RwLock;
 
@@ -21,14 +25,20 @@ pub struct DiskStorageReader {
     dir: PathBuf,
     partition_index_num_per_topic: u32,
     sessions: Arc<DashMap<u32, DiskStorageReaderSession>>,
+    conf: Arc<crate::disk::Config>,
 }
 
 impl DiskStorageReader {
-    pub fn new(dir: PathBuf, partition_index_num_per_topic: u32) -> Self {
+    pub fn new(
+        dir: PathBuf,
+        partition_index_num_per_topic: u32,
+        conf: Arc<crate::disk::Config>,
+    ) -> Self {
         Self {
             dir,
             partition_index_num_per_topic,
             sessions: Arc::default(),
+            conf,
         }
     }
 }
@@ -49,6 +59,7 @@ impl StorageReader for DiskStorageReader {
                 group_id,
                 self.partition_index_num_per_topic,
                 read_position,
+                self.conf.clone(),
             ));
         Ok(Box::new(sess.value().clone()))
     }
@@ -80,6 +91,7 @@ impl DiskStorageReaderSession {
         group_id: u32,
         partition_index_num_per_topic: u32,
         read_positions: Vec<(String, ReadPosition)>,
+        conf: Arc<crate::disk::Config>,
     ) -> Self {
         let m = DashMap::new();
         read_positions.iter().for_each(|(k, v)| {
@@ -91,6 +103,7 @@ impl DiskStorageReaderSession {
             crate::disk::partition_index::ReadWritePartitionIndexManager::new(
                 dir.clone(),
                 partition_index_num_per_topic as _,
+                conf,
             ),
         );
 
@@ -156,18 +169,10 @@ impl StorageReaderSession for DiskStorageReaderSession {
         for _ in 0..n.into() {
             let (data, offset, last) = reader.next().await?;
             if !data.is_empty() {
-                // 反序列化内部数据
-                let inner: crate::MessagePayloadInner =
-                    rkyv::from_bytes::<crate::MessagePayloadInner, rkyv::rancor::Error>(&data)
-                        .map_err(|e| StorageError::SerializeError(e.to_string()))?;
+                // 使用新序列化器反序列化
+                let serializer = SgIoSerializer;
+                let payload = serializer.deserialize(&data)?;
 
-                // 构造 MessagePayload（不公开 inner）
-                let payload = MessagePayload::new(
-                    inner.msg_id,
-                    inner.timestamp,
-                    inner.metadata,
-                    inner.payload,
-                );
                 list.push((payload, data.len() as u64, offset));
             }
             if last {
@@ -262,7 +267,8 @@ impl DiskStorageReaderSessionPartition {
                         .map_err(|e| StorageError::SerializeError(e.to_string()))?;
                     let mut wl = self.reader_ptr.write().await;
                     // 从 segment_id 重建 filename
-                    wl.filename = parent.join(crate::disk::meta::gen_record_filename(sp.segment_id));
+                    wl.filename =
+                        parent.join(crate::disk::meta::gen_record_filename(sp.segment_id));
                     wl.offset = sp.offset;
                 }
             }
@@ -324,7 +330,11 @@ impl DiskStorageReaderSessionPartition {
         let file = self.fd_cache.get_or_create(&filename, read_offset).await?;
 
         let mut wl = file.write().await;
-        // 读取消息长度前缀
+
+        // 磁盘格式：[8:total_len] + S-G IO data
+        // 高效读取：只需2次系统调用
+
+        // 1. 读取8字节长度头
         let mut len_buf = [0u8; 8];
         match wl.read_exact(&mut len_buf).await {
             Ok(_) => (),
@@ -343,7 +353,7 @@ impl DiskStorageReaderSessionPartition {
             return Ok((Bytes::new(), SegmentOffset::default(), true));
         }
 
-        // 读取消息内容
+        // 2. 读取消息体
         let mut buf = vec![0u8; len as usize];
         match wl.read_exact(&mut buf).await {
             Ok(_) => (),
@@ -360,7 +370,7 @@ impl DiskStorageReaderSessionPartition {
             }
         }
 
-        // 计算消息开始位置的offset（当前读取位置）
+        // 计算消息开始位置的offset
         let message_start_offset = SegmentOffset {
             segment_id: extract_segment_id_from_filename(&filename),
             offset: read_offset,
@@ -368,7 +378,7 @@ impl DiskStorageReaderSessionPartition {
 
         {
             let mut ptr_wl = self.reader_ptr.write().await;
-            // 更新读指针
+            // 更新读指针：8字节头 + 消息体长度
             ptr_wl.offset += 8 + len;
         }
         let reader = self.clone();
@@ -478,12 +488,16 @@ fn extract_segment_id_from_filename(p: &Path) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::{StorageReader, disk::DiskStorageReader};
-    use std::{num::NonZero, path::PathBuf};
+    use crate::{
+        StorageReader,
+        disk::{DiskStorageReader, default_config},
+    };
+    use std::{num::NonZero, path::PathBuf, sync::Arc};
 
     #[tokio::test]
     async fn reader_session() {
-        let dsr = DiskStorageReader::new(PathBuf::from("./messages"), 100);
+        let dsr =
+            DiskStorageReader::new(PathBuf::from("./messages"), 100, Arc::new(default_config()));
         let sess = dsr
             .new_session(1001, vec![])
             .await
@@ -492,7 +506,8 @@ mod test {
 
     #[tokio::test]
     async fn reader_session2() {
-        let dsr = DiskStorageReader::new(PathBuf::from("./messages"), 100);
+        let dsr =
+            DiskStorageReader::new(PathBuf::from("./messages"), 100, Arc::new(default_config()));
         let sess = dsr
             .new_session(1001, vec![])
             .await
@@ -586,7 +601,8 @@ mod test {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         // 创建reader并验证数据
-        let reader = DiskStorageReader::new(PathBuf::from(test_dir), 100);
+        let reader =
+            DiskStorageReader::new(PathBuf::from(test_dir), 100, Arc::new(default_config()));
         let session = reader
             .new_session(group_id, vec![(topic.to_string(), ReadPosition::Begin)])
             .await
@@ -801,7 +817,8 @@ mod test {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // 创建reader
-        let reader = DiskStorageReader::new(PathBuf::from(test_dir), 100);
+        let reader =
+            DiskStorageReader::new(PathBuf::from(test_dir), 100, Arc::new(default_config()));
         let session = reader
             .new_session(group_id, vec![(topic.to_string(), ReadPosition::Begin)])
             .await

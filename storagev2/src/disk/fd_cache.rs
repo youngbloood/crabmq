@@ -6,13 +6,17 @@ use common::util::{check_and_create_dir, check_exist};
 use lru::LruCache;
 use std::{
     fs::OpenOptions,
-    io::{Seek, SeekFrom},
+    io::{IoSlice, Seek, SeekFrom},
     num::NonZeroUsize,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs::File as AsyncFile, sync::RwLock};
+use tokio::{
+    fs::File as AsyncFile,
+    io::{AsyncSeekExt, AsyncWriteExt},
+    sync::RwLock,
+};
 
 // 读文件句柄
 #[derive(Clone, Debug)]
@@ -61,7 +65,8 @@ impl FdReaderCacheAync {
             .open(key)
             .map_err(|e| StorageError::IoError(e.to_string()))?;
         if read_offset != 0 {
-            read_fd.seek(SeekFrom::Start(read_offset))
+            read_fd
+                .seek(SeekFrom::Start(read_offset))
                 .map_err(|e| StorageError::IoError(e.to_string()))?;
         }
         let async_read = Arc::new(RwLock::new(AsyncFile::from_std(read_fd)));
@@ -98,8 +103,27 @@ impl FileHandlerWriterAsync {
         }
     }
 
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, AsyncFile> {
+        self.inner.lock().await
+    }
+
     pub async fn reset(&self, f: AsyncFile) {
         *self.inner.lock().await = f;
+    }
+
+    pub async fn write_vectored(&self, datas: &[IoSlice<'_>]) -> Result<usize> {
+        let mut w = self.inner.lock().await;
+        Ok(w.write_vectored(datas).await?)
+    }
+
+    pub async fn sync_data(&self) -> Result<()> {
+        let w = self.inner.lock().await;
+        Ok(w.sync_data().await?)
+    }
+
+    pub async fn seek(&self, pos: SeekFrom) -> Result<u64> {
+        let mut w = self.inner.lock().await;
+        Ok(w.seek(pos).await?)
     }
 }
 
@@ -216,7 +240,10 @@ mod test {
         let fd_cache = FdReaderCacheAync::new(4);
         for i in 0..10 {
             let p = format!("../target/debug/{}", i);
-            fd_cache.get_or_create(Path::new(&p), 0).await.map_err(|e| anyhow::anyhow!(e.to_string()))?;        
+            fd_cache
+                .get_or_create(Path::new(&p), 0)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
         Ok(())
     }

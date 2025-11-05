@@ -75,6 +75,7 @@ impl RocksDBInstanceManager {
     pub async fn get_or_create_primary_instance(
         &self,
         db_path: &PathBuf,
+        conf: &crate::disk::Config,
     ) -> Result<Arc<RocksDBInstance>> {
         if let Some(instance) = self.primary_instances.get(db_path) {
             return Ok(instance.value().clone());
@@ -94,16 +95,46 @@ impl RocksDBInstanceManager {
 
         // 创建主实例
         let db_path_clone = db_path.clone();
+        // 克隆 config 值以移动到 spawn_blocking 闭包中
+        let rocksdb_conf = (
+            conf.rocksdb_max_open_files,
+            conf.rocksdb_write_buffer_size,
+            conf.rocksdb_max_write_buffer_number,
+            conf.rocksdb_target_file_size_base,
+            conf.rocksdb_max_background_jobs,
+            conf.rocksdb_level_zero_file_num_compaction_trigger,
+            conf.rocksdb_level_zero_slowdown_writes_trigger,
+            conf.rocksdb_level_zero_stop_writes_trigger,
+            conf.rocksdb_disable_wal,
+        );
+
         let instance = tokio::task::spawn_blocking(move || {
             let mut opts = Options::default();
             opts.create_if_missing(true);
             opts.set_compression_type(DBCompressionType::Lz4);
-            // 主实例配置
-            opts.set_max_open_files(10000);
-            opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB
-            opts.set_max_write_buffer_number(4);
-            opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
-            opts.set_max_background_jobs(4);
+
+            // 主实例配置（从 Config 读取）
+            opts.set_max_open_files(rocksdb_conf.0);
+
+            // 写缓冲优化
+            opts.set_write_buffer_size(rocksdb_conf.1);
+            opts.set_max_write_buffer_number(rocksdb_conf.2);
+            opts.set_target_file_size_base(rocksdb_conf.3);
+
+            // 后台任务优化
+            opts.set_max_background_jobs(rocksdb_conf.4);
+
+            // Level 0 优化
+            opts.set_level_zero_file_num_compaction_trigger(rocksdb_conf.5);
+            opts.set_level_zero_slowdown_writes_trigger(rocksdb_conf.6);
+            opts.set_level_zero_stop_writes_trigger(rocksdb_conf.7);
+
+            // 禁用 WAL 配置
+            // 注意：disable_wal 在 RocksDB Rust 中通过 WriteOptions 设置，而不是 Options
+            // 这里保留配置项供将来扩展使用
+            // if rocksdb_conf.8 {
+            //     opts.set_disable_wal(true);
+            // }
 
             let db = DB::open(&opts, &db_path_clone)?;
             Ok::<_, anyhow::Error>(RocksDBInstance::new(
@@ -121,9 +152,13 @@ impl RocksDBInstanceManager {
     }
 
     /// 获取只读实例
-    pub async fn get_read_only_instance(&self, db_path: &PathBuf) -> Result<Arc<RocksDBInstance>> {
+    pub async fn get_read_only_instance(
+        &self,
+        db_path: &PathBuf,
+        conf: &crate::disk::Config,
+    ) -> Result<Arc<RocksDBInstance>> {
         // 首先确保主实例存在
-        let _primary = self.get_or_create_primary_instance(db_path).await?;
+        let _primary = self.get_or_create_primary_instance(db_path, conf).await?;
 
         // 检查是否有可用的只读实例
         if let Some(read_only_list) = self.read_only_instances.get(db_path) {
@@ -223,14 +258,16 @@ pub struct ReadWritePartitionIndexManager {
     dir: PathBuf,
     size: usize,
     instance_manager: Arc<RocksDBInstanceManager>,
+    conf: Arc<crate::disk::Config>,
 }
 
 impl ReadWritePartitionIndexManager {
-    pub fn new(dir: PathBuf, size: usize) -> Self {
+    pub fn new(dir: PathBuf, size: usize, conf: Arc<crate::disk::Config>) -> Self {
         Self {
             dir,
             size,
             instance_manager: get_global_rocksdb_instance_manager(),
+            conf,
         }
     }
 
@@ -253,7 +290,7 @@ impl ReadWritePartitionIndexManager {
             .join(index.to_string());
 
         self.instance_manager
-            .get_or_create_primary_instance(&db_path)
+            .get_or_create_primary_instance(&db_path, &self.conf)
             .await
     }
 
@@ -270,7 +307,7 @@ impl ReadWritePartitionIndexManager {
             .join(ROCKSDB_INDEX_DIR)
             .join(index.to_string());
 
-        self.instance_manager.get_read_only_instance(&db_path).await
+        self.instance_manager.get_read_only_instance(&db_path, &self.conf).await
     }
 
     /// 批量写入索引
@@ -429,9 +466,11 @@ mod tests {
         let storage_root = temp_dir.path().to_path_buf();
 
         // 创建读写分离的索引管理器
+        let conf = Arc::new(crate::disk::default_config());
         let index_manager = ReadWritePartitionIndexManager::new(
             storage_root.clone(),
             10, // 10个索引分片
+            conf,
         );
 
         let topic = "test_topic";
@@ -490,16 +529,17 @@ mod tests {
 
         let manager = RocksDBInstanceManager::new();
         let db_path = storage_root.join("test_db");
+        let conf = crate::disk::default_config();
 
         // 创建主实例
-        let primary_instance = manager.get_or_create_primary_instance(&db_path).await;
+        let primary_instance = manager.get_or_create_primary_instance(&db_path, &conf).await;
         assert!(primary_instance.is_ok(), "创建主实例应该成功");
         let primary_instance = primary_instance.unwrap();
         assert!(primary_instance.is_readable());
         assert!(primary_instance.is_writable());
 
         // 创建只读实例
-        let read_instance = manager.get_read_only_instance(&db_path).await;
+        let read_instance = manager.get_read_only_instance(&db_path, &conf).await;
         assert!(read_instance.is_ok(), "创建只读实例应该成功");
         let read_instance = read_instance.unwrap();
         assert!(read_instance.is_readable());
@@ -518,16 +558,17 @@ mod tests {
 
         let manager = RocksDBInstanceManager::new();
         let db_path = storage_root.join("test_db");
+        let conf = crate::disk::default_config();
 
         // 创建主实例
         let _primary = manager
-            .get_or_create_primary_instance(&db_path)
+            .get_or_create_primary_instance(&db_path, &conf)
             .await
             .unwrap();
 
         // 创建多个只读实例
-        let read_instance1 = manager.get_read_only_instance(&db_path).await.unwrap();
-        let read_instance2 = manager.get_read_only_instance(&db_path).await.unwrap();
+        let read_instance1 = manager.get_read_only_instance(&db_path, &conf).await.unwrap();
+        let read_instance2 = manager.get_read_only_instance(&db_path, &conf).await.unwrap();
 
         // 验证是不同的实例
         assert_ne!(
@@ -548,13 +589,14 @@ mod tests {
 
         let manager = RocksDBInstanceManager::new();
         let db_path = storage_root.join("concurrent_test_db");
+        let conf = crate::disk::default_config();
 
         // 创建主实例和只读实例
         let primary_instance = manager
-            .get_or_create_primary_instance(&db_path)
+            .get_or_create_primary_instance(&db_path, &conf)
             .await
             .unwrap();
-        let read_instance = manager.get_read_only_instance(&db_path).await.unwrap();
+        let read_instance = manager.get_read_only_instance(&db_path, &conf).await.unwrap();
 
         // 测试1：写入后立即读取
         println!("测试1：写入后立即读取");

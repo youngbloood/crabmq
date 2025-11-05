@@ -69,9 +69,8 @@ impl MemStorage {
             messages_rl[partition_queue.read_pos.load(Ordering::Relaxed)].clone()
         };
         partition_queue.read_pos.fetch_add(1, Ordering::Relaxed); // 移动读取指针
-        let msg_len = msg
-            .len()
-            .map_err(|e| StorageError::SerializeError(e.to_string()))? as u64;
+        // 内存存储中，msg_len 使用 payload 字段的长度即可（不需要真正的序列化长度）
+        let msg_len = msg.payload.len() as u64;
         Ok((msg, msg_len, partition_queue.gen_segment_offset()))
     }
 

@@ -355,6 +355,15 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
     config.storage_dir = PathBuf::from(storage_dir);
     config.with_metrics = true;
 
+    // 手动设置 IOV_MAX（可通过环境变量覆盖）
+    // 默认 1024，可以根据系统和性能需求调整
+    if let Ok(iov_max_str) = std::env::var("IOV_MAX") {
+        if let Ok(iov_max) = iov_max_str.parse::<usize>() {
+            config.iov_max = iov_max;
+            println!("使用自定义 IOV_MAX: {}", iov_max);
+        }
+    }
+
     let store = DiskStorageWriterWrapper::new(config)?;
     // 测试参数
     let topic = format!("flush_speed_test_{}", partition_count);

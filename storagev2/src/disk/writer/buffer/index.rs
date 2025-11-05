@@ -26,6 +26,7 @@ impl PartitionIndexWriterBuffer {
         let read_write_index_manager = Arc::new(ReadWritePartitionIndexManager::new(
             storage_dir,
             conf.partition_index_num_per_topic as _,
+            conf.clone(),
         ));
 
         Self {

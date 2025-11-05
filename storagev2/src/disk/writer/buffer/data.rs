@@ -13,6 +13,7 @@ use crate::{
             flusher::Flusher,
         },
     },
+    serializer::{MessageSerializer, SgIoSerializer},
 };
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -46,8 +47,8 @@ pub(crate) struct PartitionWriterBuffer {
     #[cfg(target_os = "linux")]
     pub(crate) current_fd: Arc<RwLock<UringFile>>,
 
-    // 先将数据存入内存缓冲区 - 优化：只存消息体，header 在 flush 时动态生成
-    pub(crate) queue: Arc<SwitchQueue<Bytes>>,
+    // 先将消息存入内存缓冲区 - 在 flush 时才序列化，保持零拷贝
+    pub(crate) queue: Arc<SwitchQueue<MessagePayload>>,
 
     // 写相关的位置指针
     pub(crate) write_ptr: Arc<WriterPositionPtr>,
@@ -56,6 +57,9 @@ pub(crate) struct PartitionWriterBuffer {
     has_create_next_record_file: Arc<AtomicBool>,
 
     flusher: Arc<Flusher>,
+
+    // 消息序列化器（支持切换rkyv/S-G IO等）
+    serializer: Arc<dyn MessageSerializer>,
 }
 
 #[async_trait::async_trait]
@@ -63,53 +67,98 @@ impl BufferFlushable for PartitionWriterBuffer {
     // 将数据从内存刷盘
     #[cfg(not(target_os = "linux"))]
     async fn flush(&self, all: bool, fsync: bool) -> Result<u64> {
-        // 批量获取数据
-        let batch;
-        if all {
-            batch = self.queue.pop_all();
+        // 批量获取消息
+        let batch = if all {
+            self.queue.pop_all()
         } else {
-            batch = self
-                .queue
-                .pop_batch(self.conf.batch_pop_size_from_buffer as usize);
-        }
+            self.queue
+                .pop_batch(self.conf.batch_pop_size_from_buffer as usize)
+        };
 
         if batch.is_empty() {
             return Ok(0);
         }
 
-        // 准备IO向量 - 优化：动态生成 header，避免预先分配
-        // 先生成所有 header，保证生命周期
-        let headers: Vec<[u8; 8]> = batch
-            .iter()
-            .map(|data| (data.len() as u64).to_be_bytes())
-            .collect();
+        // 零拷贝批量写入（真正的单次遍历实现）
+        // 核心思路：
+        //   1. 预分配稳定存储（all_headers, length_headers）
+        //   2. 单次遍历batch，序列化每条消息，保存所有 SerializedMessage
+        //   3. 从保存的 SerializedMessage 中提取 IoSlice 引用
+        //   4. 一次 write_vectored 批量写入
+        // 关键：SerializedMessage 的生命周期依赖 batch 和 all_headers，
+        //       只要它们在 write_vectored 前保持存活，IoSlice 引用就有效
 
-        // 构造 IoSlice 数组
-        let mut iovecs = Vec::with_capacity(batch.len() * 2);
-        for (i, data) in batch.iter().enumerate() {
-            iovecs.push(IoSlice::new(&headers[i]));
-            iovecs.push(IoSlice::new(&data[..]));
+        // 1. 预分配稳定存储（不会被移动或释放）
+        let mut all_headers: Vec<Vec<Vec<u8>>> = vec![Vec::new(); batch.len()];
+        let mut length_headers: Vec<[u8; 8]> = vec![[0u8; 8]; batch.len()];
+        let mut all_serialized = Vec::with_capacity(batch.len());
+        let mut total_bytes = 0u64;
+
+        // 2. 单次循环：序列化每条消息，立即组装 IoSlice，完成所有准备工作
+        // 使用 zip + iter_mut 让 Rust 理解每次借用的是不同元素
+        let mut iovecs = Vec::with_capacity(batch.len() * 7);
+
+        for ((msg, headers), length_header) in batch
+            .iter()
+            .zip(all_headers.iter_mut())
+            .zip(length_headers.iter_mut())
+        {
+            let serialized = self
+                .serializer
+                .serialize(msg, headers)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+            // 计算并存储长度头
+            *length_header = (serialized.total_len as u64).to_le_bytes();
+            total_bytes += 8 + serialized.total_len;
+
+            // 立即组装 IoSlice：先添加长度头，再添加消息数据
+            iovecs.push(IoSlice::new(length_header));
+            iovecs.extend_from_slice(&serialized.iovecs);
+
+            // 保存 SerializedMessage 以保持生命周期（batch、all_headers、length_headers 都存活）
+            all_serialized.push(serialized);
         }
 
-        // 执行批量写入
-        let mut fd_wl = self.current_fd.lock().await;
-        let flushed_bytes = fd_wl.write_vectored(&iovecs).await? as u64;
+        // 3. 批量写入（考虑 IOV_MAX 限制）
+        // writev 系统调用的 IOV_MAX 限制（每次调用的最大 IoSlice 数量）
+        // 使用配置中的 iov_max 值（默认 1024）
+        // 用户可以在配置文件中修改此值以适应不同系统
+        let iov_max = self.conf.iov_max;
+        // let mut fd_wl = self.current_fd.lock().await;
+        let mut flushed_bytes = 0u64;
 
-        // 更新刷盘位置
+        if iovecs.len() <= iov_max {
+            // 不超过限制，一次写入
+            flushed_bytes = self.current_fd.write_vectored(&iovecs).await? as u64;
+        } else {
+            // 超过限制，分批写入
+            for chunk in iovecs.chunks(iov_max) {
+                // flushed_bytes += fd_wl.write_vectored(chunk).await? as u64;
+                flushed_bytes = self.current_fd.write_vectored(chunk).await? as u64;
+            }
+        }
+
+        // 5. 验证写入完整性
+        if flushed_bytes != total_bytes {
+            return Err(anyhow!(
+                "write_vectored incomplete: wrote {} bytes, expected {} (iovecs: {})",
+                flushed_bytes,
+                total_bytes,
+                iovecs.len()
+            ));
+        }
+
+        // 6. 更新刷盘位置
         self.write_ptr.rotate_flush_offset(flushed_bytes);
-        // 批量同步
+
+        // 7. 批量同步
         if fsync {
             let fd = self.current_fd.clone();
             tokio::spawn(async move {
-                let _ = fd.lock().await.sync_data().await;
+                let _ = fd.sync_data().await;
             });
         }
-
-        // let (topic, partition_id) = self.parse_topic_partition_from_dir().unwrap();
-        // let index = get_global_partition_index()
-        //     .get_or_create(&topic, partition_id)
-        //     .await?;
-        // index.batch_put(partition_id, &mms)?;
 
         Ok(flushed_bytes)
     }
@@ -125,6 +174,7 @@ impl PartitionWriterBuffer {
         conf: Arc<DiskConfig>,
         write_ptr: Arc<WriterPositionPtr>,
         flusher: Arc<Flusher>,
+        serializer: Arc<dyn MessageSerializer>,
     ) -> Result<Self> {
         let tp = parse_topic_partition_from_dir(&dir);
         if tp.is_none() {
@@ -178,6 +228,7 @@ impl PartitionWriterBuffer {
             write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
+            serializer,
         })
     }
 
@@ -192,11 +243,7 @@ impl PartitionWriterBuffer {
         )?);
 
         // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
-        current_fd
-            .lock()
-            .await
-            .seek(SeekFrom::Start(offset))
-            .await?;
+        current_fd.seek(SeekFrom::Start(offset)).await?;
 
         Ok(current_fd)
     }
@@ -264,11 +311,23 @@ impl PartitionWriterBuffer {
         let mut did_rotate = false;
 
         for data in batch {
-            let bts = data.to_bytes()?;
-            let bts_len = bts.len() as u64;
+            // 估算序列化后的大小（用于判断是否需要 rotation）
+            // 格式：[8:total_len] + [1:msg_id_len] + msg_id + [8:timestamp] + [4:metadata_len] + metadata + [4:payload_len] + payload
+            let estimated_metadata_size: usize = data
+                .metadata
+                .iter()
+                .map(|(k, v)| 4 + k.len() + 4 + v.len())
+                .sum();
+            let estimated_size = 8  // total_len header
+                + 1 + data.msg_id.len()  // msg_id
+                + 8  // timestamp
+                + 4 + 4 + estimated_metadata_size  // metadata_len + entry_count + entries
+                + 4 + data.payload.len(); // payload_len + payload
+
+            let msg_total_len = estimated_size as u64;
 
             let should_rotate = {
-                now_ptr_offset + bts_len > self.conf.max_size_per_file
+                now_ptr_offset + msg_total_len > self.conf.max_size_per_file
                     || now_count + 1 >= self.conf.max_msg_num_per_file
             };
 
@@ -294,13 +353,12 @@ impl PartitionWriterBuffer {
             let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_ptr_offset);
             message_metas.push(mm);
 
-            let msg_total_size = 8 + bts_len;
-            now_batch_total_size += msg_total_size;
-            now_ptr_offset += msg_total_size;
-            now_count += 1;
+            // ✅ 直接将 MessagePayload 入队，延迟到 flush 时才序列化（保持零拷贝）
+            self.queue.push(data);
 
-            // 存储到缓冲区 - 优化：只存消息体，header 在 flush 时动态生成
-            self.queue.push(bts);
+            now_batch_total_size += msg_total_len;
+            now_ptr_offset += msg_total_len;
+            now_count += 1;
         }
 
         {
@@ -337,58 +395,6 @@ impl PartitionWriterBuffer {
     pub(crate) async fn write_batch(&self, batch: Vec<MessagePayload>) -> Result<u64> {
         let (bytes, _) = self.write_batch_with_metas(batch).await?;
         Ok(bytes)
-    }
-
-    // 将数据从内存刷盘
-    #[cfg(not(target_os = "linux"))]
-    pub(crate) async fn flush(&self, all: bool, fsync: bool) -> Result<u64> {
-        // 批量获取数据
-        let batch = if all {
-            self.queue.pop_all()
-        } else {
-            self.queue
-                .pop_batch(self.conf.batch_pop_size_from_buffer as usize)
-        };
-
-        if batch.is_empty() {
-            return Ok(0);
-        }
-
-        // 准备IO向量 - 优化：动态生成 header，避免预先分配
-        // 先生成所有 header，保证生命周期
-        let headers: Vec<[u8; 8]> = batch
-            .iter()
-            .map(|data| (data.len() as u64).to_be_bytes())
-            .collect();
-
-        // 构造 IoSlice 数组
-        let mut iovecs = Vec::with_capacity(batch.len() * 2);
-        for (i, data) in batch.iter().enumerate() {
-            iovecs.push(IoSlice::new(&headers[i]));
-            iovecs.push(IoSlice::new(&data[..]));
-        }
-
-        // 执行批量写入
-        let mut fd_wl = self.current_fd.lock().await;
-        let flushed_bytes = fd_wl.write_vectored(&iovecs).await? as u64;
-
-        // 更新刷盘位置
-        self.write_ptr.rotate_flush_offset(flushed_bytes);
-        // 批量同步
-        if fsync {
-            let fd = self.current_fd.clone();
-            tokio::spawn(async move {
-                let _ = fd.lock().await.sync_data().await;
-            });
-        }
-
-        // let (topic, partition_id) = self.parse_topic_partition_from_dir().unwrap();
-        // let index = get_global_partition_index()
-        //     .get_or_create(&topic, partition_id)
-        //     .await?;
-        // index.batch_put(partition_id, &mms)?;
-
-        Ok(flushed_bytes)
     }
 
     // 将数据从内存刷盘
