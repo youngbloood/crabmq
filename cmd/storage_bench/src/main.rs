@@ -355,6 +355,25 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
     config.storage_dir = PathBuf::from(storage_dir);
     config.with_metrics = true;
 
+    // 配置磁盘写入方式（可通过环境变量覆盖）
+    // DISK_WRITE_MODE=mmap 使用 mmap 写入（会进行内存拷贝）
+    // DISK_WRITE_MODE=writev 使用 write_vectored 零拷贝写入（默认）
+    if let Ok(write_mode) = std::env::var("DISK_WRITE_MODE") {
+        match write_mode.to_lowercase().as_str() {
+            "mmap" => {
+                config.disk_write_mode = storagev2::disk::DiskWriteMode::Mmap;
+                println!("使用 Mmap 写入模式（内存拷贝）");
+            }
+            "writev" | "writevectored" => {
+                config.disk_write_mode = storagev2::disk::DiskWriteMode::WriteVectored;
+                println!("使用 WriteVectored 写入模式（零拷贝）");
+            }
+            _ => {
+                println!("未知的写入模式 '{}', 使用默认的 WriteVectored", write_mode);
+            }
+        }
+    }
+
     // 手动设置 IOV_MAX（可通过环境变量覆盖）
     // 默认 1024，可以根据系统和性能需求调整
     if let Ok(iov_max_str) = std::env::var("IOV_MAX") {
@@ -607,7 +626,7 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
         let bar_len = (wall_clock_throughput / 50.0).round() as usize;
         let bar = "█".repeat(bar_len);
         println!(
-            "{:>5} MB/s: {:.1} MB/s |{}",
+            "{:>5} MB/s: {:>5.1} MB/s |{}",
             target_rate, wall_clock_throughput, bar
         );
     }

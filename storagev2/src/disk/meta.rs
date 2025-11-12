@@ -7,9 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::{fs, fs::File as AsyncFile};
 
-use crate::disk::fd_cache::create_writer_fd;
-
-use super::fd_cache::FileHandlerWriterAsync;
+use crate::disk::fd_cache::{create_simple_async_file, MetaFileHandler};
 
 pub const WRITER_PTR_FILENAME: &str = ".writer.ptr";
 pub const TOPIC_META: &str = "meta.bin";
@@ -23,14 +21,14 @@ struct SerializableTopicMeta {
 // Topic 元数据
 #[derive(Debug, Clone)]
 pub struct TopicMeta {
-    fd: FileHandlerWriterAsync,
+    fd: MetaFileHandler,
     pub keys: Arc<DashMap<String, u32>>, // key -> partition_id
 }
 
 impl TopicMeta {
     pub fn with(f: AsyncFile) -> Self {
         Self {
-            fd: FileHandlerWriterAsync::new(f),
+            fd: MetaFileHandler::new(f),
             keys: Arc::default(),
         }
     }
@@ -38,7 +36,7 @@ impl TopicMeta {
     pub async fn load(path: &PathBuf) -> Result<Self> {
         // 读取并解析为中间结构
         let data = fs::read_to_string(path).await?;
-        let fd = FileHandlerWriterAsync::new(create_writer_fd(path)?);
+        let fd = MetaFileHandler::new(create_simple_async_file(path).await?);
         if data.is_empty() {
             return Ok(Self {
                 fd,
@@ -126,7 +124,7 @@ impl TopicMeta {
 
 #[derive(Debug, Clone)]
 pub struct WriterPositionPtr {
-    fd: FileHandlerWriterAsync, // 存放该 ptr 信息的文件
+    fd: MetaFileHandler, // 存放该 ptr 信息的文件
     // ============== 写入文件内容 ===============
     // 优化：使用 segment_id 代替 filename，避免 RwLock
     // filename = dir.join(format!("{:0>20}.record", segment_id))
@@ -151,8 +149,8 @@ pub struct WriterPositionPtrSnapshot {
 }
 
 impl WriterPositionPtr {
-    pub fn new(ptr_filename: PathBuf, record_filename: PathBuf) -> Result<Self> {
-        let fd = FileHandlerWriterAsync::new(create_writer_fd(&ptr_filename)?);
+    pub async fn new(ptr_filename: PathBuf, record_filename: PathBuf) -> Result<Self> {
+        let fd = MetaFileHandler::new(create_simple_async_file(&ptr_filename).await?);
 
         // 从 record_filename 提取 segment_id
         let segment_id = extract_segment_id_from_filename(&record_filename);
@@ -233,7 +231,7 @@ impl WriterPositionPtr {
 
     pub async fn load(path: &PathBuf) -> Result<Self> {
         let data = tokio::fs::read_to_string(path).await?;
-        let fd = FileHandlerWriterAsync::new(create_writer_fd(path)?);
+        let fd = MetaFileHandler::new(create_simple_async_file(path).await?);
         let base_dir = path.parent().unwrap().to_path_buf();
 
         if data.is_empty() {

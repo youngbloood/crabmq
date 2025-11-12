@@ -16,6 +16,7 @@ use crate::{
     serializer::{MessageSerializer, SgIoSerializer},
 };
 use anyhow::{Result, anyhow};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use common::dir_recursive;
 use log::error;
@@ -42,7 +43,7 @@ pub(crate) struct PartitionWriterBuffer {
     current_segment: Arc<AtomicU64>,
 
     #[cfg(not(target_os = "linux"))]
-    pub(crate) current_fd: FileHandlerWriterAsync,
+    pub(crate) current_fd: Arc<ArcSwap<FileHandlerWriterAsync>>,
 
     #[cfg(target_os = "linux")]
     pub(crate) current_fd: Arc<RwLock<UringFile>>,
@@ -120,22 +121,32 @@ impl BufferFlushable for PartitionWriterBuffer {
             all_serialized.push(serialized);
         }
 
-        // 3. 批量写入（考虑 IOV_MAX 限制）
-        // writev 系统调用的 IOV_MAX 限制（每次调用的最大 IoSlice 数量）
-        // 使用配置中的 iov_max 值（默认 1024）
-        // 用户可以在配置文件中修改此值以适应不同系统
-        let iov_max = self.conf.iov_max;
-        // let mut fd_wl = self.current_fd.lock().await;
+        // 3. 批量写入（根据配置选择写入方式）
         let mut flushed_bytes = 0u64;
+        let write_mode = self.conf.disk_write_mode;
 
-        if iovecs.len() <= iov_max {
-            // 不超过限制，一次写入
-            flushed_bytes = self.current_fd.write_vectored(&iovecs).await? as u64;
-        } else {
-            // 超过限制，分批写入
-            for chunk in iovecs.chunks(iov_max) {
-                // flushed_bytes += fd_wl.write_vectored(chunk).await? as u64;
-                flushed_bytes = self.current_fd.write_vectored(chunk).await? as u64;
+        match write_mode {
+            crate::disk::DiskWriteMode::WriteVectored => {
+                // 零拷贝写入：使用 write_vectored
+                // 注意：writev 系统调用受 IOV_MAX 限制（每次调用的最大 IoSlice 数量）
+                let iov_max = self.conf.iov_max;
+
+                if iovecs.len() <= iov_max {
+                    // 不超过限制，一次写入
+                    flushed_bytes = self.current_fd.load().write(&iovecs, write_mode).await? as u64;
+                } else {
+                    // 超过限制，分批写入
+                    for chunk in iovecs.chunks(iov_max) {
+                        flushed_bytes +=
+                            self.current_fd.load().write(chunk, write_mode).await? as u64;
+                    }
+                }
+            }
+            crate::disk::DiskWriteMode::Mmap => {
+                // Mmap 写入：将数据拷贝到连续内存后写入
+                // 优点：不受 IOV_MAX 限制，可以一次性写入大批量数据
+                // 缺点：需要一次内存拷贝
+                flushed_bytes = self.current_fd.load().write(&iovecs, write_mode).await? as u64;
             }
         }
 
@@ -154,7 +165,7 @@ impl BufferFlushable for PartitionWriterBuffer {
 
         // 7. 批量同步
         if fsync {
-            let fd = self.current_fd.clone();
+            let fd = self.current_fd.load_full();
             tokio::spawn(async move {
                 let _ = fd.sync_data().await;
             });
@@ -214,7 +225,13 @@ impl PartitionWriterBuffer {
             0
         };
 
-        let current_fd = Self::get_current_fd(&dir, max_file, write_ptr.get_flush_offset()).await?;
+        let current_fd = Self::get_current_fd(
+            &dir,
+            max_file,
+            write_ptr.get_flush_offset(),
+            conf.disk_write_mode,
+        )
+        .await?;
 
         Ok(Self {
             dir: dir.clone(),
@@ -222,7 +239,7 @@ impl PartitionWriterBuffer {
             partition_id: tp.1,
             current_segment: Arc::new(factor),
             #[cfg(not(target_os = "linux"))]
-            current_fd,
+            current_fd: Arc::new(ArcSwap::from_pointee(current_fd)),
             conf: conf.clone(),
             queue: Arc::new(SwitchQueue::new()),
             write_ptr,
@@ -237,14 +254,11 @@ impl PartitionWriterBuffer {
         dir: &PathBuf,
         max_file: u64,
         offset: u64,
+        mode: crate::disk::DiskWriteMode,
     ) -> Result<FileHandlerWriterAsync> {
-        let current_fd = FileHandlerWriterAsync::new(create_writer_fd(
-            &dir.join(gen_record_filename(max_file)),
-        )?);
+        let current_fd = create_writer_fd(&dir.join(gen_record_filename(max_file)), mode).await?;
 
-        // PartitionWriterBuffer 在初始化时就设置好 current_fd 的写位置
-        current_fd.seek(SeekFrom::Start(offset)).await?;
-
+        // 注意：fd::Writer 内部已经追踪位置，不需要手动 seek
         Ok(current_fd)
     }
 
@@ -270,9 +284,16 @@ impl PartitionWriterBuffer {
             0
         };
 
-        match create_writer_fd_with_prealloc(&next_filename, max_size_per_file) {
-            Ok(async_file) => {
-                self.current_fd.reset(async_file).await;
+        match create_writer_fd_with_prealloc(
+            &next_filename,
+            max_size_per_file,
+            self.conf.disk_write_mode,
+        )
+        .await
+        {
+            Ok(new_writer) => {
+                // 使用 ArcSwap::store 原子替换底层 Writer
+                self.current_fd.store(Arc::new(new_writer));
                 self.write_ptr.reset_with_filename(next_filename);
             }
             Err(e) => {
@@ -280,8 +301,6 @@ impl PartitionWriterBuffer {
             }
         }
 
-        // writer_ptr_wl.next_filename = PathBuf::new();
-        // writer_ptr_wl.next_offset = 0;
         self.has_create_next_record_file
             .store(false, Ordering::Relaxed);
     }
@@ -431,7 +450,7 @@ impl PartitionWriterBuffer {
         if fsync {
             let fd = self.current_fd.clone();
             tokio::spawn(async move {
-                let _ = fd.lock().await.sync_data().await;
+                let _ = fd.write().await.sync_data().await;
             });
         }
 

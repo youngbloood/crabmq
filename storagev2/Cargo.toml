@@ -28,3 +28,5 @@ once_cell = "1.21.3"
 rkyv = "0.8.12"
 futures = "0.3.31"
 tempfile = "3.10.1"
+memmap2 = {version = "0.9",features= ["stable_deref_trait"]}
+arc-swap = "1.7"

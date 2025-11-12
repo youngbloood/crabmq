@@ -1,9 +1,11 @@
 mod compress;
 pub mod config;
+pub mod fd;
 mod fd_cache;
 mod meta;
 mod partition_index;
 mod prealloc;
+
 pub mod reader;
 pub mod writer;
 

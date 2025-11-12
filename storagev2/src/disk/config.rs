@@ -1,6 +1,15 @@
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
+/// 磁盘写入方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DiskWriteMode {
+    /// 使用 write_vectored 零拷贝写入（默认）
+    WriteVectored,
+    /// 使用 mmap 写入（需要内存拷贝组装连续内存）
+    Mmap,
+}
+
 /// 查询系统的 IOV_MAX 值
 ///
 /// IOV_MAX 是 writev/readv 系统调用一次能接受的最大 IoSlice 数量
@@ -73,11 +82,14 @@ pub struct Config {
     // 是否启用索引（性能测试时可禁用）
     pub enable_index: bool,
 
+    // 磁盘写入方式：WriteVectored（零拷贝）或 Mmap（内存拷贝）
+    pub disk_write_mode: DiskWriteMode,
+
     // RocksDB 配置参数
     pub rocksdb_max_open_files: i32,
-    pub rocksdb_write_buffer_size: usize,             // 单位：字节
+    pub rocksdb_write_buffer_size: usize, // 单位：字节
     pub rocksdb_max_write_buffer_number: i32,
-    pub rocksdb_target_file_size_base: u64,           // 单位：字节
+    pub rocksdb_target_file_size_base: u64, // 单位：字节
     pub rocksdb_max_background_jobs: i32,
     pub rocksdb_level_zero_file_num_compaction_trigger: i32,
     pub rocksdb_level_zero_slowdown_writes_trigger: i32,
@@ -124,7 +136,7 @@ pub fn default_config() -> Config {
         partition_cleanup_interval: 150,
         partition_inactive_threshold: 300,
         batch_pop_size_from_buffer: 128, // 优化：128 条消息 × 7 IoSlice = 896 < 1024（单次 write_vectored）
-        iov_max: 1024, // Linux/macOS 系统默认值，可通过 getconf IOV_MAX 查询
+        iov_max: 1024,                   // Linux/macOS 系统默认值，可通过 getconf IOV_MAX 查询
         partition_index_num_per_topic: 100,
         max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
         max_size_per_file: 1024 * 1024 * 1024, // 1G
@@ -133,6 +145,7 @@ pub fn default_config() -> Config {
         create_next_record_file_threshold: 90,
         with_metrics: false,
         enable_index: true, // 默认启用索引，性能测试时可设为 false
+        disk_write_mode: DiskWriteMode::WriteVectored, // 默认使用零拷贝 write_vectored
 
         // RocksDB 配置默认值（针对高性能写入优化）
         rocksdb_max_open_files: 10000,

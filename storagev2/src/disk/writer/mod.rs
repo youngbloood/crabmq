@@ -16,7 +16,6 @@ use murmur3::murmur3_32;
 use std::io::Cursor;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -197,7 +196,8 @@ impl TopicPartitionManager {
             WriterPositionPtr::new(
                 writer_ptr_filename.clone(),
                 dir.join(gen_record_filename(0)),
-            )?
+            )
+            .await?
         };
 
         // 加载
@@ -548,6 +548,7 @@ mod test {
                 .rocksdb_level_zero_slowdown_writes_trigger,
             rocksdb_level_zero_stop_writes_trigger: cfg.rocksdb_level_zero_stop_writes_trigger,
             rocksdb_disable_wal: cfg.rocksdb_disable_wal,
+            disk_write_mode: cfg.disk_write_mode,
         })
         .expect("error config")
     }
