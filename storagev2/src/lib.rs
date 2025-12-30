@@ -6,9 +6,8 @@ pub use mem::*;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::{collections::HashMap, num::NonZero, sync::Arc};
+use std::{collections::HashMap, num::NonZero};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -119,7 +118,7 @@ pub trait StorageReaderSession: Send + Sync + 'static {
     -> StorageResult<()>;
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, PartialOrd)]
 pub struct SegmentOffset {
     pub segment_id: u64,
     pub offset: u64,
