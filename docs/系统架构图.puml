@@ -1,0 +1,74 @@
+@startuml
+skinparam monochrome true
+skinparam dpi 150
+title CrabMQ — 系统架构图（基于《副本一致性实施计划》实现后）
+
+package "Clients" {
+  actor "Client\nProducer / Consumer" as C
+}
+
+cloud "Service Discovery / Registry" as SD
+
+folder "Coordinator Cluster (HA)" {
+  database Coo1 as C1
+  database Coo2 as C2
+  database Coo3 as C3
+  C1 -[#green]-> C2 : Raft
+  C2 -[#green]-> C3 : Raft
+  C3 -[#green]-> C1 : Raft
+  note right of C1
+    Authoritative metadata:
+    - partition_cluster (epoch, lp_id, fp_ids)
+    - cgo (consumer offsets)
+    - WAL + snapshots
+  end note
+}
+
+package "Brokers (N nodes)" {
+  component Broker1 as B1
+  component Broker2 as B2
+  component Broker3 as B3
+  database Storage1 as S1
+  database Storage2 as S2
+  database Storage3 as S3
+}
+
+rectangle "Replication Transport / Connection Pool" as R
+
+' Interactions
+C --> SD : discover brokers / coo
+C --> C1 : metadata APIs (get leader, create topic)
+C --> B1 : produce/consume (to leader)
+C --> C1 : CommitOffsetReq (to Coordinator)
+
+' Heartbeat & metadata
+B1 --> C1 : heartbeat(partition states)
+B2 --> C1 : heartbeat(partition states)
+B3 --> C1 : heartbeat(partition states)
+C1 --> B1 : role change / metadata push
+
+' Replication between brokers (multi-plexed)
+B1 --> R : replication stream (multiplex)
+B2 --> R : replication stream
+B3 --> R : replication stream
+R --> B2 : stream per-partition
+R --> B3 : stream per-partition
+
+' Storage
+B1 --> S1 : write logs (LEO)
+B2 --> S2 : write logs
+B3 --> S3 : write logs
+
+' Consumer offset and sliding window
+C -> C1 : CommitOffsetReq
+C -> B1 : notify commit (release sliding window)
+C1 --> C : CommitAck
+
+note left
+Legend:
+- Coo = Coordinator (Raft for HA)
+- Broker = storage + replication + fetch service
+- Clients commit offsets to Coordinator (authoritative)
+end note
+
+@enduml
