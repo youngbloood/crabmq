@@ -134,9 +134,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.98"
+version = "1.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
+checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "arc-swap"
@@ -711,6 +711,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "prost",
  "protobuf",
+ "protocolv2",
  "raft",
  "rand 0.9.1",
  "serde",
@@ -2518,6 +2519,14 @@ dependencies = [
  "rsbit",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "protocolv2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rkyv",
 ]
 
 [[package]]

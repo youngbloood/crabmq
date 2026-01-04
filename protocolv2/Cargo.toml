@@ -1,0 +1,8 @@
+[package]
+name = "protocolv2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+rkyv = "0.8.12"

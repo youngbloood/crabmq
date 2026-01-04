@@ -25,3 +25,4 @@ thiserror = "2.0.12"
 bincode = { version = "2.0.1", features = ["serde"] }
 nanoid = "0.4.0"
 rand = "0.9.1"
+protocolv2 = { version = "0.1.0", path = "../protocolv2" }

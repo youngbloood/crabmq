@@ -2,6 +2,10 @@ use super::Config as CooConfig;
 use super::partition;
 use super::raftx;
 use crate::ClientNode;
+use crate::broker_status::BrokerState;
+use crate::broker_status::BrokerStatus;
+use crate::command::Command;
+use crate::conn::Conn;
 use crate::consumer_group::ConsumerGroupManager;
 use crate::event_bus::EventBus;
 use crate::partition::PartitionPolicy;
@@ -12,16 +16,16 @@ use crate::raftx::TopicPartitionData;
 use anyhow::Result;
 use anyhow::anyhow;
 use dashmap::DashMap;
-use grpcx::brokercoosvc::BrokerState;
-use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
-use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
-use grpcx::commonsvc;
-use grpcx::commonsvc::CooListResp;
-use grpcx::cooraftsvc;
-use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
-use grpcx::smart_client::repair_addr_with_http;
-use grpcx::topic_meta::TopicPartitionDetail;
-use grpcx::{brokercoosvc, clientcoosvc};
+// use grpcx::brokercoosvc::BrokerState;
+// use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
+// use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
+// use grpcx::commonsvc;
+// use grpcx::commonsvc::CooListResp;
+// use grpcx::cooraftsvc;
+// use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
+// use grpcx::smart_client::repair_addr_with_http;
+// use grpcx::topic_meta::TopicPartitionDetail;
+// use grpcx::{brokercoosvc, clientcoosvc};
 use log::error;
 use log::info;
 use log::warn;
@@ -33,8 +37,13 @@ use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::select;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
 use tokio::time::interval;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
@@ -51,6 +60,11 @@ pub struct Coordinator {
     raft_node: Arc<RaftNode<PartitionManager>>,
     // 向 raft_node 节点发送消息的通道
     raft_node_sender: mpsc::Sender<AllMessageType>,
+
+    conns: Arc<DashMap<String, Conn>>,
+
+    cmd_tx: Sender<Command>,
+    cmd_rx: Receiver<Command>,
 
     // coo: leader 收集到的 broker 上报信息
     // broker_id -> BrokerState
@@ -138,13 +152,14 @@ impl Coordinator {
     /// broker_pull
     ///
     /// 用于本地的 `broker` 向 coo 报道自身信息
-    pub fn apply_broker_report(&self, state: brokercoosvc::BrokerState) {
+    pub fn apply_broker_report(&self, state: BrokerState) {
         let id = state.id;
         self.brokers
             .entry(id)
             .and_modify(|entry| {
                 // TODO: 修改值
                 *entry = state.clone();
+                *entry.status = BrokerStatus::Online;
             })
             .or_insert(state.clone());
     }
@@ -157,65 +172,104 @@ impl Coordinator {
         // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
         self.start_main_loop();
 
-        let raft_svc = RaftServiceServer::new(self.clone());
-        let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
-        let clientcoo_svc = ClientCooServiceServer::new(self.clone());
+        let handle = tokio::net::TcpListener::bind(&self.conf.coo_addr)
+            .await
+            .map_err(|e| anyhow!("Coo bind addr {} err: {:?}", &self.conf.coo_addr, e))?;
 
-        let mut svc_builer = Server::builder()
-            .add_service(brokercoo_svc)
-            .add_service(clientcoo_svc);
+        loop {
+            let h = handle.accept().await;
+            if let Ok((stream, addr)) = h {
+                let (rh, wh) = stream.into_split();
+                let _addr = addr.ip().to_string().clone();
+                self.conns.insert(addr.ip().to_string(), Conn::new(wh));
+                let conns = self.conns.clone();
+                let cmd_tx = self.cmd_tx.clone();
 
-        let coo_addr = self.conf.coo_addr.parse().unwrap();
-        if !self.conf.coo_addr.eq(&self.coo_grpc_addr) {
-            let raft_grpc_addr = self.coo_grpc_addr.parse().unwrap();
-            tokio::spawn(async move {
                 tokio::spawn(async move {
-                    info!("Coordinator-Raft listen: {}", raft_grpc_addr);
-                    match Server::builder()
-                        .add_service(raft_svc)
-                        .serve(raft_grpc_addr)
-                        .await
-                    {
-                        Ok(_) => {
-                            info!("Coordinator-Raft server started at {}", raft_grpc_addr);
-                        }
-                        Err(e) => {
-                            panic!("Coordinator-Raft listen : {}, err: {:?}", raft_grpc_addr, e)
+                    let mut head = [0; 5];
+                    loop {
+                        match rh.read_exact(&mut head).await {
+                            Ok(size) => {
+                                if size != head.len() {
+                                    conns.remove(_addr);
+                                    break;
+                                }
+
+                                // 根据 类型和长度解析，然后
+                                cmd_tx
+                                    .send(Command {
+                                        addr: (),
+                                        index: (),
+                                        endecoder: (),
+                                    })
+                                    .await?;
+                            }
+                            Err(e) => todo!(),
                         }
                     }
                 });
-            });
-        } else {
-            svc_builer = svc_builer.add_service(raft_svc);
-            info!("Coordinator-Raft listen: {}", coo_addr);
+            }
         }
 
-        let raft_node = self.raft_node.clone();
-        let raft_handle = tokio::spawn(async move {
-            raft_node.run().await;
-        });
+        // let raft_svc = RaftServiceServer::new(self.clone());
+        // let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
+        // let clientcoo_svc = ClientCooServiceServer::new(self.clone());
 
-        let grpc_handle = tokio::spawn(async move {
-            info!("Coordinator listen: {}", coo_addr);
-            match svc_builer.serve(coo_addr).await {
-                Ok(_) => {
-                    info!("Coordinator server started at {}", coo_addr);
-                }
-                Err(e) => panic!("Coordinator listen : {}, err: {:?}", coo_addr, e),
-            }
-        });
+        // let mut svc_builer = Server::builder()
+        //     .add_service(brokercoo_svc)
+        //     .add_service(clientcoo_svc);
 
-        let join_handle = if !self.raft_leader_addr.is_empty() {
-            let raft_node = self.raft_node.clone();
-            let raft_leader_addr = self.raft_leader_addr.clone();
-            tokio::spawn(async move {
-                let _ = raft_node.join(raft_leader_addr).await;
-            })
-        } else {
-            tokio::spawn(async {})
-        };
+        // let coo_addr = self.conf.coo_addr.parse().unwrap();
+        // if !self.conf.coo_addr.eq(&self.coo_grpc_addr) {
+        //     let raft_grpc_addr = self.coo_grpc_addr.parse().unwrap();
+        //     tokio::spawn(async move {
+        //         tokio::spawn(async move {
+        //             info!("Coordinator-Raft listen: {}", raft_grpc_addr);
+        //             match Server::builder()
+        //                 .add_service(raft_svc)
+        //                 .serve(raft_grpc_addr)
+        //                 .await
+        //             {
+        //                 Ok(_) => {
+        //                     info!("Coordinator-Raft server started at {}", raft_grpc_addr);
+        //                 }
+        //                 Err(e) => {
+        //                     panic!("Coordinator-Raft listen : {}, err: {:?}", raft_grpc_addr, e)
+        //                 }
+        //             }
+        //         });
+        //     });
+        // } else {
+        //     svc_builer = svc_builer.add_service(raft_svc);
+        //     info!("Coordinator-Raft listen: {}", coo_addr);
+        // }
 
-        tokio::try_join!(raft_handle, grpc_handle, join_handle)?;
+        // let raft_node = self.raft_node.clone();
+        // let raft_handle = tokio::spawn(async move {
+        //     raft_node.run().await;
+        // });
+
+        // let grpc_handle = tokio::spawn(async move {
+        //     info!("Coordinator listen: {}", coo_addr);
+        //     match svc_builer.serve(coo_addr).await {
+        //         Ok(_) => {
+        //             info!("Coordinator server started at {}", coo_addr);
+        //         }
+        //         Err(e) => panic!("Coordinator listen : {}, err: {:?}", coo_addr, e),
+        //     }
+        // });
+
+        // let join_handle = if !self.raft_leader_addr.is_empty() {
+        //     let raft_node = self.raft_node.clone();
+        //     let raft_leader_addr = self.raft_leader_addr.clone();
+        //     tokio::spawn(async move {
+        //         let _ = raft_node.join(raft_leader_addr).await;
+        //     })
+        // } else {
+        //     tokio::spawn(async {})
+        // };
+
+        // tokio::try_join!(raft_handle, grpc_handle, join_handle)?;
         Ok(())
     }
 
@@ -351,6 +405,17 @@ impl Coordinator {
         });
 
         Ok(rx)
+    }
+
+    fn handle_command(&self) {
+        loop {
+            let cmd = self.cmd_rx.recv().await;
+            if let Some(cmd) = cmd {
+                match cmd.index {
+                    protocolv2::BrokerCooHeartbeatRequestIndex => {}
+                }
+            }
+        }
     }
 }
 
@@ -670,443 +735,443 @@ impl brokercoosvc::broker_coo_service_server::BrokerCooService for Coordinator {
     }
 }
 
-#[tonic::async_trait]
-impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
-    type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartitionResp>;
-    type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
-    type SyncConsumerAssignmentsStream =
-        tonic::codegen::BoxStream<clientcoosvc::SyncConsumerAssignmentsResp>;
+// #[tonic::async_trait]
+// impl clientcoosvc::client_coo_service_server::ClientCooService for Coordinator {
+//     type PullStream = tonic::codegen::BoxStream<commonsvc::TopicPartitionResp>;
+//     type ListStream = tonic::codegen::BoxStream<commonsvc::CooListResp>;
+//     type SyncConsumerAssignmentsStream =
+//         tonic::codegen::BoxStream<clientcoosvc::SyncConsumerAssignmentsResp>;
 
-    async fn auth(
-        &self,
-        request: tonic::Request<clientcoosvc::AuthReq>,
-    ) -> std::result::Result<tonic::Response<clientcoosvc::AuthResp>, tonic::Status> {
-        Ok(tonic::Response::new(clientcoosvc::AuthResp {
-            error: todo!(),
-            token: todo!(),
-        }))
-    }
+//     async fn auth(
+//         &self,
+//         request: tonic::Request<clientcoosvc::AuthReq>,
+//     ) -> std::result::Result<tonic::Response<clientcoosvc::AuthResp>, tonic::Status> {
+//         Ok(tonic::Response::new(clientcoosvc::AuthResp {
+//             error: todo!(),
+//             token: todo!(),
+//         }))
+//     }
 
-    async fn list(
-        &self,
-        request: tonic::Request<commonsvc::CooListReq>,
-    ) -> std::result::Result<tonic::Response<Self::ListStream>, tonic::Status> {
-        let remote_addr = request.remote_addr().unwrap();
-        let client_id = request.into_inner().id;
-        let rx = self.list_peer(remote_addr, client_id, false).await;
+//     async fn list(
+//         &self,
+//         request: tonic::Request<commonsvc::CooListReq>,
+//     ) -> std::result::Result<tonic::Response<Self::ListStream>, tonic::Status> {
+//         let remote_addr = request.remote_addr().unwrap();
+//         let client_id = request.into_inner().id;
+//         let rx = self.list_peer(remote_addr, client_id, false).await;
 
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
-    }
+//         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+//     }
 
-    /// new_topic: 新增 `topic` 及其分区分配
-    ///
-    /// 1. 分区模块对新 `topic` 及其分区进行分配
-    ///
-    /// 2. 将topic元信息提交至 `raft` 集群
-    ///
-    /// 3. 发送topic元信息广播至 `broker_event_bus` 和 `client_event_bus`
-    async fn new_topic(
-        &self,
-        request: tonic::Request<clientcoosvc::NewTopicReq>,
-    ) -> std::result::Result<tonic::Response<clientcoosvc::NewTopicResp>, tonic::Status> {
-        self.check_leader().await?;
+//     /// new_topic: 新增 `topic` 及其分区分配
+//     ///
+//     /// 1. 分区模块对新 `topic` 及其分区进行分配
+//     ///
+//     /// 2. 将topic元信息提交至 `raft` 集群
+//     ///
+//     /// 3. 发送topic元信息广播至 `broker_event_bus` 和 `client_event_bus`
+//     async fn new_topic(
+//         &self,
+//         request: tonic::Request<clientcoosvc::NewTopicReq>,
+//     ) -> std::result::Result<tonic::Response<clientcoosvc::NewTopicResp>, tonic::Status> {
+//         self.check_leader().await?;
 
-        let req = request.into_inner();
+//         let req = request.into_inner();
 
-        let (part, exist) = self
-            .partition_manager
-            .build_allocator(
-                self.conf.new_topic_partition_factor.clone(),
-                Some(self.brokers.clone()),
-            )
-            .assign_new_topic(&req.topic, req.partitio_num)
-            .await
-            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+//         let (part, exist) = self
+//             .partition_manager
+//             .build_allocator(
+//                 self.conf.new_topic_partition_factor.clone(),
+//                 Some(self.brokers.clone()),
+//             )
+//             .assign_new_topic(&req.topic, req.partitio_num)
+//             .await
+//             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
-        if exist {
-            return Ok(Response::new(clientcoosvc::NewTopicResp {
-                success: true,
-                error: "".to_string(),
-                detail: Some(commonsvc::TopicPartitionResp {
-                    term: self.get_term().await,
-                    list: part.into(),
-                }),
-            }));
-        }
+//         if exist {
+//             return Ok(Response::new(clientcoosvc::NewTopicResp {
+//                 success: true,
+//                 error: "".to_string(),
+//                 detail: Some(commonsvc::TopicPartitionResp {
+//                     term: self.get_term().await,
+//                     list: part.into(),
+//                 }),
+//             }));
+//         }
 
-        let (tx_notify, mut rx_notify) = mpsc::channel(1);
-        let _ = self.propose(&part, Some(tx_notify)).await;
-        match timeout(
-            Duration::from_secs(self.conf.new_topic_timeout),
-            rx_notify.recv(),
-        )
-        .await
-        {
-            Ok(Some(res)) => match res {
-                Ok(unique_id) => {
-                    if unique_id == part.unique_id {
-                        self.partition_manager.apply_topic_partition_detail(
-                            part.partitions
-                                .iter()
-                                .map(TopicPartitionDetail::from)
-                                .collect(),
-                        );
-                        // 发送通知
-                        self.broker_event_bus
-                            .broadcast(PartitionEvent::NewTopic {
-                                partitions: part.clone(),
-                            })
-                            .await;
-                        self.client_event_bus
-                            .broadcast(PartitionEvent::NewTopic {
-                                partitions: part.clone(),
-                            })
-                            .await;
+//         let (tx_notify, mut rx_notify) = mpsc::channel(1);
+//         let _ = self.propose(&part, Some(tx_notify)).await;
+//         match timeout(
+//             Duration::from_secs(self.conf.new_topic_timeout),
+//             rx_notify.recv(),
+//         )
+//         .await
+//         {
+//             Ok(Some(res)) => match res {
+//                 Ok(unique_id) => {
+//                     if unique_id == part.unique_id {
+//                         self.partition_manager.apply_topic_partition_detail(
+//                             part.partitions
+//                                 .iter()
+//                                 .map(TopicPartitionDetail::from)
+//                                 .collect(),
+//                         );
+//                         // 发送通知
+//                         self.broker_event_bus
+//                             .broadcast(PartitionEvent::NewTopic {
+//                                 partitions: part.clone(),
+//                             })
+//                             .await;
+//                         self.client_event_bus
+//                             .broadcast(PartitionEvent::NewTopic {
+//                                 partitions: part.clone(),
+//                             })
+//                             .await;
 
-                        let detail = commonsvc::TopicPartitionResp {
-                            term: self.get_term().await,
-                            list: part.into(),
-                        };
+//                         let detail = commonsvc::TopicPartitionResp {
+//                             term: self.get_term().await,
+//                             list: part.into(),
+//                         };
 
-                        Ok(Response::new(clientcoosvc::NewTopicResp {
-                            success: true,
-                            error: "".to_string(),
-                            detail: Some(detail),
-                        }))
-                    } else {
-                        Err(tonic::Status::internal("unique_id not eq part.unique_id"))
-                    }
-                }
-                Err(e) => Err(tonic::Status::internal(e.to_string())),
-            },
-            Ok(None) => Err(tonic::Status::internal("none")),
-            Err(e) => Err(tonic::Status::internal(e.to_string())),
-        }
-    }
+//                         Ok(Response::new(clientcoosvc::NewTopicResp {
+//                             success: true,
+//                             error: "".to_string(),
+//                             detail: Some(detail),
+//                         }))
+//                     } else {
+//                         Err(tonic::Status::internal("unique_id not eq part.unique_id"))
+//                     }
+//                 }
+//                 Err(e) => Err(tonic::Status::internal(e.to_string())),
+//             },
+//             Ok(None) => Err(tonic::Status::internal("none")),
+//             Err(e) => Err(tonic::Status::internal(e.to_string())),
+//         }
+//     }
 
-    /// add_partitions: 某个 `topic` 下新增的分区
-    ///
-    /// 1. 分区模块将“新分区”分配至 `broker` 节点
-    ///
-    /// 2. 将新增元信息提交至 `raft` 集群
-    ///
-    /// 3. 发送新增元信息广播至 `broker_event_bus` 和 `client_event_bus`
-    async fn add_partitions(
-        &self,
-        request: tonic::Request<clientcoosvc::AddPartitionsReq>,
-    ) -> std::result::Result<tonic::Response<clientcoosvc::AddPartitionsResp>, tonic::Status> {
-        self.check_leader().await?;
+//     /// add_partitions: 某个 `topic` 下新增的分区
+//     ///
+//     /// 1. 分区模块将“新分区”分配至 `broker` 节点
+//     ///
+//     /// 2. 将新增元信息提交至 `raft` 集群
+//     ///
+//     /// 3. 发送新增元信息广播至 `broker_event_bus` 和 `client_event_bus`
+//     async fn add_partitions(
+//         &self,
+//         request: tonic::Request<clientcoosvc::AddPartitionsReq>,
+//     ) -> std::result::Result<tonic::Response<clientcoosvc::AddPartitionsResp>, tonic::Status> {
+//         self.check_leader().await?;
 
-        let req = request.into_inner();
-        if !self.partition_manager.has_topic(&req.topic) {
-            return Err(tonic::Status::new(
-                tonic::Code::InvalidArgument,
-                format!("Not has topic: {}", &req.topic),
-            ));
-        }
-        if req.partitio_num == 0 {
-            return Err(tonic::Status::new(
-                tonic::Code::InvalidArgument,
-                "partition must be greater than zero",
-            ));
-        }
-        let added = self
-            .partition_manager
-            .build_allocator(
-                self.conf.new_topic_partition_factor.clone(),
-                Some(self.brokers.clone()),
-            )
-            .add_partitions(&req.topic, req.partitio_num)
-            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+//         let req = request.into_inner();
+//         if !self.partition_manager.has_topic(&req.topic) {
+//             return Err(tonic::Status::new(
+//                 tonic::Code::InvalidArgument,
+//                 format!("Not has topic: {}", &req.topic),
+//             ));
+//         }
+//         if req.partitio_num == 0 {
+//             return Err(tonic::Status::new(
+//                 tonic::Code::InvalidArgument,
+//                 "partition must be greater than zero",
+//             ));
+//         }
+//         let added = self
+//             .partition_manager
+//             .build_allocator(
+//                 self.conf.new_topic_partition_factor.clone(),
+//                 Some(self.brokers.clone()),
+//             )
+//             .add_partitions(&req.topic, req.partitio_num)
+//             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
 
-        let (tx_notify, mut rx_notify) = mpsc::channel(1);
-        let _ = self.propose(&added, Some(tx_notify)).await;
-        match timeout(
-            Duration::from_secs(self.conf.add_partition_timeout),
-            rx_notify.recv(),
-        )
-        .await
-        {
-            Ok(Some(res)) => match res {
-                Ok(unique_id) => {
-                    if unique_id == added.unique_id {
-                        // 发送通知
-                        self.broker_event_bus
-                            .broadcast(PartitionEvent::NewTopic {
-                                partitions: added.clone(),
-                            })
-                            .await;
+//         let (tx_notify, mut rx_notify) = mpsc::channel(1);
+//         let _ = self.propose(&added, Some(tx_notify)).await;
+//         match timeout(
+//             Duration::from_secs(self.conf.add_partition_timeout),
+//             rx_notify.recv(),
+//         )
+//         .await
+//         {
+//             Ok(Some(res)) => match res {
+//                 Ok(unique_id) => {
+//                     if unique_id == added.unique_id {
+//                         // 发送通知
+//                         self.broker_event_bus
+//                             .broadcast(PartitionEvent::NewTopic {
+//                                 partitions: added.clone(),
+//                             })
+//                             .await;
 
-                        self.client_event_bus
-                            .broadcast(PartitionEvent::NewTopic { partitions: added })
-                            .await;
+//                         self.client_event_bus
+//                             .broadcast(PartitionEvent::NewTopic { partitions: added })
+//                             .await;
 
-                        Ok(Response::new(clientcoosvc::AddPartitionsResp {
-                            success: true,
-                            error: "".to_string(),
-                            detail: todo!(),
-                        }))
-                    } else {
-                        Err(tonic::Status::internal("unique_id not eq added.unique_id"))
-                    }
-                }
-                Err(e) => Err(tonic::Status::internal(e.to_string())),
-            },
-            Ok(None) => Err(tonic::Status::internal("none")),
-            Err(e) => Err(tonic::Status::internal(e.to_string())),
-        }
-    }
+//                         Ok(Response::new(clientcoosvc::AddPartitionsResp {
+//                             success: true,
+//                             error: "".to_string(),
+//                             detail: todo!(),
+//                         }))
+//                     } else {
+//                         Err(tonic::Status::internal("unique_id not eq added.unique_id"))
+//                     }
+//                 }
+//                 Err(e) => Err(tonic::Status::internal(e.to_string())),
+//             },
+//             Ok(None) => Err(tonic::Status::internal("none")),
+//             Err(e) => Err(tonic::Status::internal(e.to_string())),
+//         }
+//     }
 
-    /// Server streaming response type for the pull method.
-    async fn pull(
-        &self,
-        request: tonic::Request<clientcoosvc::PullReq>,
-    ) -> std::result::Result<tonic::Response<Self::PullStream>, tonic::Status> {
-        self.check_leader().await?;
+//     /// Server streaming response type for the pull method.
+//     async fn pull(
+//         &self,
+//         request: tonic::Request<clientcoosvc::PullReq>,
+//     ) -> std::result::Result<tonic::Response<Self::PullStream>, tonic::Status> {
+//         self.check_leader().await?;
 
-        let remote_addr = request.remote_addr().unwrap().to_string();
-        let req = request.into_inner();
-        let sub_id = format!("client_{}", remote_addr);
-        let (_, mut event_rx) = self.client_event_bus.subscribe(sub_id.clone());
-        let init_data = self
-            .qeury_topics(&req.topics, &req.broker_ids, &req.partition_ids, &req.keys)
-            .await;
-        let bus: EventBus<PartitionEvent> = self.client_event_bus.clone();
-        let (resp_tx, resp_rx) = mpsc::channel(self.conf.client_pull_buffer_size);
-        let raft_node = self.raft_node.clone();
-        tokio::spawn(async move {
-            let _ = resp_tx.send(Ok(init_data)).await;
+//         let remote_addr = request.remote_addr().unwrap().to_string();
+//         let req = request.into_inner();
+//         let sub_id = format!("client_{}", remote_addr);
+//         let (_, mut event_rx) = self.client_event_bus.subscribe(sub_id.clone());
+//         let init_data = self
+//             .qeury_topics(&req.topics, &req.broker_ids, &req.partition_ids, &req.keys)
+//             .await;
+//         let bus: EventBus<PartitionEvent> = self.client_event_bus.clone();
+//         let (resp_tx, resp_rx) = mpsc::channel(self.conf.client_pull_buffer_size);
+//         let raft_node = self.raft_node.clone();
+//         tokio::spawn(async move {
+//             let _ = resp_tx.send(Ok(init_data)).await;
 
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    PartitionEvent::NotLeader {
-                        new_leader_id,
-                        new_coo_leader_addr,
-                        new_raft_leader_addr,
-                    } => {
-                        // 发送错误并终止流
-                        let _ = resp_tx
-                            .send(Err(raft_node
-                                .get_not_leader_err_status(format!(
-                                    "Leader changed to [{}:{}:{}]",
-                                    new_leader_id, new_coo_leader_addr, new_raft_leader_addr
-                                ))
-                                .await))
-                            .await;
-                        break;
-                    }
-                    PartitionEvent::NewTopic { partitions } => {
-                        if let Some(partitions) = filter_single_partition(
-                            partitions,
-                            &req.topics,
-                            &req.broker_ids,
-                            &req.partition_ids,
-                            &req.keys,
-                        ) {
-                            let _ = resp_tx
-                                .send(Ok(convert_to_pull_resp(
-                                    partitions,
-                                    raft_node.get_term().await,
-                                )))
-                                .await;
-                        }
-                    }
-                    // 处理其他事件...
-                    PartitionEvent::AddPartitions { added } => {
-                        if let Some(added) = filter_single_partition(
-                            added,
-                            &req.topics,
-                            &req.broker_ids,
-                            &req.partition_ids,
-                            &req.keys,
-                        ) {
-                            let _ = resp_tx
-                                .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)))
-                                .await;
-                        }
-                    }
-                }
-            }
-            bus.unsubscribe(&sub_id);
-        });
+//             while let Some(event) = event_rx.recv().await {
+//                 match event {
+//                     PartitionEvent::NotLeader {
+//                         new_leader_id,
+//                         new_coo_leader_addr,
+//                         new_raft_leader_addr,
+//                     } => {
+//                         // 发送错误并终止流
+//                         let _ = resp_tx
+//                             .send(Err(raft_node
+//                                 .get_not_leader_err_status(format!(
+//                                     "Leader changed to [{}:{}:{}]",
+//                                     new_leader_id, new_coo_leader_addr, new_raft_leader_addr
+//                                 ))
+//                                 .await))
+//                             .await;
+//                         break;
+//                     }
+//                     PartitionEvent::NewTopic { partitions } => {
+//                         if let Some(partitions) = filter_single_partition(
+//                             partitions,
+//                             &req.topics,
+//                             &req.broker_ids,
+//                             &req.partition_ids,
+//                             &req.keys,
+//                         ) {
+//                             let _ = resp_tx
+//                                 .send(Ok(convert_to_pull_resp(
+//                                     partitions,
+//                                     raft_node.get_term().await,
+//                                 )))
+//                                 .await;
+//                         }
+//                     }
+//                     // 处理其他事件...
+//                     PartitionEvent::AddPartitions { added } => {
+//                         if let Some(added) = filter_single_partition(
+//                             added,
+//                             &req.topics,
+//                             &req.broker_ids,
+//                             &req.partition_ids,
+//                             &req.keys,
+//                         ) {
+//                             let _ = resp_tx
+//                                 .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)))
+//                                 .await;
+//                         }
+//                     }
+//                 }
+//             }
+//             bus.unsubscribe(&sub_id);
+//         });
 
-        Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
-    }
+//         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(resp_rx))))
+//     }
 
-    async fn join_group(
-        &self,
-        request: tonic::Request<clientcoosvc::GroupJoinRequest>,
-    ) -> std::result::Result<tonic::Response<clientcoosvc::GroupJoinResponse>, tonic::Status> {
-        let res = self
-            .consumer_group_manager
-            .apply_join(&request.into_inner())
-            .await
-            .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
+//     async fn join_group(
+//         &self,
+//         request: tonic::Request<clientcoosvc::GroupJoinRequest>,
+//     ) -> std::result::Result<tonic::Response<clientcoosvc::GroupJoinResponse>, tonic::Status> {
+//         let res = self
+//             .consumer_group_manager
+//             .apply_join(&request.into_inner())
+//             .await
+//             .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
 
-        if res.error == 0 {
-            // TODO: 提交消费者详情值 raft
-            // self.raft_node_sender.send(AllMessageType::RaftPropose(()))
-        }
+//         if res.error == 0 {
+//             // TODO: 提交消费者详情值 raft
+//             // self.raft_node_sender.send(AllMessageType::RaftPropose(()))
+//         }
 
-        Ok(tonic::Response::new(res))
-    }
+//         Ok(tonic::Response::new(res))
+//     }
 
-    async fn sync_consumer_assignments(
-        &self,
-        request: tonic::Request<clientcoosvc::SyncConsumerAssignmentsReq>,
-    ) -> std::result::Result<tonic::Response<Self::SyncConsumerAssignmentsStream>, tonic::Status>
-    {
-        let req = request.into_inner();
-        let member_id = req.member_id.clone();
-        let consumer_group_manager = self.consumer_group_manager.clone();
-        let mut rx = self.consumer_group_manager.subscribe_client_consumer(&req);
+//     async fn sync_consumer_assignments(
+//         &self,
+//         request: tonic::Request<clientcoosvc::SyncConsumerAssignmentsReq>,
+//     ) -> std::result::Result<tonic::Response<Self::SyncConsumerAssignmentsStream>, tonic::Status>
+//     {
+//         let req = request.into_inner();
+//         let member_id = req.member_id.clone();
+//         let consumer_group_manager = self.consumer_group_manager.clone();
+//         let mut rx = self.consumer_group_manager.subscribe_client_consumer(&req);
 
-        let (tx_middleware, rx_middleware) = mpsc::channel(1);
-        tokio::spawn(async move {
-            loop {
-                if rx.is_closed() {
-                    break;
-                }
-                select! {
-                    res = rx.recv() => {
-                        if res.is_none() {
-                            continue;
-                        }
-                        let res = res.unwrap();
-                        if res.member_id == member_id {
-                            if let Err(e) = tx_middleware.send(Ok(res)).await {
-                                error!("sync_consumer_assignments to client resp stream err: {e:?}");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            consumer_group_manager.unsubscribe_client_consumer(&req);
-        });
+//         let (tx_middleware, rx_middleware) = mpsc::channel(1);
+//         tokio::spawn(async move {
+//             loop {
+//                 if rx.is_closed() {
+//                     break;
+//                 }
+//                 select! {
+//                     res = rx.recv() => {
+//                         if res.is_none() {
+//                             continue;
+//                         }
+//                         let res = res.unwrap();
+//                         if res.member_id == member_id {
+//                             if let Err(e) = tx_middleware.send(Ok(res)).await {
+//                                 error!("sync_consumer_assignments to client resp stream err: {e:?}");
+//                                 break;
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//             consumer_group_manager.unsubscribe_client_consumer(&req);
+//         });
 
-        Ok(tonic::Response::new(Box::pin(ReceiverStream::new(
-            rx_middleware,
-        ))))
-    }
-}
+//         Ok(tonic::Response::new(Box::pin(ReceiverStream::new(
+//             rx_middleware,
+//         ))))
+//     }
+// }
 
-#[tonic::async_trait]
-impl cooraftsvc::raft_service_server::RaftService for Coordinator {
-    async fn send_raft_message(
-        &self,
-        request: Request<cooraftsvc::RaftMessage>,
-    ) -> Result<Response<cooraftsvc::RaftResponse>, tonic::Status> {
-        match Message::parse_from_bytes(&request.into_inner().message) {
-            Ok(msg) => {
-                let _ = self
-                    .raft_node_sender
-                    .send(AllMessageType::RaftMessage(msg))
-                    .await;
-                Ok(Response::new(cooraftsvc::RaftResponse {
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            Err(e) => {
-                return Ok(Response::new(cooraftsvc::RaftResponse {
-                    success: false,
-                    error: e.to_string(),
-                }));
-            }
-        }
-    }
+// #[tonic::async_trait]
+// impl cooraftsvc::raft_service_server::RaftService for Coordinator {
+//     async fn send_raft_message(
+//         &self,
+//         request: Request<cooraftsvc::RaftMessage>,
+//     ) -> Result<Response<cooraftsvc::RaftResponse>, tonic::Status> {
+//         match Message::parse_from_bytes(&request.into_inner().message) {
+//             Ok(msg) => {
+//                 let _ = self
+//                     .raft_node_sender
+//                     .send(AllMessageType::RaftMessage(msg))
+//                     .await;
+//                 Ok(Response::new(cooraftsvc::RaftResponse {
+//                     success: true,
+//                     error: String::new(),
+//                 }))
+//             }
+//             Err(e) => {
+//                 return Ok(Response::new(cooraftsvc::RaftResponse {
+//                     success: false,
+//                     error: e.to_string(),
+//                 }));
+//             }
+//         }
+//     }
 
-    async fn get_meta(
-        &self,
-        _request: tonic::Request<cooraftsvc::Empty>,
-    ) -> Result<Response<cooraftsvc::MetaResp>, tonic::Status> {
-        Ok(Response::new(cooraftsvc::MetaResp {
-            id: self.id,
-            raft_addr: repair_addr_with_http(self.raft_node.raft_grpc_addr.clone()),
-            coo_addr: repair_addr_with_http(self.raft_node.coo_grpc_addr.clone()),
-        }))
-    }
+//     async fn get_meta(
+//         &self,
+//         _request: tonic::Request<cooraftsvc::Empty>,
+//     ) -> Result<Response<cooraftsvc::MetaResp>, tonic::Status> {
+//         Ok(Response::new(cooraftsvc::MetaResp {
+//             id: self.id,
+//             raft_addr: repair_addr_with_http(self.raft_node.raft_grpc_addr.clone()),
+//             coo_addr: repair_addr_with_http(self.raft_node.coo_grpc_addr.clone()),
+//         }))
+//     }
 
-    async fn propose_data(
-        &self,
-        _request: tonic::Request<cooraftsvc::ProposeDataReq>,
-    ) -> std::result::Result<tonic::Response<cooraftsvc::ProposeDataResp>, tonic::Status> {
-        self.check_leader().await?;
+//     async fn propose_data(
+//         &self,
+//         _request: tonic::Request<cooraftsvc::ProposeDataReq>,
+//     ) -> std::result::Result<tonic::Response<cooraftsvc::ProposeDataResp>, tonic::Status> {
+//         self.check_leader().await?;
 
-        let (tx_notify, mut rx_notify) = mpsc::channel(1);
-        let _ = self
-            .raft_node_sender
-            .send(AllMessageType::RaftPropose(ProposeData::TopicPartition(
-                TopicPartitionData {
-                    topic: SinglePartition::default(),
-                    callback: Some(tx_notify),
-                },
-            )))
-            .await;
+//         let (tx_notify, mut rx_notify) = mpsc::channel(1);
+//         let _ = self
+//             .raft_node_sender
+//             .send(AllMessageType::RaftPropose(ProposeData::TopicPartition(
+//                 TopicPartitionData {
+//                     topic: SinglePartition::default(),
+//                     callback: Some(tx_notify),
+//                 },
+//             )))
+//             .await;
 
-        let _ = rx_notify.recv().await;
-        Ok(Response::new(cooraftsvc::ProposeDataResp {}))
-    }
+//         let _ = rx_notify.recv().await;
+//         Ok(Response::new(cooraftsvc::ProposeDataResp {}))
+//     }
 
-    async fn propose_conf_change(
-        &self,
-        request: tonic::Request<cooraftsvc::ConfChangeReq>,
-    ) -> std::result::Result<tonic::Response<cooraftsvc::ConfChangeResp>, tonic::Status> {
-        let req = request.into_inner();
-        let reason = match req.version {
-            1 => match ConfChange::parse_from_bytes(&req.message) {
-                Ok(cc) => {
-                    let _ = self
-                        .raft_node_sender
-                        .send(AllMessageType::RaftConfChange(cc))
-                        .await;
-                    ""
-                }
-                Err(e) => &e.to_string(),
-            },
+//     async fn propose_conf_change(
+//         &self,
+//         request: tonic::Request<cooraftsvc::ConfChangeReq>,
+//     ) -> std::result::Result<tonic::Response<cooraftsvc::ConfChangeResp>, tonic::Status> {
+//         let req = request.into_inner();
+//         let reason = match req.version {
+//             1 => match ConfChange::parse_from_bytes(&req.message) {
+//                 Ok(cc) => {
+//                     let _ = self
+//                         .raft_node_sender
+//                         .send(AllMessageType::RaftConfChange(cc))
+//                         .await;
+//                     ""
+//                 }
+//                 Err(e) => &e.to_string(),
+//             },
 
-            2 => match ConfChangeV2::parse_from_bytes(&req.message) {
-                Ok(cc) => {
-                    let _ = self
-                        .raft_node_sender
-                        .send(AllMessageType::RaftConfChangeV2(cc))
-                        .await;
-                    ""
-                }
-                Err(e) => &e.to_string(),
-            },
-            _ => "unsupportted version",
-        };
+//             2 => match ConfChangeV2::parse_from_bytes(&req.message) {
+//                 Ok(cc) => {
+//                     let _ = self
+//                         .raft_node_sender
+//                         .send(AllMessageType::RaftConfChangeV2(cc))
+//                         .await;
+//                     ""
+//                 }
+//                 Err(e) => &e.to_string(),
+//             },
+//             _ => "unsupportted version",
+//         };
 
-        if reason.is_empty() {
-            return Ok(Response::new(cooraftsvc::ConfChangeResp {
-                success: true,
-                error: String::new(),
-            }));
-        }
+//         if reason.is_empty() {
+//             return Ok(Response::new(cooraftsvc::ConfChangeResp {
+//                 success: true,
+//                 error: String::new(),
+//             }));
+//         }
 
-        Ok(Response::new(cooraftsvc::ConfChangeResp {
-            success: false,
-            error: reason.to_string(),
-        }))
-    }
+//         Ok(Response::new(cooraftsvc::ConfChangeResp {
+//             success: false,
+//             error: reason.to_string(),
+//         }))
+//     }
 
-    /// 获取 snapshot
-    async fn get_snapshot(
-        &self,
-        _request: tonic::Request<cooraftsvc::SnapshotReq>,
-    ) -> std::result::Result<tonic::Response<cooraftsvc::SnapshotResp>, tonic::Status> {
-        let raw_node = self.raw_node.lock().await;
-        if let Some(snap) = raw_node.raft.snap() {
-            match snap.write_to_bytes() {
-                Ok(data) => return Ok(Response::new(cooraftsvc::SnapshotResp { data })),
-                Err(_e) => return Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] })),
-            };
-        }
-        Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] }))
-    }
-}
+//     /// 获取 snapshot
+//     async fn get_snapshot(
+//         &self,
+//         _request: tonic::Request<cooraftsvc::SnapshotReq>,
+//     ) -> std::result::Result<tonic::Response<cooraftsvc::SnapshotResp>, tonic::Status> {
+//         let raw_node = self.raw_node.lock().await;
+//         if let Some(snap) = raw_node.raft.snap() {
+//             match snap.write_to_bytes() {
+//                 Ok(data) => return Ok(Response::new(cooraftsvc::SnapshotResp { data })),
+//                 Err(_e) => return Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] })),
+//             };
+//         }
+//         Ok(Response::new(cooraftsvc::SnapshotResp { data: vec![] }))
+//     }
+// }
 
 // 转换函数示例
 fn convert_to_pull_resp(ps: SinglePartition, term: u64) -> commonsvc::TopicPartitionResp {
