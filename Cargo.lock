@@ -312,6 +312,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd6a120d2e16b3e1b4a24bd70f23b12d3e16b81f113364a26935f8db7245452d"
+
+[[package]]
 name = "bincode_derive"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -379,7 +385,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "bincode",
+ "bincode 2.0.1",
  "bytes",
  "chrono",
  "crossbeam",
@@ -702,7 +708,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "bincode",
+ "bincode 2.0.1",
  "chrono",
  "dashmap",
  "grpcx",
@@ -1349,7 +1355,7 @@ dependencies = [
  "async-trait",
  "backoff",
  "bb8",
- "bincode",
+ "bincode 2.0.1",
  "dashmap",
  "deadpool",
  "futures",
@@ -2526,6 +2532,7 @@ name = "protocolv2"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode 3.0.0",
  "rkyv",
 ]
 
@@ -3194,7 +3201,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bincode",
+ "bincode 2.0.1",
  "bytes",
  "chrono",
  "clap 4.5.4",
@@ -3241,7 +3248,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
- "bincode",
+ "bincode 2.0.1",
  "bytes",
  "common",
  "crossbeam",
