@@ -1,10 +1,8 @@
 use super::PartitionApply;
 use super::mailbox_message_type::MessageType as AllMessageType;
+use super::peer::PeerState;
 use super::storage::SledStorage;
-use super::{
-    // grpc_service::{RaftServiceImpl, start_grpc_server},
-    peer::PeerState,
-};
+use crate::Config as SelfConfig;
 use crate::partition::SinglePartition;
 use crate::raftx::ProposeData;
 use anyhow::{Result, anyhow};
@@ -15,6 +13,7 @@ use grpcx::smart_client::repair_addr_with_http;
 use log::{debug, error, info, trace, warn};
 use protobuf::Message as PbMessage;
 use raft::{Config, StateRole, prelude::*, raw_node::RawNode};
+use std::collections::HashMap;
 use std::{num::NonZero, sync::Arc, time::Instant};
 use tokio::{
     select,
@@ -25,11 +24,7 @@ use tonic::{Request, transport::Channel};
 
 #[derive(Clone)]
 pub struct RaftNode<P: PartitionApply> {
-    pub id: u32,
-    // 该 raft 节点监听地址
-    pub raft_grpc_addr: String,
-    // 该 coo 节点监听地址
-    pub coo_grpc_addr: String,
+    conf: SelfConfig,
     // raft node
     pub raw_node: Arc<Mutex<RawNode<SledStorage>>>,
 
@@ -40,7 +35,7 @@ pub struct RaftNode<P: PartitionApply> {
     // 集群中其他节点的信息(包含自身)
     peer: Arc<DashMap<u64, Arc<PeerState>>>,
 
-    db: P, // Key-value stor
+    db: P, // Key-value store
 
     callbacks: Arc<DashMap<String, Callback>>,
 }
@@ -55,13 +50,12 @@ where
     P: PartitionApply,
 {
     pub fn new(
-        id: u32,
-        raft_grpc_addr: String,
-        coo_grpc_addr: String,
+        conf: SelfConfig,
+        metadata: HashMap<String, String>,
         p: P,
     ) -> (Self, mpsc::Sender<AllMessageType>) {
         let config = Config {
-            id: id as u64,
+            id: conf.id,
             election_tick: 10,
             heartbeat_tick: 3,
             applied: 0,
@@ -70,35 +64,6 @@ where
             // pre_vote: true,
             ..Default::default()
         };
-        // let conf_state = if join {
-        //     // 加入集群的节点，初始化为空 ConfState
-        //     ConfState {
-        //         voters: vec![],
-        //         learners: vec![],
-        //         voters_outgoing: vec![],
-        //         learners_next: vec![],
-        //         auto_leave: false,
-        //         ..Default::default()
-        //     }
-        // } else {
-        //     // 独立节点，包含自身
-        //     ConfState {
-        //         voters: vec![id],
-        //         learners: vec![],
-        //         voters_outgoing: vec![],
-        //         learners_next: vec![],
-        //         auto_leave: false,
-        //         ..Default::default()
-        //     }
-        // };
-        // let conf_state = ConfState {
-        //     voters: vec![id],
-        //     learners: vec![],
-        //     voters_outgoing: vec![],
-        //     learners_next: vec![],
-        //     auto_leave: false,
-        //     ..Default::default()
-        // };
 
         let storage = SledStorage::new(id as u64, p.get_db());
         let raw_node = Arc::new(Mutex::new(
@@ -113,19 +78,17 @@ where
         // tokio::spawn(start_grpc_server(grpc_addr.clone(), raft_service));
 
         let rn = RaftNode {
-            id,
+            conf,
             raw_node,
             my_mailbox: Arc::new(Mutex::new(rx_grpc)),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
             db: p,
-            raft_grpc_addr: raft_grpc_addr.clone(),
-            coo_grpc_addr: coo_grpc_addr.clone(),
             callbacks: Arc::new(DashMap::new()),
         };
         rn.peer.insert(
             id.into(),
-            Arc::new(PeerState::new(id.into(), raft_grpc_addr, coo_grpc_addr)),
+            Arc::new(PeerState::new(id.into(), raft_grpc_addr, metadata)),
         );
 
         (rn, tx_grpc)
@@ -481,7 +444,7 @@ where
     }
 
     async fn commit_self_conf_change(&self) {
-        let context = format!("{},{}", self.raft_grpc_addr, self.coo_grpc_addr);
+        let context = format!("{},{}", self.raft_addr, self.coo_grpc_addr);
         let cc = ConfChange {
             change_type: ConfChangeType::AddNode,
             node_id: self.id as u64,
@@ -509,7 +472,7 @@ where
         sync: bool,
     ) -> Result<()> {
         let src_id = self.id;
-        let raft_grpc_addr = self.raft_grpc_addr.clone();
+        let raft_grpc_addr = self.raft_addr.clone();
         let coo_grpc_addr = self.coo_grpc_addr.clone();
         let mailboxes = Arc::clone(&self.mailboxes);
         let peer = Arc::clone(&self.peer);

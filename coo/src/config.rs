@@ -23,6 +23,10 @@ pub struct Config {
 
     // 创建 topic 时的分区因子，仅有两种类型，数字类型和类似“100n”类型。后者表示当前的broker每个分配100个。
     pub new_topic_partition_factor: String,
+    // 创建 topic 时，默认的分区副本数量
+    pub new_topic_partition_replication_count: u8,
+    // 创建 topic 时，分区副本是否可读
+    pub new_topic_partition_replication_readble: bool,
 
     // 新增 partition 超时时间，单位: s
     pub add_partition_timeout: u64,
@@ -122,5 +126,7 @@ pub fn default_config() -> Config {
         event_bus_buffer_size: 12,
         client_pull_buffer_size: 12,
         broker_pull_buffer_size: 12,
+        new_topic_partition_replication_count: 3,
+        new_topic_partition_replication_readble: true,
     }
 }

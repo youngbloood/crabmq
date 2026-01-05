@@ -64,7 +64,7 @@ pub struct Coordinator {
     conns: Arc<DashMap<String, Conn>>,
 
     cmd_tx: Sender<Command>,
-    cmd_rx: Receiver<Command>,
+    cmd_rx: Arc<Receiver<Command>>,
 
     // coo: leader 收集到的 broker 上报信息
     // broker_id -> BrokerState
@@ -122,6 +122,9 @@ impl Coordinator {
             consumer_group_manager: ConsumerGroupManager::new(partition_manager.all_topics.clone()),
             partition_manager,
             conf,
+            conns: todo!(),
+            cmd_tx: todo!(),
+            cmd_rx: todo!(),
             // broker_consumer_bus: todo!(),
             // client_consumer_bus: todo!(),
         }
@@ -172,104 +175,65 @@ impl Coordinator {
         // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
         self.start_main_loop();
 
-        let handle = tokio::net::TcpListener::bind(&self.conf.coo_addr)
-            .await
-            .map_err(|e| anyhow!("Coo bind addr {} err: {:?}", &self.conf.coo_addr, e))?;
-
-        loop {
-            let h = handle.accept().await;
-            if let Ok((stream, addr)) = h {
-                let (rh, wh) = stream.into_split();
-                let _addr = addr.ip().to_string().clone();
-                self.conns.insert(addr.ip().to_string(), Conn::new(wh));
-                let conns = self.conns.clone();
-                let cmd_tx = self.cmd_tx.clone();
-
-                tokio::spawn(async move {
-                    let mut head = [0; 5];
-                    loop {
-                        match rh.read_exact(&mut head).await {
-                            Ok(size) => {
-                                if size != head.len() {
-                                    conns.remove(_addr);
-                                    break;
-                                }
-
-                                // 根据 类型和长度解析，然后
-                                cmd_tx
-                                    .send(Command {
-                                        addr: (),
-                                        index: (),
-                                        endecoder: (),
-                                    })
-                                    .await?;
-                            }
-                            Err(e) => todo!(),
-                        }
-                    }
-                });
-            }
-        }
-
-        // let raft_svc = RaftServiceServer::new(self.clone());
+        let raft_svc = RaftServiceServer::new(self.clone());
         // let brokercoo_svc = BrokerCooServiceServer::new(self.clone());
         // let clientcoo_svc = ClientCooServiceServer::new(self.clone());
 
-        // let mut svc_builer = Server::builder()
-        //     .add_service(brokercoo_svc)
-        //     .add_service(clientcoo_svc);
+        let mut svc_builer = Server::builder()
+            .add_service(brokercoo_svc)
+            .add_service(clientcoo_svc);
 
-        // let coo_addr = self.conf.coo_addr.parse().unwrap();
-        // if !self.conf.coo_addr.eq(&self.coo_grpc_addr) {
-        //     let raft_grpc_addr = self.coo_grpc_addr.parse().unwrap();
-        //     tokio::spawn(async move {
-        //         tokio::spawn(async move {
-        //             info!("Coordinator-Raft listen: {}", raft_grpc_addr);
-        //             match Server::builder()
-        //                 .add_service(raft_svc)
-        //                 .serve(raft_grpc_addr)
-        //                 .await
-        //             {
-        //                 Ok(_) => {
-        //                     info!("Coordinator-Raft server started at {}", raft_grpc_addr);
-        //                 }
-        //                 Err(e) => {
-        //                     panic!("Coordinator-Raft listen : {}, err: {:?}", raft_grpc_addr, e)
-        //                 }
-        //             }
-        //         });
-        //     });
-        // } else {
-        //     svc_builer = svc_builer.add_service(raft_svc);
-        //     info!("Coordinator-Raft listen: {}", coo_addr);
-        // }
+        let coo_addr = self.conf.coo_addr.parse().unwrap();
+        if !self.conf.coo_addr.eq(&self.coo_grpc_addr) {
+            let raft_grpc_addr = self.coo_grpc_addr.parse().unwrap();
+            tokio::spawn(async move {
+                tokio::spawn(async move {
+                    info!("Coordinator-Raft listen: {}", raft_grpc_addr);
+                    match Server::builder()
+                        .add_service(raft_svc)
+                        .serve(raft_grpc_addr)
+                        .await
+                    {
+                        Ok(_) => {
+                            info!("Coordinator-Raft server started at {}", raft_grpc_addr);
+                        }
+                        Err(e) => {
+                            panic!("Coordinator-Raft listen : {}, err: {:?}", raft_grpc_addr, e)
+                        }
+                    }
+                });
+            });
+        } else {
+            svc_builer = svc_builer.add_service(raft_svc);
+            info!("Coordinator-Raft listen: {}", coo_addr);
+        }
 
-        // let raft_node = self.raft_node.clone();
-        // let raft_handle = tokio::spawn(async move {
-        //     raft_node.run().await;
-        // });
+        let raft_node = self.raft_node.clone();
+        let raft_handle = tokio::spawn(async move {
+            raft_node.run().await;
+        });
 
-        // let grpc_handle = tokio::spawn(async move {
-        //     info!("Coordinator listen: {}", coo_addr);
-        //     match svc_builer.serve(coo_addr).await {
-        //         Ok(_) => {
-        //             info!("Coordinator server started at {}", coo_addr);
-        //         }
-        //         Err(e) => panic!("Coordinator listen : {}, err: {:?}", coo_addr, e),
-        //     }
-        // });
+        let grpc_handle = tokio::spawn(async move {
+            info!("Coordinator listen: {}", coo_addr);
+            match svc_builer.serve(coo_addr).await {
+                Ok(_) => {
+                    info!("Coordinator server started at {}", coo_addr);
+                }
+                Err(e) => panic!("Coordinator listen : {}, err: {:?}", coo_addr, e),
+            }
+        });
 
-        // let join_handle = if !self.raft_leader_addr.is_empty() {
-        //     let raft_node = self.raft_node.clone();
-        //     let raft_leader_addr = self.raft_leader_addr.clone();
-        //     tokio::spawn(async move {
-        //         let _ = raft_node.join(raft_leader_addr).await;
-        //     })
-        // } else {
-        //     tokio::spawn(async {})
-        // };
+        let join_handle = if !self.raft_leader_addr.is_empty() {
+            let raft_node = self.raft_node.clone();
+            let raft_leader_addr = self.raft_leader_addr.clone();
+            tokio::spawn(async move {
+                let _ = raft_node.join(raft_leader_addr).await;
+            })
+        } else {
+            tokio::spawn(async {})
+        };
 
-        // tokio::try_join!(raft_handle, grpc_handle, join_handle)?;
+        tokio::try_join!(raft_handle, grpc_handle, join_handle)?;
         Ok(())
     }
 
@@ -407,7 +371,16 @@ impl Coordinator {
         Ok(rx)
     }
 
-    fn handle_command(&self) {
+    pub(crate) async fn send_command(&self, cmd: Command) -> Result<()> {
+        self.cmd_tx.send(cmd).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn get_command(&mut self) -> Result<Command> {
+        Ok(self.cmd_rx.recv().await?)
+    }
+
+    pub(crate) async fn handle_command(&self, cmd: Command) {
         loop {
             let cmd = self.cmd_rx.recv().await;
             if let Some(cmd) = cmd {
@@ -484,7 +457,7 @@ impl Coordinator {
             list.push(commonsvc::CooInfo {
                 act: commonsvc::CooInfoAction::Add.into(),
                 id,
-                coo_addr: repair_addr_with_http(v.coo_addr.clone()),
+                coo_addr: repair_addr_with_http(v.metadata.clone()),
                 raft_addr: repair_addr_with_http(v.raft_addr.clone()),
                 role: if id == leader_id {
                     commonsvc::CooRole::Leader.into()

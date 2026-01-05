@@ -10,13 +10,16 @@ pub struct Topics {
 
 impl Encoder for Topics {
     fn encode(&self) -> Result<Vec<u8>> {
-        todo!()
+        let cfg = config::standard();
+        Ok(bincode::encode_to_vec(self, cfg)?)
     }
 }
 
 impl Decoder for Topics {
-    fn decode(_data: &[u8]) -> Result<Self> {
-        todo!()
+    fn decode(data: &[u8]) -> Result<Self> {
+        let cfg = config::standard();
+        let (obj, _): (Topics, usize) = bincode::decode_from_slice(&data[..], cfg).unwrap();
+        Ok(obj)
     }
 }
 
@@ -59,6 +62,18 @@ pub struct PartitionInfo {
     pub is_leader: bool,
     // 该分区的最新偏移量
     pub log_end_offset: SegmentOffset,
+    // 该分区是否可读
+    pub readble: bool,
+}
+
+impl PartitionInfo {
+    fn can_write(&self) -> bool {
+        self.is_leader
+    }
+
+    fn can_read(&self) -> bool {
+        self.is_leader || (!self.is_leader && self.readble)
+    }
 }
 
 #[derive(Debug, Default)]

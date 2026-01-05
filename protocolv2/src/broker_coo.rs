@@ -21,19 +21,23 @@ pub struct BrokerCooHeartbeatRequest {
     pub sub_count: u32,
     // 该 broker 的发布连接数
     pub pub_count: u32,
+    // 该 broker 的时间戳
+    pub timestamp: u64,
 }
 
 impl Encoder for BrokerCooHeartbeatRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        // 编码逻辑实现
-        Ok(vec![])
+        let cfg = config::standard();
+        Ok(bincode::encode_to_vec(self, cfg)?)
     }
 }
 
 impl Decoder for BrokerCooHeartbeatRequest {
-    fn decode(_data: &[u8]) -> Result<Self> {
-        // 解码逻辑实现
-        BrokerCooHeartbeatRequest::default()
+    fn decode(data: &[u8]) -> Result<Self> {
+        let cfg = config::standard();
+        let (obj, _): (BrokerCooHeartbeatRequest, usize) =
+            bincode::decode_from_slice(&data[..], cfg).unwrap();
+        Ok(obj)
     }
 }
 
@@ -49,15 +53,17 @@ pub struct BrokerCooHeartbeatResponse {
 
 impl Encoder for BrokerCooHeartbeatResponse {
     fn encode(&self) -> Result<Vec<u8>> {
-        // 编码逻辑实现
-        vec![]
+        let cfg = config::standard();
+        Ok(bincode::encode_to_vec(self, cfg)?)
     }
 }
 
 impl Decoder for BrokerCooHeartbeatResponse {
-    fn decode(_data: &[u8]) -> Result<Self> {
-        // 解码逻辑实现
-        BrokerCooHeartbeatResponse::default()
+    fn decode(data: &[u8]) -> Result<Self> {
+        let cfg = config::standard();
+        let (obj, _): (BrokerCooHeartbeatResponse, usize) =
+            bincode::decode_from_slice(&data[..], cfg).unwrap();
+        Ok(obj)
     }
 }
 

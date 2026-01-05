@@ -16,3 +16,18 @@ pub trait PartitionApply {
     fn apply(&self, part: SinglePartition) -> Result<()>;
     fn get_db(&self) -> Db;
 }
+
+pub struct Config {
+    // raft 节点 id
+    pub id: u64,
+    // raft 节点监听 addr
+    pub raft_addr: String,
+    // raft 监听协议
+    pub protocol: ProtocolType,
+}
+
+pub enum ProtocolType {
+    TCP,
+    QUIC,
+    UDP,
+}

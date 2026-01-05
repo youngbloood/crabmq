@@ -4,6 +4,7 @@ pub mod config;
 mod conn;
 mod consumer_group;
 pub mod coo;
+mod coo_service;
 mod event_bus;
 mod partition;
 mod raftx;

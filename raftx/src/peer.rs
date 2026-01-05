@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 pub struct PeerState {
     pub id: u64,
     pub raft_addr: String,
-    pub coo_addr: String,
+    pub metadata: HashMap<String, String>,
     status: Arc<Mutex<PeerStatus>>,
 }
 
@@ -19,21 +19,17 @@ enum PeerStatus {
 }
 
 impl PeerState {
-    pub fn new(id: u64, raft_addr: String, coo_addr: String) -> Self {
+    pub fn new(id: u64, raft_addr: String, metadata: HashMap<String, String>) -> Self {
         Self {
             id,
             raft_addr,
-            coo_addr,
+            metadata,
             status: Arc::new(Mutex::new(PeerStatus::Normal)),
         }
     }
 
     pub fn get_raft_addr(&self) -> &str {
         &self.raft_addr
-    }
-
-    pub fn get_coo_addr(&self) -> &str {
-        &self.coo_addr
     }
 
     // 降级

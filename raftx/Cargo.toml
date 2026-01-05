@@ -1,0 +1,15 @@
+[package]
+name = "raftx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+bincode = "3.0.0"
+dashmap = "6.1.0"
+log = "0.4.29"
+parking_lot = "0.12.5"
+raft = "0.7.0"
+serde = "1.0.228"
+sled = "0.34.7"
+tokio = "1.49.0"
