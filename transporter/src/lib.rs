@@ -27,6 +27,7 @@ impl TransportMessage {
 pub struct Config {
     pub addr: String,
     pub protocol: TransportProtocol,
+    pub incoming_max_connections: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -46,7 +47,10 @@ pub struct Transporter {
 impl Transporter {
     pub fn new(conf: Config) -> Self {
         let pt: Option<Arc<Mutex<dyn ProtocolTransporterManager>>> = match conf.protocol {
-            TransportProtocol::TCP => Some(Arc::new(Mutex::new(Tcp::new(conf.addr.clone())))),
+            TransportProtocol::TCP => Some(Arc::new(Mutex::new(Tcp::new(
+                conf.addr.clone(),
+                conf.incoming_max_connections,
+            )))),
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),

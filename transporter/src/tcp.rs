@@ -15,15 +15,15 @@ use tokio::{
     },
     select,
     sync::{
-        Mutex,
+        Mutex, OwnedSemaphorePermit, Semaphore, SemaphorePermit,
         mpsc::{UnboundedReceiver, UnboundedSender},
     },
 };
 use tokio_util::sync::CancellationToken;
 
 pub struct Tcp {
-    accept_max_connections: usize, // 接受的最大连接数
-    sema: tokio::sync::Semaphore,  // 用于限制最大连接数的信号量
+    incoming_max_connection: usize, // 接受的最大连接数
+    sema: Arc<Semaphore>,           // 用于限制最大连接数的信号量
     addr: String,
     tx: UnboundedSender<TransportMessage>,
     rx: UnboundedReceiver<TransportMessage>,
@@ -33,14 +33,14 @@ pub struct Tcp {
 }
 
 impl Tcp {
-    pub fn new(addr: String, accept_max_connections: usize) -> Self {
+    pub fn new(addr: String, incoming_max_connection: usize) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Tcp {
             addr,
             tx,
             rx,
-            accept_max_connections,
-            sema: tokio::sync::Semaphore::new(accept_max_connections),
+            incoming_max_connection,
+            sema: Arc::new(Semaphore::new(incoming_max_connection)),
             incoming: Arc::new(DashMap::new()),
             outgoing: Arc::new(DashMap::new()),
         }
@@ -53,10 +53,12 @@ impl ProtocolTransporterManager for Tcp {
         let listener = TcpListener::bind(&self.addr).await?;
         let tx = self.tx.clone();
         let incoming = self.incoming.clone();
+        let sema = self.sema.clone();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
+                        let sp = sema.acquire_owned().await.unwrap();
                         let (rh, wh) = stream.into_split();
                         let tx = tx.clone();
                         let shutdown = CancellationToken::new();
@@ -64,6 +66,7 @@ impl ProtocolTransporterManager for Tcp {
                         let reader = TcpReader {
                             r: rh,
                             tx,
+                            sp,
                             remote_addr: addr.clone(),
                             shutdown: shutdown.clone(),
                         };
@@ -207,6 +210,7 @@ pub(crate) struct TcpReader {
     r: OwnedReadHalf,
     tx: UnboundedSender<TransportMessage>,
     remote_addr: String,
+    sp: OwnedSemaphorePermit,
     shutdown: CancellationToken,
 }
 
@@ -274,6 +278,7 @@ impl TcpReader {
         }
 
         self.shutdown.cancel();
+        self.sp.forget();
     }
 }
 
