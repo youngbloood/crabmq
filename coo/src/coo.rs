@@ -385,7 +385,7 @@ impl Coordinator {
             let cmd = self.cmd_rx.recv().await;
             if let Some(cmd) = cmd {
                 match cmd.index {
-                    protocolv2::BrokerCooHeartbeatRequestIndex => {}
+                    protocolv2::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {}
                 }
             }
         }

@@ -1,9 +1,15 @@
 use crate::{
-    Decoder, EnDecoder, Encoder,
+    CLIENT_COO_ADD_PARTITION_REQUEST_INDEX, CLIENT_COO_ADD_PARTITION_RESPONSE_INDEX,
+    CLIENT_COO_AUTH_REQUEST_INDEX, CLIENT_COO_AUTH_RESPONSE_INDEX,
+    CLIENT_COO_HEARTBEAT_REQUEST_INDEX, CLIENT_COO_HEARTBEAT_RESPONSE_INDEX,
+    CLIENT_COO_NEW_TOPIC_REQUEST_INDEX, CLIENT_COO_NEW_TOPIC_RESPONSE_INDEX,
+    CLIENT_COO_SUB_REQUEST_INDEX, CLIENT_COO_SUB_RESPONSE_INDEX, Decoder, EnDecoder, Encoder,
     common::{SegmentOffset, TopicInfo, Topics},
 };
 use anyhow::Result;
+use bincode::de;
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooAuthRequest {
     pub client_id: String,
     pub secret: String,
@@ -11,22 +17,25 @@ pub struct ClientCooAuthRequest {
 
 impl Encoder for ClientCooAuthRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for ClientCooAuthRequest {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (ClientCooAuthRequest, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for ClientCooAuthRequest {}
+impl EnDecoder for ClientCooAuthRequest {
+    fn index(&self) -> u8 {
+        CLIENT_COO_AUTH_REQUEST_INDEX
+    }
+}
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooAuthResponse {
     pub code: u16,
     pub message: String,
@@ -35,22 +44,25 @@ pub struct ClientCooAuthResponse {
 
 impl Encoder for ClientCooAuthResponse {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for ClientCooAuthResponse {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (ClientCooAuthResponse, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for ClientCooAuthResponse {}
+impl EnDecoder for ClientCooAuthResponse {
+    fn index(&self) -> u8 {
+        CLIENT_COO_AUTH_RESPONSE_INDEX
+    }
+}
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooHeartbeatRequest {
     pub client_id: String,
     pub token: String,
@@ -58,23 +70,26 @@ pub struct ClientCooHeartbeatRequest {
 
 impl Encoder for ClientCooHeartbeatRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for ClientCooHeartbeatRequest {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (ClientCooHeartbeatRequest, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for ClientCooHeartbeatRequest {}
+impl EnDecoder for ClientCooHeartbeatRequest {
+    fn index(&self) -> u8 {
+        CLIENT_COO_HEARTBEAT_REQUEST_INDEX
+    }
+}
 
 // Coo 返回给 Client 的心跳响应
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooClientHeartbeatResponse {
     pub client_id: String,
     pub seccess: bool,
@@ -86,26 +101,29 @@ pub struct CooClientHeartbeatResponse {
 
 impl Encoder for CooClientHeartbeatResponse {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for CooClientHeartbeatResponse {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (CooClientHeartbeatResponse, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for CooClientHeartbeatResponse {}
+impl EnDecoder for CooClientHeartbeatResponse {
+    fn index(&self) -> u8 {
+        CLIENT_COO_HEARTBEAT_RESPONSE_INDEX
+    }
+}
 
 // Coo 返回给 Client 的 Topic 列表
 type CooClientTopicList = Topics;
 
 // Client 向 Coo 发起 NewTopic 请求
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooNewTopicRequest {
     // 请求创建的 topic 名称
     pub topic: String,
@@ -118,29 +136,34 @@ pub struct ClientCooNewTopicRequest {
     pub partition_replication_count: i8,
     // 副本分区是否可读
     pub partition_replication_readble: bool,
+    // 每个broker最多可存在多少个分区，超过这个数量后不再分配分区到这个broker上
+    pub broker_partition_replication_limit: u32,
     // 创建的超时时间，单位: s
     pub timeout: u64,
 }
 
 impl Encoder for ClientCooNewTopicRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for ClientCooNewTopicRequest {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (ClientCooNewTopicRequest, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for ClientCooNewTopicRequest {}
+impl EnDecoder for ClientCooNewTopicRequest {
+    fn index(&self) -> u8 {
+        CLIENT_COO_NEW_TOPIC_REQUEST_INDEX
+    }
+}
 
 // Coo 响应给 Client : NewTopic的结果
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooClientNewTopicResponse {
     pub code: u16,
     pub message: String,
@@ -149,22 +172,25 @@ pub struct CooClientNewTopicResponse {
 
 impl Encoder for CooClientNewTopicResponse {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for CooClientNewTopicResponse {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (CooClientNewTopicResponse, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for CooClientNewTopicResponse {}
+impl EnDecoder for CooClientNewTopicResponse {
+    fn index(&self) -> u8 {
+        CLIENT_COO_NEW_TOPIC_RESPONSE_INDEX
+    }
+}
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooAddPartitionRequest {
     // 需要添加分区的 topic 名称
     pub topic: String,
@@ -178,22 +204,25 @@ pub struct ClientCooAddPartitionRequest {
 
 impl Encoder for ClientCooAddPartitionRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for ClientCooAddPartitionRequest {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (ClientCooAddPartitionRequest, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for ClientCooAddPartitionRequest {}
+impl EnDecoder for ClientCooAddPartitionRequest {
+    fn index(&self) -> u8 {
+        CLIENT_COO_ADD_PARTITION_REQUEST_INDEX
+    }
+}
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooClientAddPartitionResponse {
     pub code: u16,
     pub message: String,
@@ -202,23 +231,26 @@ pub struct CooClientAddPartitionResponse {
 
 impl Encoder for CooClientAddPartitionResponse {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for CooClientAddPartitionResponse {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (CooClientAddPartitionResponse, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for CooClientAddPartitionResponse {}
+impl EnDecoder for CooClientAddPartitionResponse {
+    fn index(&self) -> u8 {
+        CLIENT_COO_ADD_PARTITION_RESPONSE_INDEX
+    }
+}
 
 // Client 向 Coo: 发起订阅请求
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooSubRequest {
     pub group_id: u32,
     pub option: Option<ClientCooSubOption>,
@@ -226,22 +258,25 @@ pub struct ClientCooSubRequest {
 
 impl Encoder for ClientCooSubRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for ClientCooSubRequest {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (ClientCooSubRequest, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for ClientCooSubRequest {}
+impl EnDecoder for ClientCooSubRequest {
+    fn index(&self) -> u8 {
+        CLIENT_COO_SUB_REQUEST_INDEX
+    }
+}
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooSubOption {
     pub sub_topics: Vec<ClientCooSubTopic>,
     pub auto_commit: bool,
@@ -249,6 +284,7 @@ pub struct ClientCooSubOption {
     pub consumer_slide_window_size: u64,
 }
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooSubTopic {
     pub topic: String,
     // 起始消费位移（1表示最新，0表示从头开始消费）
@@ -256,13 +292,42 @@ pub struct ClientCooSubTopic {
     pub head_offset: u8,
 }
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooCommitRequest {
     pub topic: String,
     pub pos: SegmentOffset,
 }
 
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooClientCommitResponse {
     pub topic: String,
     pub pos: SegmentOffset,
     pub code: u16,
+}
+
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+pub struct CooClientSubResponse {
+    pub code: u16,
+    pub message: String,
+    pub topics: Vec<TopicInfo>,
+}
+
+impl Encoder for CooClientSubResponse {
+    fn encode(&self) -> Result<Vec<u8>> {
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
+    }
+}
+
+impl Decoder for CooClientSubResponse {
+    fn decode(data: &[u8]) -> Result<Self> {
+        let (obj, _): (CooClientSubResponse, usize) =
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+        Ok(obj)
+    }
+}
+
+impl EnDecoder for CooClientSubResponse {
+    fn index(&self) -> u8 {
+        CLIENT_COO_SUB_RESPONSE_INDEX
+    }
 }

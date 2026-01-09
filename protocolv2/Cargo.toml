@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
-bincode = "3.0.0"
-rkyv = "0.8.12"
+bincode = "2.0.1"
+# rkyv = "0.8.12"

@@ -1,3 +1,15 @@
 {
-    "github.copilot.chat.anthropic.tools.websearch.userLocation": {}
+    "github.copilot.chat.anthropic.tools.websearch.userLocation": {},
+
+    // Ensure rust-analyzer sees a usable `protoc` for build scripts
+    "rust-analyzer.server.extraEnv": {
+        "PROTOC": "/opt/homebrew/opt/protobuf@21/bin/protoc",
+        "PATH": "/opt/homebrew/opt/protobuf@21/bin:${env:PATH}"
+    },
+
+    // Recommended RA settings to get cargo diagnostics
+    "rust-analyzer.checkOnSave.command": "check",
+    "rust-analyzer.cargo.loadOutDirsFromCheck": true,
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.diagnostics.enable": true
 }

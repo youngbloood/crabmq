@@ -1,37 +1,25 @@
-use super::PartitionApply;
-use super::mailbox::MessageType as AllMessageType;
-use super::peer::PeerState;
-use super::storage::SledStorage;
-use crate::Config as SelfConfig;
-use crate::mailbox::Mailbox;
-// use crate::partition::SinglePartition;
-use anyhow::{Result, anyhow};
-use bincode::config;
+use crate::{Config as SelfConfig, peer::PeerState, storage::SledStorage};
+use anyhow::Result;
+use bincode::{Decode, Encode};
+use bytes::Bytes;
 use dashmap::DashMap;
-// use grpcx::cooraftsvc::{self, ConfChangeReq, RaftMessage, raft_service_client::RaftServiceClient};
-// use grpcx::smart_client::repair_addr_with_http;
-use log::{debug, error, info, trace, warn};
-// use protobuf::Message as PbMessage;
-use protocolv2::{COO_RAFT_CONF_CHANGE_REQUEST_INDEX, CooRaftConfChangeRequest};
-use raft::{Config, StateRole, prelude::*, raw_node::RawNode};
 use raft::{
-    eraftpb::ConfChange,
-    prelude::{ConfChangeV2, Message},
+    Config, RawNode,
+    prelude::{ConfChange, ConfChangeType},
 };
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::{num::NonZero, sync::Arc, time::Instant};
+use sled::Db;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
-    select,
-    sync::{Mutex, mpsc, oneshot},
-    time::{self, Duration, interval},
+    sync::{Mutex, mpsc},
+    time::{self, Instant},
 };
-// use tonic::{Request, transport::Channel};
-use transporter::{TransportMessage, Transporter, TransporterWriter};
+use transporter::{TransportMessage, Transporter};
 
 #[derive(Clone)]
-pub struct RaftNode<P: PartitionApply> {
-    conf: SelfConfig,
+pub struct Node {
+    pub id: u64,
+
+    conf: Arc<SelfConfig>,
     // raft node
     pub raw_node: Arc<Mutex<RawNode<SledStorage>>>,
 
@@ -43,8 +31,7 @@ pub struct RaftNode<P: PartitionApply> {
     // 集群中其他节点的信息(包含自身)
     peer: Arc<DashMap<u64, Arc<PeerState>>>,
 
-    db: P, // Key-value store
-
+    // db: P, // Key-value store
     callbacks: Arc<DashMap<String, Callback>>,
 
     trans: Transporter,
@@ -52,18 +39,8 @@ pub struct RaftNode<P: PartitionApply> {
 
 pub type Callback = mpsc::Sender<Result<String>>;
 
-// unsafe impl Send for RaftNode {}
-// unsafe impl Sync for RaftNode {}
-
-impl<P> RaftNode<P>
-where
-    P: PartitionApply,
-{
-    pub fn new(
-        conf: SelfConfig,
-        metadata: HashMap<String, String>,
-        p: P,
-    ) -> (Self, mpsc::Sender<TransportMessage>) {
+impl Node {
+    pub fn new(conf: SelfConfig) -> (Self, mpsc::Sender<TransportMessage>) {
         let config = Config {
             id: conf.id,
             election_tick: 10,
@@ -75,7 +52,11 @@ where
             ..Default::default()
         };
 
-        let storage = SledStorage::new(id as u64, p.get_db());
+        let storage = SledStorage::new(
+            conf.id as u64,
+            sled::open(&conf.db.path).expect("Failed to open sled database"),
+        );
+
         let raw_node = Arc::new(Mutex::new(
             RawNode::with_default_logger(&config, storage).expect("Failed to create Raft node"),
         ));
@@ -87,66 +68,60 @@ where
         // 转换为 String
         // tokio::spawn(start_grpc_server(grpc_addr.clone(), raft_service));
 
-        let rn = RaftNode {
+        let node = Self {
+            id: conf.id,
             raw_node,
             my_mailbox_sender: Arc::new(tx.clone()),
             my_mailbox: Arc::new(rx),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
-            db: p,
             trans: Transporter::new(transporter::Config {
-                addr: conf.raft_addr.clone(),
-                protocol: conf.protocol,
+                addr: conf.raft.addr.clone(),
+                protocol: conf.raft.protocol,
             }),
-            conf,
+            conf: Arc::new(conf),
             callbacks: Arc::new(DashMap::new()),
         };
-        rn.peer.insert(
-            id.into(),
-            Arc::new(PeerState::new(id.into(), raft_grpc_addr, metadata)),
+        node.peer.insert(
+            node.conf.id.into(),
+            Arc::new(PeerState::new(
+                node.conf.id.into(),
+                node.conf.raft.addr.clone(),
+                node.conf.raft.meta.clone(),
+            )),
         );
 
-        (rn, tx)
+        (node, tx)
     }
 
-    #[inline]
-    pub fn get_id(&self) -> u32 {
-        self.id
-    }
-
-    #[inline]
-    pub async fn get_leader_id(&self) -> u32 {
-        self.raw_node.lock().await.raft.leader_id as u32
-    }
-
-    #[inline]
-    pub fn get_peer(&self) -> Vec<Arc<PeerState>> {
-        let mut list = vec![];
-        self.peer.iter().for_each(|v| {
-            list.push(v.value().clone());
-        });
-        list
-    }
-
-    pub async fn get_term(&self) -> u64 {
+    pub async fn is_leader(&self) -> bool {
         let raw_node = self.raw_node.lock().await;
-        raw_node.raft.term
+        raw_node.raft.state == raft::StateRole::Leader
     }
 
-    // pub async fn get_not_leader_err_status(&self, message: String) -> tonic::Status {
-    //     let coo_leader_addr = self
-    //         .get_coo_leader_addr()
-    //         .await
-    //         .unwrap_or_else(|| "unknown".to_string());
+    async fn commit_self_conf_change(&self) -> Result<()> {
+        let context = ConfChangeContext {
+            addr: self.conf.raft.addr.clone(),
+            meta: self.conf.raft.meta.clone(),
+        };
 
-    //     let mut status = tonic::Status::new(tonic::Code::PermissionDenied, message);
+        let ctx = bincode::encode_to_vec(context, bincode::config::standard())?;
 
-    //     // 添加 leader 地址到 metadata
-    //     status
-    //         .metadata_mut()
-    //         .insert("x-raft-leader", coo_leader_addr.parse().unwrap());
-    //     status
-    // }
+        let context = format!("{},{}", self.conf.raft.addr, self.conf.raft.addr);
+        let cc = ConfChange {
+            change_type: ConfChangeType::AddNode,
+            node_id: self.id as u64,
+            context: Bytes::from(ctx),
+            id: self.id as u64,
+            ..Default::default()
+        };
+
+        let mut raw_node = self.raw_node.lock().await;
+        raw_node.propose_conf_change(vec![], cc).unwrap();
+        info!("Leader[{}] 提交初始配置变更", self.id);
+
+        Ok(())
+    }
 
     pub async fn run(&self) -> Result<()> {
         let mut interval = time::interval(Duration::from_millis(100));
@@ -175,7 +150,6 @@ where
                     }
                     let msg = msg.unwrap();
 
-
                     match msg.index {
                         protocolv2::COO_RAFT_GET_META_REQUEST_INDEX => {
                             let req = msg.message.decode::<protocolv2::CooRaftGetMetaRequest>()
@@ -198,20 +172,9 @@ where
                             let crm = msg.message.decode::<protocolv2::CooRaftOriginMessage>()
                                 .await
                                 .unwrap();
-
-                            match bincode::decode_from_slice::<Message>(&crm.message, config::standard()) {
-                                Ok((raft_msg, _)) => {
-                                    let mut raw_node = self.raw_node.lock().await;
-                                    raw_node.step(raft_msg).unwrap();
-                                },
-
-                                Err(e) => {
-                                    warn!(
-                                        "Node[{}] 收到无法解析的 RaftMessage: {:?}, error: {:?}",
-                                        self.id, crm.message, e
-                                    );
-                                }
-                            }
+                            let raft_msg: Message = bincode::decode_from_slice(&crm.message, config::standard()).unwrap();
+                            let mut raw_node = self.raw_node.lock().await;
+                            raw_node.step(raft_msg).unwrap();
                         }
 
                         protocolv2::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
@@ -550,206 +513,10 @@ where
             }
         }
     }
+}
 
-    async fn commit_self_conf_change(&self) {
-        let context = format!("{},{}", self.raft_addr, self.coo_grpc_addr);
-        let cc = ConfChange {
-            change_type: ConfChangeType::AddNode,
-            node_id: self.id as u64,
-            context: context.as_bytes().to_vec().into(),
-            id: self.id as u64,
-            ..Default::default()
-        };
-
-        let mut raw_node = self.raw_node.lock().await;
-        raw_node.propose_conf_change(vec![], cc).unwrap();
-        info!("Leader[{}] 提交初始配置变更", self.id);
-    }
-
-    pub async fn join(&self, remote_addr: String) -> Result<()> {
-        self.add_endpoint(0, remote_addr, "".to_string(), true, true)
-            .await
-    }
-
-    async fn add_endpointv2(
-        &mut self,
-        node_id: u64,
-        remote_addr: String,
-        meta: HashMap<String, String>,
-        commit_self_conf_change: bool,
-        sync: bool,
-    ) -> Result<()> {
-        let src_id = self.id;
-        let raft_grpc_addr = self.raft_addr.clone();
-        let coo_grpc_addr = self.coo_grpc_addr.clone();
-        let mailboxes = Arc::clone(&self.mailboxes);
-        let peer = Arc::clone(&self.peer);
-
-        self.trans.connect(remote_addr.clone()).await?;
-
-        // 获取对端 meta 信息并进行处理
-        self.trans
-            .send(&TransportMessage {
-                remote_addr: remote_addr.clone(),
-                index: 0,
-                message: Box::new(CooRaftGetMetaRequest { id: src_id as u64 })
-                    as Box<dyn protocolv2::EnDecoder>,
-            })
-            .await?;
-
-        let resp: TransportMessage = self
-            .trans
-            .recv(5)
-            .await
-            .ok_or_else(|| anyhow!("Failed to get meta response"))?;
-
-        if resp.index != protocolv2::COO_RAFT_GET_META_RESPONSE_INDEX {
-            return Err(anyhow!(
-                "Unexpected response index: {}, expected: {}",
-                resp.index,
-                protocolv2::COO_RAFT_GET_META_RESPONSE_INDEX
-            ));
-        }
-
-        let resp_message: protocolv2::CooRaftGetMetaResponse = resp
-            .message
-            .decode::<protocolv2::CooRaftGetMetaResponse>()
-            .await?;
-
-        if src_id == resp_message.id {
-            return Err(anyhow!(
-                "Node ID conflict: src_id:{}, dst_id: {}",
-                src_id,
-                resp_message.id
-            ));
-        }
-
-        if commit_self_conf_change {
-            self.trans
-                .send(&TransportMessage {
-                    index: COO_RAFT_CONF_CHANGE_REQUEST_INDEX,
-                    remote_addr: remote_addr.clone(),
-                    message: Box::new(CooRaftConfChangeRequest {
-                        version: 1,
-                        message: bincode::encode_to_vec(
-                            &ConfChange {
-                                change_type: ConfChangeType::AddNode,
-                                node_id: src_id as u64,
-                                context: format!("{},{}", raft_grpc_addr, coo_grpc_addr)
-                                    .as_bytes()
-                                    .to_vec()
-                                    .into(),
-                                id: src_id as u64,
-                                ..Default::default()
-                            },
-                            bincode::config::standard(),
-                        )
-                        .unwrap(),
-                    }) as Box<dyn protocolv2::EnDecoder>,
-                })
-                .await;
-        }
-
-        let (tx_msg, rx_msg) = mpsc::channel(1);
-        let peer_state = Arc::new(PeerState::new(dst_id, resp.raft_addr, resp.coo_addr));
-        let mut mb = Mailbox::new(
-            src_id,
-            dst_id as u32,
-            NonZero::new(5_u64).unwrap(),
-            trans.split_writer(&remote_addr).await.unwrap(),
-            rx_msg,
-            peer_state.clone(),
-        );
-        self.mailboxes.insert(dst_id, tx_msg);
-        self.peer.insert(dst_id, peer_state);
-        let handle = tokio::spawn(async move { mb.start_serve().await });
-
-        Ok(())
-    }
-
-    async fn add_mailbox(
-        &mut self,
-        node_id: u64,
-        remote_addr: String,
-        meta: HashMap<String, String>,
-    ) {
-        let writer = self.trans.split_writer(&remote_addr).await;
-        if writer.is_none() {
-            warn!(
-                "Node[{}] 未找到 Node[{}:{}] 的链接, 无法创建 Mailbox",
-                self.id, node_id, remote_addr
-            );
-            return;
-        }
-        let writer = writer.unwrap();
-
-        let src_id = self.id;
-        let dst_id = node_id;
-        let mailboxes = Arc::clone(&self.mailboxes);
-        let peer = Arc::clone(&self.peer);
-
-        let (tx_msg, rx_msg) = mpsc::channel(1);
-        let peer_state = Arc::new(PeerState::new(dst_id, remote_addr.clone(), meta));
-        let mut mb = Mailbox::new(
-            src_id,
-            dst_id as u32,
-            NonZero::new(5_u64).unwrap(),
-            writer,
-            rx_msg,
-            peer_state.clone(),
-        );
-        mailboxes.insert(dst_id, tx_msg);
-        peer.insert(dst_id, peer_state);
-        let handle = tokio::spawn(async move { mb.start_serve().await });
-    }
-
-    pub async fn is_leader(&self) -> bool {
-        let raw_node = self.raw_node.lock().await;
-        raw_node.raft.state == StateRole::Leader
-    }
-
-    async fn propose(&self, part: &SinglePartition, cb: Option<Callback>) -> Result<()> {
-        let send = |e| async {
-            if let Some(cb) = &cb {
-                let _ = cb.send(e).await;
-            }
-        };
-        let mut raw_node = self.raw_node.lock().await;
-        if raw_node.raft.state != StateRole::Leader {
-            send(Err(anyhow!("Not Leader"))).await;
-            return Err(anyhow!("Not leader"));
-        }
-        let unique_id = part.unique_id.clone();
-        let data = bincode::serde::encode_to_vec(part, bincode::config::standard())?;
-        if let Err(e) = raw_node.propose(vec![], data) {
-            send(Err(anyhow!(e.to_string()))).await;
-            return Err(anyhow!(e));
-        }
-        if let Some(cb) = cb {
-            self.callbacks.insert(unique_id, cb);
-        }
-        Ok(())
-    }
-
-    pub fn get(&self, key: &str) -> Option<String> {
-        self.db
-            .get_db()
-            .get(key)
-            .unwrap()
-            .map(|v| String::from_utf8(v.to_vec()).unwrap())
-    }
-
-    pub async fn get_raft_leader_addr(&self) -> Option<String> {
-        let raw_node = self.raw_node.lock().await;
-        self.peer
-            .get(&raw_node.raft.leader_id)
-            .map(|v| v.get_raft_addr().to_string())
-    }
-
-    pub async fn get_coo_leader_addr(&self) -> Option<String> {
-        let raw_node = self.raw_node.lock().await;
-        self.peer
-            .get(&raw_node.raft.leader_id)
-            .map(|v| v.get_coo_addr().to_string())
-    }
+#[derive(Decode, Encode, Default, Debug)]
+struct ConfChangeContext {
+    addr: String,
+    meta: HashMap<String, String>,
 }

@@ -1,8 +1,11 @@
-use crate::{Decoder, EnDecoder, Encoder, common::Topics};
+use crate::{
+    BROKER_COO_HEARTBEAT_REQUEST_INDEX, BROKER_COO_HEARTBEAT_RESPONSE_INDEX, Decoder, EnDecoder,
+    Encoder, common::Topics,
+};
 use anyhow::Result;
 
 // Broker COO 心跳请求
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct BrokerCooHeartbeatRequest {
     pub broker_id: u64,
     pub broker_addr: String,
@@ -27,24 +30,26 @@ pub struct BrokerCooHeartbeatRequest {
 
 impl Encoder for BrokerCooHeartbeatRequest {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for BrokerCooHeartbeatRequest {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (BrokerCooHeartbeatRequest, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for BrokerCooHeartbeatRequest {}
+impl EnDecoder for BrokerCooHeartbeatRequest {
+    fn index(&self) -> u8 {
+        BROKER_COO_HEARTBEAT_REQUEST_INDEX
+    }
+}
 
 // Broker COO 心跳响应
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct BrokerCooHeartbeatResponse {
     pub code: u16,
     pub message: String,
@@ -53,18 +58,20 @@ pub struct BrokerCooHeartbeatResponse {
 
 impl Encoder for BrokerCooHeartbeatResponse {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for BrokerCooHeartbeatResponse {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
         let (obj, _): (BrokerCooHeartbeatResponse, usize) =
-            bincode::decode_from_slice(&data[..], cfg).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for BrokerCooHeartbeatResponse {}
+impl EnDecoder for BrokerCooHeartbeatResponse {
+    fn index(&self) -> u8 {
+        BROKER_COO_HEARTBEAT_RESPONSE_INDEX
+    }
+}

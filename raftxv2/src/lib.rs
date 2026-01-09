@@ -1,38 +1,34 @@
 mod mailbox;
+mod node;
 mod peer;
-pub mod raw_node;
 mod storage;
 
 use std::collections::HashMap;
 
-use sled::Db;
-
-// use crate::partition::SinglePartition;
-use anyhow::Result;
-pub use mailbox::*;
-pub use raw_node::*;
 use transporter::TransportProtocol;
 
-pub trait PartitionApply {
-    fn apply(&self, part: SinglePartition) -> Result<()>;
-    fn get_db(&self) -> Db;
-}
+use crate::storage::DbConfig;
 
-#[derive(Clone)]
 pub struct Config {
-    // raft 节点 id
+    // 节点 id
     pub id: u64,
-    // raft config
+    //  raft config
     pub raft: RaftConfig,
     // db config
     pub db: DBConfig,
 }
 
 pub struct RaftConfig {
-    pub raft_addr: String,
+    pub addr: String,
     pub protocol: TransportProtocol,
     pub meta: HashMap<String, String>,
     pub db_conf: DbConfig,
+
+    pub election_tick: u64,
+    pub heartbeat_tick: u64,
+    pub applied: u64,
+    pub max_size_per_msg: u64,
+    pub max_inflight_msgs: u64,
 }
 
 pub struct DBConfig {

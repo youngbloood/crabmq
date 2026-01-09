@@ -1,8 +1,8 @@
-use crate::{Decoder, EnDecoder, Encoder};
+use crate::{Decoder, EnDecoder, Encoder, TOPICS_INDEX};
 use anyhow::Result;
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct Topics {
     pub term: u64,
     pub topics: Vec<TopicInfo>,
@@ -10,22 +10,25 @@ pub struct Topics {
 
 impl Encoder for Topics {
     fn encode(&self) -> Result<Vec<u8>> {
-        let cfg = config::standard();
-        Ok(bincode::encode_to_vec(self, cfg)?)
+        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
     }
 }
 
 impl Decoder for Topics {
     fn decode(data: &[u8]) -> Result<Self> {
-        let cfg = config::standard();
-        let (obj, _): (Topics, usize) = bincode::decode_from_slice(&data[..], cfg).unwrap();
+        let (obj, _): (Topics, usize) =
+            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
         Ok(obj)
     }
 }
 
-impl EnDecoder for Topics {}
+impl EnDecoder for Topics {
+    fn index(&self) -> u8 {
+        TOPICS_INDEX
+    }
+}
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct TopicInfo {
     pub term: u64,
     // 主题名称
@@ -34,7 +37,7 @@ pub struct TopicInfo {
     pub partitions_cluster: HashMap<u32, PartitionCluster>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct PartitionCluster {
     // 集群 ID
     pub cluster_id: u32,
@@ -46,7 +49,7 @@ pub struct PartitionCluster {
     pub partitions: HashMap<u32, PartitionInfo>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct PartitionInfo {
     // 该分区 ID
     pub id: u32,
@@ -76,7 +79,7 @@ impl PartitionInfo {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct SegmentOffset {
     pub segment_id: u32,
     pub offset: u64,
