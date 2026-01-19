@@ -3,6 +3,7 @@ use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use dashmap::DashMap;
+use log::info;
 use raft::{
     Config, RawNode,
     prelude::{ConfChange, ConfChangeType},

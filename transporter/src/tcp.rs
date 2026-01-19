@@ -35,6 +35,8 @@ pub struct Tcp {
 
     incoming: Arc<DashMap<String, WriteHalf>>,
     outgoing: Arc<DashMap<String, WriteHalf>>,
+
+    shutdown: CancellationToken,
 }
 
 impl Tcp {
@@ -54,6 +56,7 @@ impl Tcp {
             outgoing_sema: Arc::new(Semaphore::new(outgoing_max_connection)),
             incoming: Arc::new(DashMap::new()),
             outgoing: Arc::new(DashMap::new()),
+            shutdown: CancellationToken::new(),
         }
     }
 }
@@ -65,28 +68,49 @@ impl ProtocolTransporterManager for Tcp {
         let tx = self.tx.clone();
         let incoming = self.incoming.clone();
         let sema = self.incoming_sema.clone();
+        let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
             loop {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        let sp = sema.clone().acquire_owned().await.unwrap();
-                        let (rh, wh) = stream.into_split();
-                        let tx = tx.clone();
-                        let shutdown = CancellationToken::new();
-                        let addr = addr.to_string();
-                        let reader = TcpReader {
-                            r: rh,
-                            tx,
-                            sp,
-                            remote_addr: addr.clone(),
-                            shutdown: shutdown.clone(),
-                        };
-                        tokio::spawn(reader.loop_handle());
-                        incoming.insert(addr, WriteHalf::new(wh, shutdown));
+                select! {
+                    sp = sema.clone().acquire_owned() => {
+                        if sp.is_err() {
+                            let e = TransporterError::from_code(ErrorCode::MaxIncomingReached);
+                            error!("{}", e);
+                            continue;
+                        }
+                        let sp = sp.unwrap();
+                        select!{
+                            res = listener.accept() => {
+                                if res.is_err() {
+                                    let e = TransporterError::new(ErrorCode::AcceptError, res.unwrap_err().to_string());
+                                    error!("{}", e);
+                                    continue;
+                                }
+
+                                let (stream, addr) = res.unwrap();
+                                let (rh, wh) = stream.into_split();
+                                let tx = tx.clone();
+                                let shutdown = CancellationToken::new();
+                                let addr = addr.to_string();
+                                let reader = TcpReader {
+                                    r: rh,
+                                    tx,
+                                    sp,
+                                    remote_addr: addr.clone(),
+                                    shutdown: shutdown.clone(),
+                                };
+                                tokio::spawn(reader.loop_handle());
+                                incoming.insert(addr, WriteHalf::new(wh, shutdown));
+                            }
+
+                            _ = shutdown.cancelled() => {
+                                break;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        let e = TransporterError::new(ErrorCode::AcceptError, e.to_string());
-                        error!("{}", e);
+
+                    _ = shutdown.cancelled() => {
+                        break;
                     }
                 }
             }
@@ -97,13 +121,19 @@ impl ProtocolTransporterManager for Tcp {
 
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
     async fn recv(&mut self, timeout: u64) -> Option<TransportMessage> {
+        let shutdown = self.shutdown.clone();
         if timeout == 0 {
-            self.rx.recv().await
+            select! {
+                msg = self.rx.recv() => msg,
+                _ = shutdown.cancelled() => None,
+            }
         } else {
-            tokio::time::timeout(std::time::Duration::from_secs(timeout), self.rx.recv())
-                .await
-                .ok()
-                .flatten()
+            select! {
+                msg = tokio::time::timeout(std::time::Duration::from_secs(timeout), self.rx.recv()) => {
+                    msg.ok().flatten()
+                },
+                _ = shutdown.cancelled() => None,
+            }
         }
     }
     // 将本地监听服务分离出一个新的 TransporterWriter，remote_addr 是要分离的连接地址
@@ -123,6 +153,9 @@ impl ProtocolTransporterManager for Tcp {
 
     // 广播
     async fn broadcast_all(&self, cmd: &TransportMessage) -> Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+        }
         for cell in self.incoming.iter_mut() {
             cell.value()
                 .w
@@ -144,6 +177,9 @@ impl ProtocolTransporterManager for Tcp {
 
     // 广播到所有连接至本地的 endpoints
     async fn broadcast_incoming(&self, cmd: &TransportMessage) -> Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+        }
         for cell in self.incoming.iter_mut() {
             cell.value()
                 .w
@@ -157,6 +193,9 @@ impl ProtocolTransporterManager for Tcp {
 
     // 广播到所有连接至远端的 endpoints
     async fn broadcast_outgoing(&self, cmd: &TransportMessage) -> Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+        }
         for cell in self.outgoing.iter_mut() {
             cell.value()
                 .w
@@ -170,26 +209,51 @@ impl ProtocolTransporterManager for Tcp {
 
     // 连接到远端地址，建立连接并加入到管理器中
     async fn connect(&self, remote_addr: String) -> Result<()> {
-        let sp = self.outgoing_sema.clone().acquire_owned().await.unwrap();
+        let shutdown = self.shutdown.clone();
+        let outgoing = self.outgoing.clone();
+        select! {
+            sp =  self.outgoing_sema.clone().acquire_owned() => {
+                if sp.is_err() {
+                    return  Err(TransporterError::from_code(ErrorCode::MaxOutgoingReached).into());
+                }
+                let sp = sp.unwrap();
+                select!{
+                    stream =  tokio::net::TcpStream::connect(&remote_addr) => {
+                        if stream.is_err(){
+                            return Err(TransporterError::new(ErrorCode::ConnectError, stream.unwrap_err().to_string()).into());
+                        }
+                        let stream = stream.unwrap();
+                        let (rh, wh) = stream.into_split();
+                        let tx = self.tx.clone();
+                        let shutdown = CancellationToken::new();
+                        let reader = TcpReader {
+                            r: rh,
+                            tx,
+                            sp,
+                            remote_addr: remote_addr.clone(),
+                            shutdown: shutdown.clone(),
+                        };
+                        tokio::spawn(reader.loop_handle());
+                        outgoing.insert(remote_addr.clone(), WriteHalf::new(wh, shutdown));
+                    }
 
-        let stream = tokio::net::TcpStream::connect(&remote_addr).await?;
-        let (rh, wh) = stream.into_split();
-        let tx = self.tx.clone();
-        let shutdown = CancellationToken::new();
-        let reader = TcpReader {
-            r: rh,
-            tx,
-            sp,
-            remote_addr: remote_addr.clone(),
-            shutdown: shutdown.clone(),
-        };
-        tokio::spawn(reader.loop_handle());
-        self.outgoing
-            .insert(remote_addr.clone(), WriteHalf::new(wh, shutdown));
+                    _ = shutdown.cancelled() => {
+                        return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+                    }
+                }
+            }
+
+            _ = shutdown.cancelled() => {
+                return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+            }
+        }
         Ok(())
     }
 
     async fn send(&self, cmd: &TransportMessage) -> Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+        }
         if let Some(cell) = self.outgoing.get(&cmd.remote_addr) {
             cell.value()
                 .w
@@ -218,6 +282,18 @@ impl ProtocolTransporterManager for Tcp {
         }
         if let Some(pair) = self.outgoing.remove(remote_addr) {
             pair.1.close();
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.shutdown.cancel();
+        // 关闭所有入站连接
+        for cell in self.incoming.iter_mut() {
+            cell.value().close();
+        }
+        // 关闭所有出站连接
+        for cell in self.outgoing.iter_mut() {
+            cell.value().close();
         }
     }
 }

@@ -175,6 +175,8 @@ pub trait ProtocolTransporterManager {
     async fn send(&self, cmd: &TransportMessage) -> Result<()>;
     // 关闭指定连接
     async fn close(&self, remote_addr: &str);
+    // 停止服务
+    async fn shutdown(&self);
 }
 
 #[async_trait::async_trait]
@@ -210,16 +212,15 @@ fn handle_message(
     body: &[u8],
     remote_addr: String,
 ) -> Result<()> {
-    match decode_to_message(index, body, remote_addr) {
-        Ok(message) => {
-            if let Err(e) = tx.send(message) {
-                return Err(TransporterError::new(ErrorCode::SendError, e.to_string()).into());
-            }
-            Ok(())
-        }
+    let message = decode_to_message(index, body, remote_addr).map_err(|e| -> anyhow::Error {
+        TransporterError::new(ErrorCode::DecodeError, e.to_string()).into()
+    })?;
 
-        Err(e) => Err(TransporterError::new(ErrorCode::DecodeError, e.to_string()).into()),
-    }
+    tx.send(message).map_err(|e| -> anyhow::Error {
+        TransporterError::new(ErrorCode::SendError, e.to_string()).into()
+    })?;
+
+    Ok(())
 }
 
 fn decode_to_message(index: u8, body: &[u8], remote_addr: String) -> Result<TransportMessage> {
