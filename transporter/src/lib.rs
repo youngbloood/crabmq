@@ -1,11 +1,15 @@
+mod err;
 mod tcp;
 
 use std::sync::Arc;
 
-use crate::tcp::Tcp;
+use crate::{
+    err::{ErrorCode, TransporterError},
+    tcp::Tcp,
+};
 use anyhow::Result;
 use protocolv2::*;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 pub struct TransportMessage {
     pub index: u8,
@@ -28,6 +32,18 @@ pub struct Config {
     pub addr: String,
     pub protocol: TransportProtocol,
     pub incoming_max_connections: usize,
+    pub outgoing_max_connections: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            addr: "localhost:4343".to_string(),
+            protocol: TransportProtocol::TCP,
+            incoming_max_connections: 100,
+            outgoing_max_connections: 100,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +66,7 @@ impl Transporter {
             TransportProtocol::TCP => Some(Arc::new(Mutex::new(Tcp::new(
                 conf.addr.clone(),
                 conf.incoming_max_connections,
+                conf.outgoing_max_connections,
             )))),
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
@@ -180,5 +197,41 @@ impl TransporterWriter {
 
     async fn closed(&self) -> bool {
         self.w.closed().await
+    }
+
+    async fn close(&self) {
+        self.w.close().await
+    }
+}
+
+fn handle_message(
+    tx: UnboundedSender<TransportMessage>,
+    index: u8,
+    body: &[u8],
+    remote_addr: String,
+) -> Result<()> {
+    match decode_to_message(index, body, remote_addr) {
+        Ok(message) => {
+            if let Err(e) = tx.send(message) {
+                return Err(TransporterError::new(ErrorCode::SendError, e.to_string()).into());
+            }
+            Ok(())
+        }
+
+        Err(e) => Err(TransporterError::new(ErrorCode::DecodeError, e.to_string()).into()),
+    }
+}
+
+fn decode_to_message(index: u8, body: &[u8], remote_addr: String) -> Result<TransportMessage> {
+    match index {
+        protocolv2::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {
+            let msg = BrokerCooHeartbeatRequest::decode(&body)?;
+            Ok(TransportMessage {
+                index,
+                remote_addr,
+                message: Box::new(msg) as Box<dyn EnDecoder>,
+            })
+        }
+        _ => Err(TransporterError::from_code(ErrorCode::UnknownMessageTypeError).into()),
     }
 }

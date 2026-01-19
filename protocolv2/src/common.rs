@@ -1,6 +1,6 @@
 use crate::{Decoder, EnDecoder, Encoder, TOPICS_INDEX};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct Topics {
@@ -83,4 +83,11 @@ impl PartitionInfo {
 pub struct SegmentOffset {
     pub segment_id: u32,
     pub offset: u64,
+}
+
+// CooRefusedServiceResponse refuse service response
+pub struct CooRefusedServiceResponse {
+    pub code: u16,
+    pub message: String,
+    pub meta: Option<HashMap<String, String>>,
 }

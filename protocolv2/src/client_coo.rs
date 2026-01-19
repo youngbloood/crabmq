@@ -7,7 +7,6 @@ use crate::{
     common::{SegmentOffset, TopicInfo, Topics},
 };
 use anyhow::Result;
-use bincode::de;
 
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct ClientCooAuthRequest {

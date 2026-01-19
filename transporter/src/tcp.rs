@@ -1,11 +1,12 @@
 use crate::{
     ProtocolTransporterManager, ProtocolTransporterWriter, TransportMessage, TransportProtocol,
     TransporterWriter,
+    err::{ErrorCode, TransporterError},
+    handle_message,
 };
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use dashmap::DashMap;
 use log::error;
-use protocolv2::{BrokerCooHeartbeatRequest, Decoder};
 use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -15,7 +16,7 @@ use tokio::{
     },
     select,
     sync::{
-        Mutex, OwnedSemaphorePermit, Semaphore, SemaphorePermit,
+        Mutex, OwnedSemaphorePermit, Semaphore,
         mpsc::{UnboundedReceiver, UnboundedSender},
     },
 };
@@ -23,7 +24,11 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Tcp {
     incoming_max_connection: usize, // 接受的最大连接数
-    sema: Arc<Semaphore>,           // 用于限制最大连接数的信号量
+    incoming_sema: Arc<Semaphore>,  // 用于限制最大连接数的信号量
+
+    outgoing_max_connection: usize, // 连接的最大连接数
+    outgoing_sema: Arc<Semaphore>,  // 用于限制最大连接数的信号量
+
     addr: String,
     tx: UnboundedSender<TransportMessage>,
     rx: UnboundedReceiver<TransportMessage>,
@@ -33,14 +38,20 @@ pub struct Tcp {
 }
 
 impl Tcp {
-    pub fn new(addr: String, incoming_max_connection: usize) -> Self {
+    pub fn new(
+        addr: String,
+        incoming_max_connection: usize,
+        outgoing_max_connection: usize,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Tcp {
             addr,
             tx,
             rx,
             incoming_max_connection,
-            sema: Arc::new(Semaphore::new(incoming_max_connection)),
+            incoming_sema: Arc::new(Semaphore::new(incoming_max_connection)),
+            outgoing_max_connection,
+            outgoing_sema: Arc::new(Semaphore::new(outgoing_max_connection)),
             incoming: Arc::new(DashMap::new()),
             outgoing: Arc::new(DashMap::new()),
         }
@@ -53,12 +64,12 @@ impl ProtocolTransporterManager for Tcp {
         let listener = TcpListener::bind(&self.addr).await?;
         let tx = self.tx.clone();
         let incoming = self.incoming.clone();
-        let sema = self.sema.clone();
+        let sema = self.incoming_sema.clone();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
-                        let sp = sema.acquire_owned().await.unwrap();
+                        let sp = sema.clone().acquire_owned().await.unwrap();
                         let (rh, wh) = stream.into_split();
                         let tx = tx.clone();
                         let shutdown = CancellationToken::new();
@@ -74,7 +85,8 @@ impl ProtocolTransporterManager for Tcp {
                         incoming.insert(addr, WriteHalf::new(wh, shutdown));
                     }
                     Err(e) => {
-                        eprintln!("Failed to accept connection: {}", e);
+                        let e = TransporterError::new(ErrorCode::AcceptError, e.to_string());
+                        error!("{}", e);
                     }
                 }
             }
@@ -82,6 +94,7 @@ impl ProtocolTransporterManager for Tcp {
 
         Ok(())
     }
+
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
     async fn recv(&mut self, timeout: u64) -> Option<TransportMessage> {
         if timeout == 0 {
@@ -157,6 +170,8 @@ impl ProtocolTransporterManager for Tcp {
 
     // 连接到远端地址，建立连接并加入到管理器中
     async fn connect(&self, remote_addr: String) -> Result<()> {
+        let sp = self.outgoing_sema.clone().acquire_owned().await.unwrap();
+
         let stream = tokio::net::TcpStream::connect(&remote_addr).await?;
         let (rh, wh) = stream.into_split();
         let tx = self.tx.clone();
@@ -164,6 +179,7 @@ impl ProtocolTransporterManager for Tcp {
         let reader = TcpReader {
             r: rh,
             tx,
+            sp,
             remote_addr: remote_addr.clone(),
             shutdown: shutdown.clone(),
         };
@@ -232,40 +248,31 @@ impl TcpReader {
                                 body_res = self.r.read_exact(&mut body) => {
                                     match body_res {
                                         Ok(n) if n == 0 || n != length as usize => break, // 连接关闭
-                                        Ok(n) => match index {
-                                            protocolv2::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {
-                                                match BrokerCooHeartbeatRequest::decode(&body) {
-                                                    Ok(message) => {
-                                                        let _ = self.tx.send(TransportMessage {
-                                                            index,
-                                                            remote_addr: self.remote_addr.clone(),
-                                                            message: Box::new(message)
-                                                                as Box<dyn protocolv2::EnDecoder>,
-                                                        });
-                                                    }
-                                                    Err(_) => todo!(),
-                                                }
-                                            }
-
-                                            _ => {
-                                                eprintln!("Unknown message index: {}", index);
+                                        Ok(n) =>  {
+                                            if let Err(e) = handle_message(self.tx.clone(), index, &body, self.remote_addr.clone()) {
+                                                error!("{}", e);
+                                                break;
                                             }
                                         },
                                         Err(e) => {
-                                            eprintln!("Failed to read message body: {}", e);
+                                            let e = TransporterError::new(ErrorCode::ReadError, e.to_string());
+                                            error!("{}", e);
                                             break;
                                         }
                                     }
                                 }
 
                                 _ = self.shutdown.cancelled() => {
+                                    let e = TransporterError::from_code(ErrorCode::ConnectionClosed);
+                                    error!("{}", e);
                                     break;
                                 }
                             }
                         }
 
                         Err(e) => {
-                            error!("Transporter read err: {}",e);
+                            let e = TransporterError::new(ErrorCode::ReadError, e.to_string());
+                            error!("{}", e);
                             break;
                         }
                     }
@@ -293,9 +300,11 @@ pub(crate) struct TcpWriter {
 impl ProtocolTransporterWriter for TcpWriter {
     async fn send(&mut self, cmd: &TransportMessage) -> Result<()> {
         if self.w.closed() {
-            return Err(anyhow!("Tcp connect {} has been closed", self.remote_addr));
+            return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
         }
-        self.w.w.lock().await.write_all(&cmd.to_bytes()?).await?;
+        if let Err(e) = self.w.w.lock().await.write_all(&cmd.to_bytes()?).await {
+            return Err(TransporterError::new(ErrorCode::WriteError, e.to_string()).into());
+        }
         Ok(())
     }
 

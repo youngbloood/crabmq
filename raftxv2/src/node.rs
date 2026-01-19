@@ -75,10 +75,7 @@ impl Node {
             my_mailbox: Arc::new(rx),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
-            trans: Transporter::new(transporter::Config {
-                addr: conf.raft.addr.clone(),
-                protocol: conf.raft.protocol,
-            }),
+            trans: Transporter::new(transporter::Config::default()),
             conf: Arc::new(conf),
             callbacks: Arc::new(DashMap::new()),
         };
