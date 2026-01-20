@@ -1,6 +1,6 @@
 use crate::{Decoder, EnDecoder, Encoder, TOPICS_INDEX};
 use anyhow::Result;
-use std::{collections::HashMap, hash::Hash};
+use std::{any::Any, collections::HashMap, hash::Hash};
 
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct Topics {
@@ -17,7 +17,7 @@ impl Encoder for Topics {
 impl Decoder for Topics {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (Topics, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -25,6 +25,10 @@ impl Decoder for Topics {
 impl EnDecoder for Topics {
     fn index(&self) -> u8 {
         TOPICS_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

@@ -3,7 +3,7 @@ use crate::{
     COO_RAFT_GET_META_RESPONSE_INDEX, COO_RAFT_ORIGIN_MESSAGE_INDEX, Decoder, EnDecoder, Encoder,
 };
 use anyhow::Result;
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooRaftGetMetaRequest {
@@ -21,7 +21,7 @@ impl Encoder for CooRaftGetMetaRequest {
 impl Decoder for CooRaftGetMetaRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooRaftGetMetaRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -29,6 +29,10 @@ impl Decoder for CooRaftGetMetaRequest {
 impl EnDecoder for CooRaftGetMetaRequest {
     fn index(&self) -> u8 {
         COO_RAFT_GET_META_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -48,7 +52,7 @@ impl Encoder for CooRaftGetMetaResponse {
 impl Decoder for CooRaftGetMetaResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooRaftGetMetaResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -56,6 +60,10 @@ impl Decoder for CooRaftGetMetaResponse {
 impl EnDecoder for CooRaftGetMetaResponse {
     fn index(&self) -> u8 {
         COO_RAFT_GET_META_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -75,7 +83,7 @@ impl Encoder for CooRaftConfChangeRequest {
 impl Decoder for CooRaftConfChangeRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooRaftConfChangeRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -83,6 +91,10 @@ impl Decoder for CooRaftConfChangeRequest {
 impl EnDecoder for CooRaftConfChangeRequest {
     fn index(&self) -> u8 {
         COO_RAFT_CONF_CHANGE_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -101,7 +113,7 @@ impl Encoder for CooRaftOriginMessage {
 impl Decoder for CooRaftOriginMessage {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooRaftOriginMessage, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -109,6 +121,10 @@ impl Decoder for CooRaftOriginMessage {
 impl EnDecoder for CooRaftOriginMessage {
     fn index(&self) -> u8 {
         COO_RAFT_ORIGIN_MESSAGE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -128,7 +144,7 @@ impl Encoder for CooRaftProposeMessage {
 impl Decoder for CooRaftProposeMessage {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooRaftProposeMessage, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -136,5 +152,9 @@ impl Decoder for CooRaftProposeMessage {
 impl EnDecoder for CooRaftProposeMessage {
     fn index(&self) -> u8 {
         COO_RAFT_ORIGIN_MESSAGE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

@@ -224,15 +224,12 @@ fn handle_message(
 }
 
 fn decode_to_message(index: u8, body: &[u8], remote_addr: String) -> Result<TransportMessage> {
-    match index {
-        protocolv2::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {
-            let msg = BrokerCooHeartbeatRequest::decode(&body)?;
-            Ok(TransportMessage {
-                index,
-                remote_addr,
-                message: Box::new(msg) as Box<dyn EnDecoder>,
-            })
-        }
-        _ => Err(TransporterError::from_code(ErrorCode::UnknownMessageTypeError).into()),
-    }
+    let message = protocolv2::decode_message(index, body).map_err(|e| -> anyhow::Error {
+        TransporterError::new(ErrorCode::UnknownMessageTypeError, e.to_string()).into()
+    })?;
+    Ok(TransportMessage {
+        index,
+        remote_addr,
+        message,
+    })
 }

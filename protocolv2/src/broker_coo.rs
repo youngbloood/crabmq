@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::{
     BROKER_COO_HEARTBEAT_REQUEST_INDEX, BROKER_COO_HEARTBEAT_RESPONSE_INDEX, Decoder, EnDecoder,
     Encoder, common::Topics,
@@ -37,7 +39,7 @@ impl Encoder for BrokerCooHeartbeatRequest {
 impl Decoder for BrokerCooHeartbeatRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (BrokerCooHeartbeatRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -45,6 +47,10 @@ impl Decoder for BrokerCooHeartbeatRequest {
 impl EnDecoder for BrokerCooHeartbeatRequest {
     fn index(&self) -> u8 {
         BROKER_COO_HEARTBEAT_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -65,7 +71,7 @@ impl Encoder for BrokerCooHeartbeatResponse {
 impl Decoder for BrokerCooHeartbeatResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (BrokerCooHeartbeatResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -73,5 +79,9 @@ impl Decoder for BrokerCooHeartbeatResponse {
 impl EnDecoder for BrokerCooHeartbeatResponse {
     fn index(&self) -> u8 {
         BROKER_COO_HEARTBEAT_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::{
     CLIENT_COO_ADD_PARTITION_REQUEST_INDEX, CLIENT_COO_ADD_PARTITION_RESPONSE_INDEX,
     CLIENT_COO_AUTH_REQUEST_INDEX, CLIENT_COO_AUTH_RESPONSE_INDEX,
@@ -23,7 +25,7 @@ impl Encoder for ClientCooAuthRequest {
 impl Decoder for ClientCooAuthRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (ClientCooAuthRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -31,6 +33,10 @@ impl Decoder for ClientCooAuthRequest {
 impl EnDecoder for ClientCooAuthRequest {
     fn index(&self) -> u8 {
         CLIENT_COO_AUTH_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -50,7 +56,7 @@ impl Encoder for ClientCooAuthResponse {
 impl Decoder for ClientCooAuthResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (ClientCooAuthResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -58,6 +64,10 @@ impl Decoder for ClientCooAuthResponse {
 impl EnDecoder for ClientCooAuthResponse {
     fn index(&self) -> u8 {
         CLIENT_COO_AUTH_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -76,7 +86,7 @@ impl Encoder for ClientCooHeartbeatRequest {
 impl Decoder for ClientCooHeartbeatRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (ClientCooHeartbeatRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -84,6 +94,10 @@ impl Decoder for ClientCooHeartbeatRequest {
 impl EnDecoder for ClientCooHeartbeatRequest {
     fn index(&self) -> u8 {
         CLIENT_COO_HEARTBEAT_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -107,7 +121,7 @@ impl Encoder for CooClientHeartbeatResponse {
 impl Decoder for CooClientHeartbeatResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooClientHeartbeatResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -115,6 +129,10 @@ impl Decoder for CooClientHeartbeatResponse {
 impl EnDecoder for CooClientHeartbeatResponse {
     fn index(&self) -> u8 {
         CLIENT_COO_HEARTBEAT_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -150,7 +168,7 @@ impl Encoder for ClientCooNewTopicRequest {
 impl Decoder for ClientCooNewTopicRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (ClientCooNewTopicRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -158,6 +176,10 @@ impl Decoder for ClientCooNewTopicRequest {
 impl EnDecoder for ClientCooNewTopicRequest {
     fn index(&self) -> u8 {
         CLIENT_COO_NEW_TOPIC_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -178,7 +200,7 @@ impl Encoder for CooClientNewTopicResponse {
 impl Decoder for CooClientNewTopicResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooClientNewTopicResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -186,6 +208,10 @@ impl Decoder for CooClientNewTopicResponse {
 impl EnDecoder for CooClientNewTopicResponse {
     fn index(&self) -> u8 {
         CLIENT_COO_NEW_TOPIC_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -210,7 +236,7 @@ impl Encoder for ClientCooAddPartitionRequest {
 impl Decoder for ClientCooAddPartitionRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (ClientCooAddPartitionRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -218,6 +244,10 @@ impl Decoder for ClientCooAddPartitionRequest {
 impl EnDecoder for ClientCooAddPartitionRequest {
     fn index(&self) -> u8 {
         CLIENT_COO_ADD_PARTITION_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -237,7 +267,7 @@ impl Encoder for CooClientAddPartitionResponse {
 impl Decoder for CooClientAddPartitionResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooClientAddPartitionResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -245,6 +275,10 @@ impl Decoder for CooClientAddPartitionResponse {
 impl EnDecoder for CooClientAddPartitionResponse {
     fn index(&self) -> u8 {
         CLIENT_COO_ADD_PARTITION_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -264,7 +298,7 @@ impl Encoder for ClientCooSubRequest {
 impl Decoder for ClientCooSubRequest {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (ClientCooSubRequest, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -272,6 +306,10 @@ impl Decoder for ClientCooSubRequest {
 impl EnDecoder for ClientCooSubRequest {
     fn index(&self) -> u8 {
         CLIENT_COO_SUB_REQUEST_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -320,7 +358,7 @@ impl Encoder for CooClientSubResponse {
 impl Decoder for CooClientSubResponse {
     fn decode(data: &[u8]) -> Result<Self> {
         let (obj, _): (CooClientSubResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard()).unwrap();
+            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
         Ok(obj)
     }
 }
@@ -328,5 +366,9 @@ impl Decoder for CooClientSubResponse {
 impl EnDecoder for CooClientSubResponse {
     fn index(&self) -> u8 {
         CLIENT_COO_SUB_RESPONSE_INDEX
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

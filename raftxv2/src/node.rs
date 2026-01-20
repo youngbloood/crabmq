@@ -3,14 +3,15 @@ use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use dashmap::DashMap;
-use log::info;
+use log::{debug, error, info};
 use raft::{
-    Config, RawNode,
-    prelude::{ConfChange, ConfChangeType},
+    Config, RawNode, StateRole,
+    prelude::{ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Message, Snapshot},
 };
 use sled::Db;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
+    select,
     sync::{Mutex, mpsc},
     time::{self, Instant},
 };
@@ -133,6 +134,7 @@ impl Node {
             is_initial_conf_committed = true;
         }
 
+        let node = self.clone();
         loop {
             select! {
                 msg = self.trans.recv(0) => {
@@ -140,28 +142,26 @@ impl Node {
                     self.my_mailbox_sender.send(msg).await;
                 }
 
-                msg = async {
-                   self.my_mailbox.recv().await
-                } => {
+                msg = self.my_mailbox.recv() => {
                     if msg.is_none(){
                         continue;
                     }
                     let msg = msg.unwrap();
 
+
                     match msg.index {
                         protocolv2::COO_RAFT_GET_META_REQUEST_INDEX => {
-                            let req = msg.message.decode::<protocolv2::CooRaftGetMetaRequest>()
-                                .await
-                                .unwrap();
+                            let req = msg.message.as_any().downcast_ref::<protocolv2::CooRaftGetMetaRequest>().unwrap();
                             let mut raw_node = self.raw_node.lock().await;
                             let meta = raw_node.raft.prs().conf().clone();
                             let response = protocolv2::CooRaftGetMetaResponse {
                                 id: req.id,
                                 raft_addr: req.raft_addr.clone(),
-                                meta: meta.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                                meta: node.conf.raft.meta.clone(),
                             };
 
-                            self.add_mailbox(req.id, req.remote_addr, req.meta).await;
+
+                            node.add_mailbox(req.id, req.remote_addr, req.meta).await;
                             // FIXME: 这里构建 Message 并发送至对端
                             self.handle_messages(vec![]).await;
                         }
