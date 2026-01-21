@@ -11,7 +11,9 @@ use crate::storage::DbConfig;
 
 pub struct Config {
     // 节点 id
-    pub id: u64,
+    pub id: u32,
+
+    pub mailbox_buffer_len: usize,
     //  raft config
     pub raft: RaftConfig,
     // db config
@@ -20,6 +22,7 @@ pub struct Config {
 
 pub struct RaftConfig {
     pub addr: String,
+    pub write_timeout_milli: u64,
     pub protocol: TransportProtocol,
     pub meta: HashMap<String, String>,
     pub db_conf: DbConfig,

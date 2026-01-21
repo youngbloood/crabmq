@@ -88,10 +88,3 @@ pub struct SegmentOffset {
     pub segment_id: u32,
     pub offset: u64,
 }
-
-// CooRefusedServiceResponse refuse service response
-pub struct CooRefusedServiceResponse {
-    pub code: u16,
-    pub message: String,
-    pub meta: Option<HashMap<String, String>>,
-}

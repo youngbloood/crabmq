@@ -9,7 +9,7 @@ use anyhow::Result;
 // Broker COO 心跳请求
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct BrokerCooHeartbeatRequest {
-    pub broker_id: u64,
+    pub broker_id: u32,
     pub broker_addr: String,
     pub version: String,
 

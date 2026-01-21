@@ -1,15 +1,19 @@
-use crate::{Config as SelfConfig, peer::PeerState, storage::SledStorage};
+use crate::{Config as SelfConfig, mailbox::Mailbox, peer::PeerState, storage::SledStorage};
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use dashmap::DashMap;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use protobuf::Message as _;
+use protocolv2::{CooRaftConfChangeRequest, EnDecoder};
 use raft::{
     Config, RawNode, StateRole,
-    prelude::{ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Message, Snapshot},
+    prelude::{
+        ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, HardState, Message, Snapshot,
+    },
 };
 use sled::Db;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, num::NonZero, sync::Arc, time::Duration};
 use tokio::{
     select,
     sync::{Mutex, mpsc},
@@ -19,7 +23,7 @@ use transporter::{TransportMessage, Transporter};
 
 #[derive(Clone)]
 pub struct Node {
-    pub id: u64,
+    pub id: u32,
 
     conf: Arc<SelfConfig>,
     // raft node
@@ -27,11 +31,11 @@ pub struct Node {
 
     my_mailbox_sender: Arc<mpsc::Sender<TransportMessage>>,
     // 本节点收到的 信息
-    my_mailbox: Arc<mpsc::Receiver<TransportMessage>>,
+    my_mailbox: Arc<Mutex<mpsc::Receiver<TransportMessage>>>,
     // 将消息分发到所有的 mailboxes 中
-    mailboxes: Arc<DashMap<u64, mpsc::Sender<TransportMessage>>>,
+    mailboxes: Arc<DashMap<u32, mpsc::Sender<TransportMessage>>>,
     // 集群中其他节点的信息(包含自身)
-    peer: Arc<DashMap<u64, Arc<PeerState>>>,
+    peer: Arc<DashMap<u32, Arc<PeerState>>>,
 
     // db: P, // Key-value store
     callbacks: Arc<DashMap<String, Callback>>,
@@ -41,10 +45,11 @@ pub struct Node {
 
 pub type Callback = mpsc::Sender<Result<String>>;
 
+// impl self functions
 impl Node {
     pub fn new(conf: SelfConfig) -> (Self, mpsc::Sender<TransportMessage>) {
         let config = Config {
-            id: conf.id,
+            id: conf.id as _,
             election_tick: 10,
             heartbeat_tick: 3,
             applied: 0,
@@ -74,7 +79,7 @@ impl Node {
             id: conf.id,
             raw_node,
             my_mailbox_sender: Arc::new(tx.clone()),
-            my_mailbox: Arc::new(rx),
+            my_mailbox: Arc::new(Mutex::new(rx)),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
             trans: Transporter::new(transporter::Config::default()),
@@ -98,30 +103,84 @@ impl Node {
         raw_node.raft.state == raft::StateRole::Leader
     }
 
-    async fn commit_self_conf_change(&self) -> Result<()> {
-        let context = ConfChangeContext {
-            addr: self.conf.raft.addr.clone(),
+    async fn handle_meta_req(&self, remote_addr: &str, req: &protocolv2::CooRaftGetMetaRequest) {
+        if req.id == self.conf.id {
+            let resp = protocolv2::ErrorResponse {
+                code: protocolv2::ERROR_RAFT_ID_CONFLICT,
+                message: "".to_string(),
+                meta: None,
+            };
+            let t = TransportMessage {
+                index: 1,
+                remote_addr: remote_addr.clone().to_string(),
+                message: Box::new(resp) as Box<dyn EnDecoder>,
+            };
+            self.trans.send(&t).await;
+            self.trans.close(remote_addr).await;
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel(self.conf.mailbox_buffer_len);
+        let w = self.trans.split_writer(remote_addr).await;
+        if w.is_none() {
+            error!("not found writer for remote_addr[{}]", remote_addr);
+            return;
+        }
+        let w = w.unwrap();
+        let peer = self.peer.get(&req.id).unwrap();
+        let mb = Mailbox::new(
+            self.id,
+            req.id,
+            NonZero::new(self.conf.raft.write_timeout_milli).unwrap(),
+            w,
+            rx,
+            peer.value().clone(),
+        );
+        self.mailboxes.insert(req.id, tx);
+        tokio::spawn(mb.start_serve());
+
+        // 构建响应并发送至对端
+        let resp = protocolv2::CooRaftGetMetaResponse {
+            id: self.id,
+            raft_addr: self.conf.raft.addr.clone(),
             meta: self.conf.raft.meta.clone(),
         };
-
-        let ctx = bincode::encode_to_vec(context, bincode::config::standard())?;
-
-        let context = format!("{},{}", self.conf.raft.addr, self.conf.raft.addr);
-        let cc = ConfChange {
-            change_type: ConfChangeType::AddNode,
-            node_id: self.id as u64,
-            context: Bytes::from(ctx),
-            id: self.id as u64,
-            ..Default::default()
+        let t = TransportMessage {
+            index: 1,
+            remote_addr: remote_addr.clone().to_string(),
+            message: Box::new(resp) as Box<dyn EnDecoder>,
         };
-
-        let mut raw_node = self.raw_node.lock().await;
-        raw_node.propose_conf_change(vec![], cc).unwrap();
-        info!("Leader[{}] 提交初始配置变更", self.id);
-
-        Ok(())
+        self.trans.send(&t).await;
     }
 
+    async fn handle_conf_change(&self, req: &protocolv2::CooRaftConfChangeRequest) {
+        match req.version {
+            1 => {
+                let mut cc = ConfChange::new();
+                cc.merge_from_bytes(&req.message);
+                let mut raw_node = self.raw_node.lock().await;
+                raw_node.propose_conf_change(vec![], cc).unwrap();
+            }
+
+            2 => {
+                let mut ccv2 = ConfChangeV2::default();
+                ccv2.merge_from_bytes(&req.message).unwrap();
+                let mut raw_node = self.raw_node.lock().await;
+                raw_node.propose_conf_change(vec![], ccv2).unwrap();
+            }
+
+            _ => {
+                warn!(
+                    "Node[{}] 收到未知版本的ConfChange请求: {}, message: {:?}",
+                    self.id, req.version, req.message
+                );
+            }
+        }
+    }
+}
+
+// impl raft functions
+impl Node {
     pub async fn run(&self) -> Result<()> {
         let mut interval = time::interval(Duration::from_millis(100));
         let mut print_interval = Instant::now();
@@ -134,7 +193,7 @@ impl Node {
             is_initial_conf_committed = true;
         }
 
-        let node = self.clone();
+        let node: Node = self.clone();
         loop {
             select! {
                 msg = self.trans.recv(0) => {
@@ -142,7 +201,7 @@ impl Node {
                     self.my_mailbox_sender.send(msg).await;
                 }
 
-                msg = self.my_mailbox.recv() => {
+                msg = self.my_mailbox.lock().await.recv() => {
                     if msg.is_none(){
                         continue;
                     }
@@ -152,18 +211,7 @@ impl Node {
                     match msg.index {
                         protocolv2::COO_RAFT_GET_META_REQUEST_INDEX => {
                             let req = msg.message.as_any().downcast_ref::<protocolv2::CooRaftGetMetaRequest>().unwrap();
-                            let mut raw_node = self.raw_node.lock().await;
-                            let meta = raw_node.raft.prs().conf().clone();
-                            let response = protocolv2::CooRaftGetMetaResponse {
-                                id: req.id,
-                                raft_addr: req.raft_addr.clone(),
-                                meta: node.conf.raft.meta.clone(),
-                            };
-
-
-                            node.add_mailbox(req.id, req.remote_addr, req.meta).await;
-                            // FIXME: 这里构建 Message 并发送至对端
-                            self.handle_messages(vec![]).await;
+                            node.handle_meta_req(&msg.remote_addr, req).await;
                         }
 
                         protocolv2::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
@@ -176,32 +224,8 @@ impl Node {
                         }
 
                         protocolv2::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
-                            let crcc = msg.message.decode::<protocolv2::CooRaftConfChangeRequest>()
-                                .await
-                                .unwrap();
-
-                            match crcc.version {
-                                1 => {
-                                    let mut cc = ConfChange::default();
-                                    cc.merge_from(&crcc.message).unwrap();
-                                    let mut raw_node = self.raw_node.lock().await;
-                                    raw_node.propose_conf_change(vec![], cc).unwrap();
-                                }
-
-                                2 => {
-                                    let mut ccv2 = ConfChangeV2::default();
-                                    ccv2.merge_from_bytes(&crcc.message).unwrap();
-                                    let mut raw_node = self.raw_node.lock().await;
-                                    raw_node.propose_conf_change(vec![], ccv2).unwrap();
-                                }
-
-                                _ => {
-                                    warn!(
-                                        "Node[{}] 收到未知版本的ConfChange请求: {}, content: {:?}",
-                                        self.id, crcc.version, crcc.message
-                                    );
-                                }
-                            }
+                            let req = msg.message.as_any().downcast_ref::<protocolv2::CooRaftConfChangeRequest>().unwrap();
+                            node.handle_conf_change(req).await;
                         }
 
                         protocolv2::COO_RAFT_PROPOSE_MESSAGE_INDEX => {
@@ -343,6 +367,30 @@ impl Node {
         }
     }
 
+    async fn commit_self_conf_change(&self) -> Result<()> {
+        let context = ConfChangeContext {
+            addr: self.conf.raft.addr.clone(),
+            meta: self.conf.raft.meta.clone(),
+        };
+
+        let ctx = bincode::encode_to_vec(context, bincode::config::standard())?;
+
+        let context = format!("{},{}", self.conf.raft.addr, self.conf.raft.addr);
+        let cc = ConfChange {
+            change_type: ConfChangeType::AddNode,
+            node_id: self.id as u64,
+            context: Bytes::from(ctx),
+            id: self.id as u64,
+            ..Default::default()
+        };
+
+        let mut raw_node = self.raw_node.lock().await;
+        raw_node.propose_conf_change(vec![], cc).unwrap();
+        info!("Leader[{}] 提交初始配置变更", self.id);
+
+        Ok(())
+    }
+
     // ref: https://docs.rs/raft/0.7.0/raft/#processing-the-ready-state
     async fn handle_all_ready(&self) {
         let result = 'ready_block: {
@@ -409,7 +457,8 @@ impl Node {
                 msg.to,
                 &msg.get_msg_type(),
             );
-            if let Some(sender) = self.mailboxes.get(&msg.to) {
+            let to = msg.to as u32;
+            if let Some(sender) = self.mailboxes.get(&to) {
                 if let Err(e) = sender
                     .send(RaftMessage {
                         message: msg.write_to_bytes().unwrap(),

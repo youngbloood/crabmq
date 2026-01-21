@@ -7,7 +7,7 @@ use std::{any::Any, collections::HashMap};
 
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooRaftGetMetaRequest {
-    pub id: u64,
+    pub id: u32,
     pub raft_addr: String,
     pub meta: HashMap<String, String>,
 }
@@ -38,7 +38,7 @@ impl EnDecoder for CooRaftGetMetaRequest {
 
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooRaftGetMetaResponse {
-    pub id: u64,
+    pub id: u32,
     pub raft_addr: String,
     pub meta: HashMap<String, String>,
 }
@@ -70,7 +70,7 @@ impl EnDecoder for CooRaftGetMetaResponse {
 // 支持 ConfChange 和 ConfChangeV2
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooRaftConfChangeRequest {
-    pub version: u8,
+    pub version: u8, // 1:v1; 2:v2
     pub message: Vec<u8>,
 }
 

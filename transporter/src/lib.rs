@@ -1,7 +1,7 @@
 mod err;
 mod tcp;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     err::{ErrorCode, TransporterError},
@@ -84,9 +84,9 @@ impl Transporter {
         }
     }
 
-    pub async fn send(&mut self, cmd: &TransportMessage) -> Result<()> {
+    pub async fn send(&self, cmd: &TransportMessage) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.pt.as_mut().unwrap().lock().await.send(cmd).await,
+            TransportProtocol::TCP => self.pt.as_ref().unwrap().lock().await.send(cmd).await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -153,6 +153,23 @@ impl Transporter {
             TransportProtocol::KCP => todo!(),
         }
     }
+
+    pub async fn close(&self, remote_addr: &str) {
+        match self.conf.protocol {
+            TransportProtocol::TCP => {
+                self.pt
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .await
+                    .close(remote_addr)
+                    .await
+            }
+            TransportProtocol::UDP => todo!(),
+            TransportProtocol::QUIC => todo!(),
+            TransportProtocol::KCP => todo!(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -180,29 +197,44 @@ pub trait ProtocolTransporterManager {
 }
 
 #[async_trait::async_trait]
-pub trait ProtocolTransporterWriter {
-    async fn send(&mut self, cmd: &TransportMessage) -> Result<()>;
+pub trait ProtocolTransporterWriter: Send + Sync + 'static {
+    async fn send(&self, cmd: &TransportMessage) -> Result<()>;
+    async fn send_timeout(&self, cmd: &TransportMessage, t: Duration) -> Result<()>;
     async fn closed(&self) -> bool;
     async fn close(&self);
 }
 
-pub struct TransporterWriter {
-    p: TransportProtocol,
-    w: Box<dyn ProtocolTransporterWriter>,
+pub enum TransporterWriter {
+    Tcp(tcp::TcpWriter),
 }
 
 impl TransporterWriter {
-    async fn send(&mut self, cmd: &TransportMessage) -> Result<()> {
-        self.w.send(cmd).await?;
-        Ok(())
+    fn from_tcp(w: tcp::TcpWriter) -> Self {
+        TransporterWriter::Tcp(w)
     }
 
-    async fn closed(&self) -> bool {
-        self.w.closed().await
+    pub async fn send(&self, cmd: &TransportMessage) -> Result<()> {
+        match self {
+            Self::Tcp(w) => w.send(cmd).await,
+        }
     }
 
-    async fn close(&self) {
-        self.w.close().await
+    pub async fn send_timeout(&mut self, cmd: &TransportMessage, t: Duration) -> Result<()> {
+        match self {
+            Self::Tcp(w) => w.send_timeout(cmd, t).await,
+        }
+    }
+
+    pub async fn closed(&self) -> bool {
+        match self {
+            Self::Tcp(w) => w.closed().await,
+        }
+    }
+
+    pub async fn close(&self) {
+        match self {
+            Self::Tcp(w) => w.close().await,
+        }
     }
 }
 

@@ -14,6 +14,7 @@ pub enum ErrorCode {
     ConnectError = 1001,
     AcceptError = 1002,
     WriteError = 1003,
+    WriteTimeoutError = 1010,
     ReadError = 1004,
     DecodeError = 1005,
     UnknownMessageTypeError = 1006,

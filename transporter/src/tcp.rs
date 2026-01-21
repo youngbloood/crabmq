@@ -7,7 +7,7 @@ use crate::{
 use anyhow::Result;
 use dashmap::DashMap;
 use log::error;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{
@@ -19,6 +19,7 @@ use tokio::{
         Mutex, OwnedSemaphorePermit, Semaphore,
         mpsc::{UnboundedReceiver, UnboundedSender},
     },
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -139,13 +140,11 @@ impl ProtocolTransporterManager for Tcp {
     // 将本地监听服务分离出一个新的 TransporterWriter，remote_addr 是要分离的连接地址
     async fn split_writer(&self, remote_addr: &str) -> Option<TransporterWriter> {
         if let Some(pair) = self.incoming.remove(remote_addr) {
-            Some(TransporterWriter {
-                p: TransportProtocol::TCP,
-                w: Box::new(TcpWriter {
-                    remote_addr: pair.0.to_string(),
-                    w: pair.1,
-                }) as Box<dyn ProtocolTransporterWriter>,
-            })
+            let tcp_writer = TcpWriter {
+                remote_addr: pair.0.to_string(),
+                w: pair.1,
+            };
+            Some(TransporterWriter::from_tcp(tcp_writer))
         } else {
             None
         }
@@ -372,15 +371,35 @@ pub(crate) struct TcpWriter {
     w: WriteHalf,
 }
 
+unsafe impl Send for TcpWriter {}
+unsafe impl Sync for TcpWriter {}
+
 #[async_trait::async_trait]
 impl ProtocolTransporterWriter for TcpWriter {
-    async fn send(&mut self, cmd: &TransportMessage) -> Result<()> {
+    async fn send(&self, cmd: &TransportMessage) -> Result<()> {
         if self.w.closed() {
             return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
         }
         if let Err(e) = self.w.w.lock().await.write_all(&cmd.to_bytes()?).await {
             return Err(TransporterError::new(ErrorCode::WriteError, e.to_string()).into());
         }
+        Ok(())
+    }
+
+    async fn send_timeout(&self, cmd: &TransportMessage, t: Duration) -> Result<()> {
+        if self.w.closed() {
+            return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
+        }
+
+        timeout(t, self.w.w.lock().await.write_all(&cmd.to_bytes()?))
+            .await
+            .map_err(|e| -> anyhow::Error {
+                TransporterError::new(ErrorCode::WriteTimeoutError, e.to_string()).into()
+            })?
+            .map_err(|e| -> anyhow::Error {
+                TransporterError::new(ErrorCode::WriteError, e.to_string()).into()
+            })?;
+
         Ok(())
     }
 

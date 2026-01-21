@@ -955,7 +955,6 @@ version = "3.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
 dependencies = [
- "bytes",
  "once_cell",
  "protobuf-support",
  "thiserror",
@@ -1093,7 +1092,7 @@ dependencies = [
  "dashmap",
  "log",
  "parking_lot 0.12.5",
- "protobuf 3.7.2",
+ "protobuf 2.28.0",
  "protocolv2",
  "raft",
  "serde",

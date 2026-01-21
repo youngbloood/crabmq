@@ -7,12 +7,14 @@ pub mod client_broker;
 pub mod client_coo;
 pub mod common;
 pub mod coo_raft;
+pub mod err;
 
 pub use broker_coo::*;
 pub use client_broker::*;
 pub use client_coo::*;
 pub use common::*;
 pub use coo_raft::*;
+pub use err::*;
 
 pub trait Encoder {
     fn encode(&self) -> Result<Vec<u8>>;
