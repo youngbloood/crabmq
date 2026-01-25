@@ -44,16 +44,16 @@ impl Mailbox {
                         continue;
                     }
                     let msg = msg.unwrap();
-                    trace!("Node[{}] -> Node[{}]: timeout: {}s",self.src_id,self.dst_id,self.send_timeout);
+                    trace!("Mailbox[{}->{}]: timeout: {}s", self.src_id, self.dst_id, self.send_timeout);
                     match self.w.send_timeout(&msg,Duration::from_millis(self.send_timeout.get())).await {
                         Ok(_) => {
                             self.status.rotate_upgrade().await;
-                            debug!("Node[{}]->Node[{}] Mailbox sent message successfully", self.src_id, self.dst_id);
+                            debug!("Mailbox[{}->{}] sent message successfully", self.src_id, self.dst_id);
                         },
                         Err(e) => {
                             self.status.rotate_downgrade().await;
                             if failed_times % 50 == 0 {
-                                error!("Node[{}]->Node[{}] Mailbox send error: {:?}", self.src_id, self.dst_id, e);
+                                error!("Mailbox[{}->{}] send message failed: {:?}", self.src_id, self.dst_id, e);
                             }
                             failed_times += 1;
                         },

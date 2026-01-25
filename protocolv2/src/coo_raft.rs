@@ -1,6 +1,7 @@
 use crate::{
     COO_RAFT_CONF_CHANGE_REQUEST_INDEX, COO_RAFT_GET_META_REQUEST_INDEX,
-    COO_RAFT_GET_META_RESPONSE_INDEX, COO_RAFT_ORIGIN_MESSAGE_INDEX, Decoder, EnDecoder, Encoder,
+    COO_RAFT_GET_META_RESPONSE_INDEX, COO_RAFT_ORIGIN_MESSAGE_INDEX,
+    COO_RAFT_PROPOSE_MESSAGE_INDEX, Decoder, EnDecoder, Encoder,
 };
 use anyhow::Result;
 use std::{any::Any, collections::HashMap};
@@ -67,10 +68,16 @@ impl EnDecoder for CooRaftGetMetaResponse {
     }
 }
 
+#[derive(Debug, bincode::Encode, bincode::Decode)]
+pub enum ConfChangeVersion {
+    V1 = 1,
+    V2 = 2,
+}
+
 // 支持 ConfChange 和 ConfChangeV2
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct CooRaftConfChangeRequest {
-    pub version: u8, // 1:v1; 2:v2
+    pub version: ConfChangeVersion,
     pub message: Vec<u8>,
 }
 
@@ -128,10 +135,16 @@ impl EnDecoder for CooRaftOriginMessage {
     }
 }
 
+#[derive(Debug, bincode::Encode, bincode::Decode)]
+pub enum CooRaftProposeType {
+    Partition = 1,           // 提交的分区信息
+    ConsumerGroupOffset = 2, // 提交的消费者组的消费偏移量
+}
+
 // 向 raft 集群中提案的信息
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct CooRaftProposeMessage {
-    pub index: u8,
+    pub index: CooRaftProposeType,
     pub message: Vec<u8>,
 }
 
@@ -151,7 +164,7 @@ impl Decoder for CooRaftProposeMessage {
 
 impl EnDecoder for CooRaftProposeMessage {
     fn index(&self) -> u8 {
-        COO_RAFT_ORIGIN_MESSAGE_INDEX
+        COO_RAFT_PROPOSE_MESSAGE_INDEX
     }
 
     fn as_any(&self) -> &dyn Any {

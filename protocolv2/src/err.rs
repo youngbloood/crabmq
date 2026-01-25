@@ -2,15 +2,18 @@ use crate::{Decoder, EnDecoder, Encoder};
 use anyhow::Result;
 use std::{any::Any, collections::HashMap};
 
-// raft id conflict
-pub const ERROR_RAFT_ID_CONFLICT: u16 = 1;
-// broker id conflict
-pub const ERROR_BROKER_ID_CONFLICT: u16 = 2;
+#[derive(Debug, bincode::Encode, bincode::Decode)]
+pub enum ErrorCode {
+    // raft id conflict
+    RaftIDConflict = 1,
+    // broker id conflict
+    BrokerIDConflict = 2,
+}
 
 // ErrorResponse contains all error code and message and metadata
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode)]
 pub struct ErrorResponse {
-    pub code: u16,
+    pub code: ErrorCode,
     pub message: String,
     pub meta: Option<HashMap<String, String>>,
 }

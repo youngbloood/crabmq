@@ -5,7 +5,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use protobuf::Message as _;
-use protocolv2::{CooRaftConfChangeRequest, EnDecoder};
+use protocolv2::{CooRaftConfChangeRequest, CooRaftOriginMessage, EnDecoder};
 use raft::{
     Config, RawNode, StateRole,
     prelude::{
@@ -106,7 +106,7 @@ impl Node {
     async fn handle_meta_req(&self, remote_addr: &str, req: &protocolv2::CooRaftGetMetaRequest) {
         if req.id == self.conf.id {
             let resp = protocolv2::ErrorResponse {
-                code: protocolv2::ERROR_RAFT_ID_CONFLICT,
+                code: protocolv2::ErrorCode::RaftIDConflict,
                 message: "".to_string(),
                 meta: None,
             };
@@ -155,25 +155,41 @@ impl Node {
 
     async fn handle_conf_change(&self, req: &protocolv2::CooRaftConfChangeRequest) {
         match req.version {
-            1 => {
+            protocolv2::ConfChangeVersion::V1 => {
                 let mut cc = ConfChange::new();
                 cc.merge_from_bytes(&req.message);
                 let mut raw_node = self.raw_node.lock().await;
                 raw_node.propose_conf_change(vec![], cc).unwrap();
             }
 
-            2 => {
+            protocolv2::ConfChangeVersion::V2 => {
                 let mut ccv2 = ConfChangeV2::default();
                 ccv2.merge_from_bytes(&req.message).unwrap();
                 let mut raw_node = self.raw_node.lock().await;
                 raw_node.propose_conf_change(vec![], ccv2).unwrap();
             }
+        }
+    }
 
-            _ => {
-                warn!(
-                    "Node[{}] 收到未知版本的ConfChange请求: {}, message: {:?}",
-                    self.id, req.version, req.message
-                );
+    async fn handle_raft_message(&self, req: &protocolv2::CooRaftOriginMessage) {
+        let mut msg = Message::new();
+        msg.merge_from_bytes(&req.message);
+        self.raw_node.lock().await.step(msg);
+    }
+
+    async fn handle_propose_message(&self, req: &protocolv2::CooRaftProposeMessage) {
+        match req.index {
+            protocolv2::CooRaftProposeType::Partition => {
+                self.raw_node
+                    .lock()
+                    .await
+                    .propose(vec![], req.message.to_vec());
+            }
+            protocolv2::CooRaftProposeType::ConsumerGroupOffset => {
+                self.raw_node
+                    .lock()
+                    .await
+                    .propose(vec![], req.message.to_vec());
             }
         }
     }
@@ -194,14 +210,20 @@ impl Node {
         }
 
         let node: Node = self.clone();
+        let mut trans = self.trans.clone();
+
         loop {
+            let my_mailbox = self.my_mailbox.clone();
             select! {
-                msg = self.trans.recv(0) => {
+                msg = trans.recv(0) => {
                     let msg = msg.unwrap();
                     self.my_mailbox_sender.send(msg).await;
                 }
 
-                msg = self.my_mailbox.lock().await.recv() => {
+                msg = async {
+                    let mut l = my_mailbox.lock().await;
+                    l.recv().await
+                } => {
                     if msg.is_none(){
                         continue;
                     }
@@ -215,12 +237,8 @@ impl Node {
                         }
 
                         protocolv2::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
-                            let crm = msg.message.decode::<protocolv2::CooRaftOriginMessage>()
-                                .await
-                                .unwrap();
-                            let raft_msg: Message = bincode::decode_from_slice(&crm.message, config::standard()).unwrap();
-                            let mut raw_node = self.raw_node.lock().await;
-                            raw_node.step(raft_msg).unwrap();
+                            let req = msg.message.as_any().downcast_ref::<protocolv2::CooRaftOriginMessage>().unwrap();
+                            node.handle_raft_message(req).await;
                         }
 
                         protocolv2::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
@@ -229,11 +247,8 @@ impl Node {
                         }
 
                         protocolv2::COO_RAFT_PROPOSE_MESSAGE_INDEX => {
-                            let crpm = msg.message.decode::<protocolv2::CooRaftProposeMessage>()
-                                .await
-                                .unwrap();
-                            let mut raw_node = self.raw_node.lock().await;
-                            raw_node.propose(vec![], crpm.message).unwrap();
+                            let req = msg.message.as_any().downcast_ref::<protocolv2::CooRaftProposeMessage>().expect("");
+                            node.handle_propose_message(req).await;
                         }
 
                         _ => {
@@ -423,6 +438,9 @@ impl Node {
             // Raft HardState changed, and we need to persist it.
             let _ = store.set_hard_state(hs);
         }
+        if ready.must_sync() {
+            store.flush()?;
+        }
         // 6. handle persisted messages
         self.handle_messages(ready.take_persisted_messages()).await;
 
@@ -452,25 +470,29 @@ impl Node {
     async fn handle_messages(&self, messages: Vec<Message>) {
         for msg in messages {
             debug!(
-                "Node[{}] to Node[{}], type = {:?}",
+                "Node[{}->{}], type = {:?}",
                 msg.from,
                 msg.to,
                 &msg.get_msg_type(),
             );
+            let typ = msg.get_msg_type();
+            let from = msg.from;
             let to = msg.to as u32;
             if let Some(sender) = self.mailboxes.get(&to) {
-                if let Err(e) = sender
-                    .send(RaftMessage {
-                        message: msg.write_to_bytes().unwrap(),
-                    })
-                    .await
-                {
+                let msg = CooRaftOriginMessage {
+                    message: msg.write_to_bytes().unwrap(),
+                };
+
+                let t = TransportMessage {
+                    index: protocolv2::COO_RAFT_ORIGIN_MESSAGE_INDEX,
+                    remote_addr: "".to_string(),
+                    message: Box::new(msg) as Box<dyn EnDecoder>,
+                };
+
+                if let Err(e) = sender.send(t).await {
                     error!(
-                        "Node[{}] to Node[{}] msg Type[{:?}] send failed: {:?}",
-                        msg.from,
-                        msg.to,
-                        &msg.get_msg_type(),
-                        e
+                        "Node[{}->{}] msg Type[{:?}] send failed: {:?}",
+                        from, to, typ, e
                     );
                 }
             }
@@ -496,16 +518,16 @@ impl Node {
                 EntryType::EntryNormal => {
                     let data = &entry.data;
 
-                    let part: SinglePartition =
-                        bincode::serde::decode_from_slice(data, config::standard())
-                            .unwrap()
-                            .0;
-                    let unique_id = part.unique_id.clone();
-                    self.db.apply(part);
-                    // quorum 确认机制
-                    if let Some((unique_id, cb)) = self.callbacks.remove(&unique_id) {
-                        let _ = cb.send(Ok(unique_id)).await;
-                    }
+                    // let part: SinglePartition =
+                    //     bincode::serde::decode_from_slice(data, config::standard())
+                    //         .unwrap()
+                    //         .0;
+                    // let unique_id = part.unique_id.clone();
+                    // self.db.apply(part);
+                    // // quorum 确认机制
+                    // if let Some((unique_id, cb)) = self.callbacks.remove(&unique_id) {
+                    //     let _ = cb.send(Ok(unique_id)).await;
+                    // }
                 }
 
                 EntryType::EntryConfChange => {

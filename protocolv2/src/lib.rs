@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lazy_static::lazy_static;
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, fmt::Debug};
 
 pub mod broker_coo;
 pub mod client_broker;
@@ -26,7 +26,7 @@ pub trait Decoder {
         Self: Sized;
 }
 
-pub trait EnDecoder: Encoder + Decoder + Send + Sync {
+pub trait EnDecoder: Encoder + Decoder + Send + Sync + Debug {
     fn index(&self) -> u8;
     fn as_any(&self) -> &dyn Any;
 }

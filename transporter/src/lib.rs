@@ -75,9 +75,9 @@ impl Transporter {
         Transporter { conf, pt }
     }
 
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(&self) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.pt.as_mut().unwrap().lock().await.start().await,
+            TransportProtocol::TCP => self.pt.as_ref().unwrap().lock().await.start().await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
