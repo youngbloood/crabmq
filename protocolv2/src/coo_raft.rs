@@ -9,7 +9,7 @@ use std::{any::Any, collections::HashMap};
 #[derive(Debug, Default, bincode::Encode, bincode::Decode)]
 pub struct CooRaftGetMetaRequest {
     pub id: u32,
-    pub raft_addr: String,
+    pub addr: String,
     pub meta: HashMap<String, String>,
 }
 

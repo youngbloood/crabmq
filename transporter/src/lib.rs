@@ -111,11 +111,11 @@ impl Transporter {
         }
     }
 
-    pub async fn connect(&mut self, remote_addr: String) -> Result<()> {
+    pub async fn connect(&self, remote_addr: &str) -> Result<()> {
         match self.conf.protocol {
             TransportProtocol::TCP => {
                 self.pt
-                    .as_mut()
+                    .as_ref()
                     .unwrap()
                     .lock()
                     .await
@@ -187,7 +187,7 @@ pub trait ProtocolTransporterManager {
     // 广播到所有连接至远端的 endpoints
     async fn broadcast_outgoing(&self, cmd: &TransportMessage) -> Result<()>;
     // 连接到远端地址，建立连接并加入到管理器中
-    async fn connect(&self, remote_addr: String) -> Result<()>;
+    async fn connect(&self, remote_addr: &str) -> Result<()>;
     // 发送消息到指定的远端地址
     async fn send(&self, cmd: &TransportMessage) -> Result<()>;
     // 关闭指定连接

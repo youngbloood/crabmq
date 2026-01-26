@@ -207,7 +207,7 @@ impl ProtocolTransporterManager for Tcp {
     }
 
     // 连接到远端地址，建立连接并加入到管理器中
-    async fn connect(&self, remote_addr: String) -> Result<()> {
+    async fn connect(&self, remote_addr: &str) -> Result<()> {
         let shutdown = self.shutdown.clone();
         let outgoing = self.outgoing.clone();
         select! {
@@ -229,11 +229,11 @@ impl ProtocolTransporterManager for Tcp {
                             r: rh,
                             tx,
                             sp,
-                            remote_addr: remote_addr.clone(),
+                            remote_addr: remote_addr.to_string(),
                             shutdown: shutdown.clone(),
                         };
                         tokio::spawn(reader.loop_handle());
-                        outgoing.insert(remote_addr.clone(), WriteHalf::new(wh, shutdown));
+                        outgoing.insert(remote_addr.to_string(), WriteHalf::new(wh, shutdown));
                     }
 
                     _ = shutdown.cancelled() => {
