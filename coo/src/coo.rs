@@ -4,7 +4,6 @@ use super::raftx;
 use crate::ClientNode;
 use crate::broker_status::BrokerState;
 use crate::broker_status::BrokerStatus;
-use crate::command::Command;
 use crate::conn::Conn;
 use crate::consumer_group::ConsumerGroupManager;
 use crate::event_bus::EventBus;
@@ -16,23 +15,13 @@ use crate::raftx::TopicPartitionData;
 use anyhow::Result;
 use anyhow::anyhow;
 use dashmap::DashMap;
-// use grpcx::brokercoosvc::BrokerState;
-// use grpcx::brokercoosvc::broker_coo_service_server::BrokerCooServiceServer;
-// use grpcx::clientcoosvc::client_coo_service_server::ClientCooServiceServer;
-// use grpcx::commonsvc;
-// use grpcx::commonsvc::CooListResp;
-// use grpcx::cooraftsvc;
-// use grpcx::cooraftsvc::raft_service_server::RaftServiceServer;
-// use grpcx::smart_client::repair_addr_with_http;
-// use grpcx::topic_meta::TopicPartitionDetail;
-// use grpcx::{brokercoosvc, clientcoosvc};
 use log::error;
 use log::info;
 use log::warn;
 use partition::PartitionManager;
 use protobuf::Message as _;
 use raft::prelude::*;
-use raftx::{MessageType as AllMessageType, RaftNode};
+use raftx::RaftNode;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -48,6 +37,7 @@ use tokio::time::interval;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
+use transporter::TransportMessage;
 
 #[derive(Clone)]
 pub struct Coordinator {
@@ -59,9 +49,7 @@ pub struct Coordinator {
     // raft_node 节点
     raft_node: Arc<RaftNode<PartitionManager>>,
     // 向 raft_node 节点发送消息的通道
-    raft_node_sender: mpsc::Sender<AllMessageType>,
-
-    conns: Arc<DashMap<String, Conn>>,
+    raft_node_sender: mpsc::Sender<TransportMessage>,
 
     cmd_tx: Sender<Command>,
     cmd_rx: Arc<Receiver<Command>>,
@@ -122,7 +110,6 @@ impl Coordinator {
             consumer_group_manager: ConsumerGroupManager::new(partition_manager.all_topics.clone()),
             partition_manager,
             conf,
-            conns: todo!(),
             cmd_tx: todo!(),
             cmd_rx: todo!(),
             // broker_consumer_bus: todo!(),
@@ -385,7 +372,7 @@ impl Coordinator {
             let cmd = self.cmd_rx.recv().await;
             if let Some(cmd) = cmd {
                 match cmd.index {
-                    protocolv2::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {}
+                    protocol::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {}
                 }
             }
         }

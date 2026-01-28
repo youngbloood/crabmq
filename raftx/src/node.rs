@@ -5,15 +5,12 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use protobuf::Message as _;
-use protocolv2::{CooRaftConfChangeRequest, CooRaftOriginMessage, EnDecoder};
+use protocol::{CooRaftOriginMessage, EnDecoder};
 use raft::{
     Config, RawNode, StateRole,
-    prelude::{
-        ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, HardState, Message, Snapshot,
-    },
+    prelude::{ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Message, Snapshot},
 };
-use sled::Db;
-use std::{collections::HashMap, mem, num::NonZero, sync::Arc, time::Duration};
+use std::{collections::HashMap, num::NonZero, sync::Arc, time::Duration};
 use tokio::{
     select,
     sync::{Mutex, mpsc},
@@ -103,17 +100,17 @@ impl Node {
         raw_node.raft.state == raft::StateRole::Leader
     }
 
-    async fn handle_meta_req(&self, remote_addr: &str, req: &protocolv2::CooRaftGetMetaRequest) {
+    async fn handle_meta_req(&self, remote_addr: &str, req: &protocol::CooRaftGetMetaRequest) {
         if req.id == self.conf.id {
-            let resp = protocolv2::ErrorResponse {
-                code: protocolv2::ErrorCode::RaftIDConflict,
+            let resp = protocol::ErrorResponse {
+                code: protocol::ErrorCode::RaftIDConflict,
                 message: "".to_string(),
                 meta: None,
             };
             let t = TransportMessage {
                 index: 1,
                 remote_addr: remote_addr.clone().to_string(),
-                message: Box::new(resp) as Box<dyn EnDecoder>,
+                message: (Box::new(resp) as Box<dyn EnDecoder>).into(),
             };
             self.trans.send(&t).await;
             self.trans.close(remote_addr).await;
@@ -123,7 +120,7 @@ impl Node {
         self.add_peer(req.id, &req.addr, req.meta.clone()).await;
 
         // 构建响应并发送至对端
-        let resp = protocolv2::CooRaftGetMetaResponse {
+        let resp = protocol::CooRaftGetMetaResponse {
             id: self.id,
             raft_addr: self.conf.raft.addr.clone(),
             meta: self.conf.raft.meta.clone(),
@@ -131,21 +128,21 @@ impl Node {
         let t = TransportMessage {
             index: 1,
             remote_addr: remote_addr.clone().to_string(),
-            message: Box::new(resp) as Box<dyn EnDecoder>,
+            message: (Box::new(resp) as Box<dyn EnDecoder>).into(),
         };
         self.trans.send(&t).await;
     }
 
-    async fn handle_conf_change(&self, req: &protocolv2::CooRaftConfChangeRequest) {
+    async fn handle_conf_change(&self, req: &protocol::CooRaftConfChangeRequest) {
         match req.version {
-            protocolv2::ConfChangeVersion::V1 => {
+            protocol::ConfChangeVersion::V1 => {
                 let mut cc = ConfChange::new();
                 cc.merge_from_bytes(&req.message);
                 let mut raw_node = self.raw_node.lock().await;
                 raw_node.propose_conf_change(vec![], cc).unwrap();
             }
 
-            protocolv2::ConfChangeVersion::V2 => {
+            protocol::ConfChangeVersion::V2 => {
                 let mut ccv2 = ConfChangeV2::default();
                 ccv2.merge_from_bytes(&req.message).unwrap();
                 let mut raw_node = self.raw_node.lock().await;
@@ -154,21 +151,21 @@ impl Node {
         }
     }
 
-    async fn handle_raft_message(&self, req: &protocolv2::CooRaftOriginMessage) {
+    async fn handle_raft_message(&self, req: &protocol::CooRaftOriginMessage) {
         let mut msg = Message::new();
         msg.merge_from_bytes(&req.message);
         self.raw_node.lock().await.step(msg);
     }
 
-    async fn handle_propose_message(&self, req: &protocolv2::CooRaftProposeMessage) {
+    async fn handle_propose_message(&self, req: &protocol::CooRaftProposeMessage) {
         match req.index {
-            protocolv2::CooRaftProposeType::Partition => {
+            protocol::CooRaftProposeType::Partition => {
                 self.raw_node
                     .lock()
                     .await
                     .propose(vec![], req.message.to_vec());
             }
-            protocolv2::CooRaftProposeType::ConsumerGroupOffset => {
+            protocol::CooRaftProposeType::ConsumerGroupOffset => {
                 self.raw_node
                     .lock()
                     .await
@@ -179,62 +176,59 @@ impl Node {
 
     async fn proccess_received_message(&self, msg: TransportMessage) {
         match msg.index {
-            protocolv2::COO_RAFT_GET_META_REQUEST_INDEX => {
+            protocol::COO_RAFT_GET_META_REQUEST_INDEX => {
                 let req = msg
                     .message
                     .as_any()
-                    .downcast_ref::<protocolv2::CooRaftGetMetaRequest>()
+                    .downcast_ref::<protocol::CooRaftGetMetaRequest>()
                     .unwrap();
                 self.handle_meta_req(&msg.remote_addr, req).await;
             }
 
-            protocolv2::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
+            protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
                 let req = msg
                     .message
                     .as_any()
-                    .downcast_ref::<protocolv2::CooRaftOriginMessage>()
+                    .downcast_ref::<protocol::CooRaftOriginMessage>()
                     .unwrap();
                 self.handle_raft_message(req).await;
             }
 
-            protocolv2::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
+            protocol::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
                 let req = msg
                     .message
                     .as_any()
-                    .downcast_ref::<protocolv2::CooRaftConfChangeRequest>()
+                    .downcast_ref::<protocol::CooRaftConfChangeRequest>()
                     .unwrap();
                 self.handle_conf_change(req).await;
             }
 
-            protocolv2::COO_RAFT_PROPOSE_MESSAGE_INDEX => {
+            protocol::COO_RAFT_PROPOSE_MESSAGE_INDEX => {
                 let req = msg
                     .message
                     .as_any()
-                    .downcast_ref::<protocolv2::CooRaftProposeMessage>()
+                    .downcast_ref::<protocol::CooRaftProposeMessage>()
                     .expect("");
                 self.handle_propose_message(req).await;
             }
 
             _ => {
                 warn!(
-                    "Node[{}] 收到未知消息类型: {}, content: {:?}",
+                    "RAFTX[{}]: 收到未知消息类型: {}, content: {:?}",
                     self.id, msg.index, msg.message
                 );
             }
         }
     }
 
-    async fn add_peer(
-        &self,
-        remote_id: u32,
-        remote_addr: &str,
-        meta: HashMap<String, String>,
-    ) -> Result<()> {
+    async fn add_peer(&self, remote_id: u32, remote_addr: &str, meta: HashMap<String, String>) {
         let (tx, rx) = mpsc::channel(self.conf.mailbox_buffer_len);
         let w = self.trans.split_writer(remote_addr).await;
         if w.is_none() {
-            error!("not found writer for remote_addr[{}]", remote_addr);
-            return Ok(());
+            error!(
+                "RAFTX[{}]: not found writer for remote_addr[{}]",
+                self.id, remote_addr
+            );
         }
 
         let w = w.unwrap();
@@ -258,13 +252,19 @@ impl Node {
         self.mailboxes.insert(remote_id, tx);
         tokio::spawn(mb.start_serve());
 
-        Ok(())
+        info!(
+            "RAFTX[{}]: added peer[{}] with addr[{}]",
+            self.id, remote_id, remote_addr
+        );
     }
 }
 
 // impl raft functions
 impl Node {
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run<F>(&self, hooker: F) -> Result<()>
+    where
+        F: AsyncFn(TransportMessage),
+    {
         let mut interval = time::interval(Duration::from_millis(100));
         let mut print_interval = Instant::now();
         let mut is_initial_conf_committed = false;
@@ -279,12 +279,25 @@ impl Node {
         let node: Node = self.clone();
         let mut trans = self.trans.clone();
 
+        let inner_index = [
+            protocol::COO_RAFT_CONF_CHANGE_REQUEST_INDEX,
+            protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX,
+            protocol::COO_RAFT_PROPOSE_MESSAGE_INDEX,
+        ];
+
         loop {
             let my_mailbox = self.my_mailbox.clone();
             select! {
                 msg = trans.recv(0) => {
                     let msg = msg.unwrap();
-                    self.my_mailbox_sender.send(msg).await;
+                    hooker(msg.clone()).await;
+                    if !inner_index.contains(&msg.index) {
+                        continue;
+                    }
+                    // 交给自身处理
+                    if let Err(e) =  self.my_mailbox_sender.send(msg).await{
+                        error!("RAFTX[{}]: send to self mailbox failed: {:?}", self.id, e);
+                    }
                 }
 
                 msg = async {
@@ -304,7 +317,7 @@ impl Node {
                         raw_node.tick();
                         if print_interval.elapsed() > Duration::from_secs(5) {
                             info!(
-                                "Node[{}] term = {}, leader_id = {}, role = {:?}, raft.pr().conf() = {:?}, peer = {:?}",
+                                "RAFTX[{}]: term = {}, leader_id = {}, role = {:?}, raft.pr().conf() = {:?}, peer = {:?}",
                                 self.id,
                                 raw_node.raft.term,
                                 raw_node.raft.leader_id,
@@ -342,7 +355,7 @@ impl Node {
 
         let mut raw_node = self.raw_node.lock().await;
         raw_node.propose_conf_change(vec![], cc).unwrap();
-        info!("Leader[{}] 提交初始配置变更", self.id);
+        info!("RAFTX[{}]: 提交初始配置变更", self.id);
 
         Ok(())
     }
@@ -372,7 +385,10 @@ impl Node {
             .await;
         // 4. handle entries
         if let Err(e) = store.append(&ready.take_entries()) {
-            error!("persist raft log fail: {:?}, need to retry or panic", e);
+            error!(
+                "RAFTX[{}]: persist raft log fail: {:?}, need to retry or panic",
+                self.id, e
+            );
             return;
         }
         // 5. handle HardState
@@ -402,16 +418,16 @@ impl Node {
 
         let mut raw_node = self.raw_node.lock().await;
         raw_node.advance_apply();
-        debug!("Node[{}], advance_apply", self.id);
+        debug!("RAFTX[{}]: advance_apply", self.id);
         if raw_node.raft.state == StateRole::Leader {
-            debug!("Node {} is leader", self.id);
+            debug!("RAFTX[{}]: is leader", self.id);
         }
     }
 
     async fn distribute_messages_to_peers(&self, messages: Vec<Message>) {
         for msg in messages {
             debug!(
-                "Node[{}->{}], type = {:?}",
+                "RAFTX[{}->{}]: type = {:?}",
                 msg.from,
                 msg.to,
                 &msg.get_msg_type(),
@@ -425,14 +441,14 @@ impl Node {
                 };
 
                 let t = TransportMessage {
-                    index: protocolv2::COO_RAFT_ORIGIN_MESSAGE_INDEX,
+                    index: protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX,
                     remote_addr: "".to_string(),
-                    message: Box::new(msg) as Box<dyn EnDecoder>,
+                    message: (Box::new(msg) as Box<dyn EnDecoder>).into(),
                 };
 
                 if let Err(e) = sender.send(t).await {
                     error!(
-                        "Node[{}->{}] msg Type[{:?}] send failed: {:?}",
+                        "RAFTX[{}->{}]: msg Type[{:?}] send failed: {:?}",
                         from, to, typ, e
                     );
                 }
@@ -450,7 +466,7 @@ impl Node {
     }
 
     async fn handle_entries(&self, entries: Vec<Entry>, store: &SledStorage) {
-        debug!("Node[{}]: handle_entries", self.id);
+        debug!("RAFTX[{}]: handle_entries", self.id);
         for entry in entries {
             if entry.data.is_empty() {
                 continue;
@@ -472,13 +488,13 @@ impl Node {
                 }
 
                 EntryType::EntryConfChange => {
-                    debug!("Node[{}] 收到 EntryConfChange", self.id);
+                    debug!("RAFTX[{}]: 收到 EntryConfChange", self.id);
                     let mut cc = ConfChange::default();
                     cc.merge_from_bytes(&entry.data).unwrap();
 
                     let mut raw_node = self.raw_node.lock().await;
                     let cs = raw_node.apply_conf_change(&cc).unwrap();
-                    info!("Node[{}] ConfChange applied: {:?}", self.id, cs);
+                    info!("RAFTX[{}]: ConfChange applied: {:?}", self.id, cs);
                     let _ = store.set_conf_state(&cs);
 
                     // 确保 follower 收到该类型消息时增加 endpoint
@@ -491,13 +507,13 @@ impl Node {
                 }
 
                 EntryType::EntryConfChangeV2 => {
-                    debug!("Node[{}] 收到 EntryConfChangeV2", self.id);
+                    debug!("RAFTX[{}]: 收到 EntryConfChangeV2", self.id);
                     let mut ccv2 = ConfChangeV2::default();
                     ccv2.merge_from_bytes(&entry.data).unwrap();
 
                     let mut raw_node = self.raw_node.lock().await;
                     let cs = raw_node.apply_conf_change(&ccv2).unwrap();
-                    info!("Node[{}] ConfChangeV2 applied: {:?}", self.id, cs);
+                    info!("RAFTX[{}]: ConfChangeV2 applied: {:?}", self.id, cs);
                     let _ = store.set_conf_state(&cs);
 
                     // 确保 follower 收到该类型消息时增加 endpoint

@@ -2,7 +2,7 @@ use crate::{Decoder, EnDecoder, Encoder, TOPICS_INDEX};
 use anyhow::Result;
 use std::{any::Any, collections::HashMap, hash::Hash};
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct Topics {
     pub term: u64,
     pub topics: Vec<TopicInfo>,
@@ -32,7 +32,7 @@ impl EnDecoder for Topics {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct TopicInfo {
     pub term: u64,
     // 主题名称
@@ -41,7 +41,7 @@ pub struct TopicInfo {
     pub partitions_cluster: HashMap<u32, PartitionCluster>,
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct PartitionCluster {
     // 集群 ID
     pub cluster_id: u32,
@@ -53,7 +53,7 @@ pub struct PartitionCluster {
     pub partitions: HashMap<u32, PartitionInfo>,
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct PartitionInfo {
     // 该分区 ID
     pub id: u32,
@@ -83,7 +83,7 @@ impl PartitionInfo {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct SegmentOffset {
     pub segment_id: u32,
     pub offset: u64,

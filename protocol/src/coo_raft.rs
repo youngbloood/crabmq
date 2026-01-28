@@ -6,7 +6,7 @@ use crate::{
 use anyhow::Result;
 use std::{any::Any, collections::HashMap};
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooRaftGetMetaRequest {
     pub id: u32,
     pub addr: String,
@@ -37,7 +37,7 @@ impl EnDecoder for CooRaftGetMetaRequest {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooRaftGetMetaResponse {
     pub id: u32,
     pub raft_addr: String,
@@ -68,14 +68,14 @@ impl EnDecoder for CooRaftGetMetaResponse {
     }
 }
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
 pub enum ConfChangeVersion {
     V1 = 1,
     V2 = 2,
 }
 
 // 支持 ConfChange 和 ConfChangeV2
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooRaftConfChangeRequest {
     pub version: ConfChangeVersion,
     pub message: Vec<u8>,
@@ -106,7 +106,7 @@ impl EnDecoder for CooRaftConfChangeRequest {
 }
 
 // raft 原生信息，对应 raft::eraftpb::Message
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooRaftOriginMessage {
     pub message: Vec<u8>,
 }
@@ -135,14 +135,14 @@ impl EnDecoder for CooRaftOriginMessage {
     }
 }
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
 pub enum CooRaftProposeType {
     Partition = 1,           // 提交的分区信息
     ConsumerGroupOffset = 2, // 提交的消费者组的消费偏移量
 }
 
 // 向 raft 集群中提案的信息
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooRaftProposeMessage {
     pub index: CooRaftProposeType,
     pub message: Vec<u8>,

@@ -1,5 +1,5 @@
 use crate::{
-    ProtocolTransporterManager, ProtocolTransporterWriter, TransportMessage, TransportProtocol,
+    ProtocolTransporterManager, ProtocolTransporterWriter, TransportMessage,
     TransporterWriter,
     err::{ErrorCode, TransporterError},
     handle_message,
@@ -314,7 +314,7 @@ impl TcpReader {
                     match head_res {
                         Ok(n) if n ==0 || n != 5 => break, // 连接关闭
                         Ok(_) => {
-                            let index = head[1];
+                            let index = head[0];
                             let length = u32::from_be_bytes(head[1..5].try_into().unwrap());
 
                             let mut body = vec![0_u8; length as usize];
@@ -323,7 +323,7 @@ impl TcpReader {
                                 body_res = self.r.read_exact(&mut body) => {
                                     match body_res {
                                         Ok(n) if n == 0 || n != length as usize => break, // 连接关闭
-                                        Ok(n) =>  {
+                                        Ok(_n) =>  {
                                             if let Err(e) = handle_message(self.tx.clone(), index, &body, self.remote_addr.clone()) {
                                                 error!("{}", e);
                                                 break;
@@ -365,7 +365,7 @@ impl TcpReader {
 }
 
 #[derive(Clone)]
-pub(crate) struct TcpWriter {
+pub struct TcpWriter {
     // 连接地址
     remote_addr: String,
     w: WriteHalf,

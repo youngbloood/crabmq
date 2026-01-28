@@ -9,7 +9,7 @@ pub struct Config {
     // coordinator 节点监听的地址
     pub coo_addr: String,
 
-    // coordinator 节点间的 raft 通信模块监听的 grpc 地址
+    // coordinator 节点间的
     pub raft_addr: String,
 
     // Db 存储路径

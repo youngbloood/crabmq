@@ -2,7 +2,7 @@ use crate::{Decoder, EnDecoder, Encoder};
 use anyhow::Result;
 use std::{any::Any, collections::HashMap};
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
 pub enum ErrorCode {
     // raft id conflict
     RaftIDConflict = 1,
@@ -11,7 +11,7 @@ pub enum ErrorCode {
 }
 
 // ErrorResponse contains all error code and message and metadata
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
 pub struct ErrorResponse {
     pub code: ErrorCode,
     pub message: String,

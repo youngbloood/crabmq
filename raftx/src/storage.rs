@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-// use protobuf::{Message as _, SingularPtrField};
+use protobuf::{Message as _, SingularPtrField};
 use raft::eraftpb::{ConfState, Entry, HardState, Snapshot, SnapshotMetadata};
 use raft::{GetEntriesContext, Result, StorageError, prelude::*, storage::Storage};
 use sled::{Db, IVec, transaction::TransactionError};
@@ -16,6 +16,12 @@ const SNAPSHOT_KEY: &[u8] = b"snapshot";
 const ENTRY_PREFIX: &[u8] = b"entry:";
 const META_FIRST_INDEX: &[u8] = b"meta_first";
 const META_LAST_INDEX: &[u8] = b"meta_last";
+
+#[derive(Clone)]
+pub struct DbConfig {
+    pub id: u64,
+    pub db_path: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct SledStorage {
@@ -104,7 +110,9 @@ impl SledStorage {
 
         // 原子更新
         let mut batch = sled::Batch::default();
-        batch.insert(SNAPSHOT_KEY, snapshot.write_to_bytes()?);
+        batch.insert(SNAPSHOT_KEY, snapshot.get_data());
+
+        let hs = self.hard_state()?;
         batch.insert(HARD_STATE_KEY, self.hard_state()?.write_to_bytes()?);
         batch.insert(
             CONF_STATE_KEY,

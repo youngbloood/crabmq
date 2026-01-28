@@ -8,13 +8,14 @@ use crate::{
     tcp::Tcp,
 };
 use anyhow::Result;
-use protocolv2::*;
+use protocol::*;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
+#[derive(Clone)]
 pub struct TransportMessage {
     pub index: u8,
     pub remote_addr: String,
-    pub message: Box<dyn EnDecoder>,
+    pub message: Arc<Box<dyn EnDecoder>>,
 }
 
 impl TransportMessage {
@@ -57,17 +58,18 @@ pub enum TransportProtocol {
 #[derive(Clone)]
 pub struct Transporter {
     conf: Config,
-    pt: Option<Arc<Mutex<dyn ProtocolTransporterManager>>>,
+    pt: Option<Arc<Mutex<Box<dyn ProtocolTransporterManager>>>>,
 }
 
 impl Transporter {
     pub fn new(conf: Config) -> Self {
-        let pt: Option<Arc<Mutex<dyn ProtocolTransporterManager>>> = match conf.protocol {
-            TransportProtocol::TCP => Some(Arc::new(Mutex::new(Tcp::new(
+        let pt: Option<Arc<Mutex<Box<dyn ProtocolTransporterManager>>>> = match conf.protocol {
+            TransportProtocol::TCP => Some(Arc::new(Mutex::new(Box::new(Tcp::new(
                 conf.addr.clone(),
                 conf.incoming_max_connections,
                 conf.outgoing_max_connections,
-            )))),
+            ))
+                as Box<dyn ProtocolTransporterManager>))),
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -219,7 +221,7 @@ impl TransporterWriter {
         }
     }
 
-    pub async fn send_timeout(&mut self, cmd: &TransportMessage, t: Duration) -> Result<()> {
+    pub async fn send_timeout(&self, cmd: &TransportMessage, t: Duration) -> Result<()> {
         match self {
             Self::Tcp(w) => w.send_timeout(cmd, t).await,
         }
@@ -256,12 +258,12 @@ fn handle_message(
 }
 
 fn decode_to_message(index: u8, body: &[u8], remote_addr: String) -> Result<TransportMessage> {
-    let message = protocolv2::decode_message(index, body).map_err(|e| -> anyhow::Error {
+    let message = protocol::decode_message(index, body).map_err(|e| -> anyhow::Error {
         TransporterError::new(ErrorCode::UnknownMessageTypeError, e.to_string()).into()
     })?;
     Ok(TransportMessage {
         index,
         remote_addr,
-        message,
+        message: Arc::new(message),
     })
 }

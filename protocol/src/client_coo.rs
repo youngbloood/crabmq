@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::Result;
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooAuthRequest {
     pub client_id: String,
     pub secret: String,
@@ -40,7 +40,7 @@ impl EnDecoder for ClientCooAuthRequest {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooAuthResponse {
     pub code: u16,
     pub message: String,
@@ -71,7 +71,7 @@ impl EnDecoder for ClientCooAuthResponse {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooHeartbeatRequest {
     pub client_id: String,
     pub token: String,
@@ -102,7 +102,7 @@ impl EnDecoder for ClientCooHeartbeatRequest {
 }
 
 // Coo 返回给 Client 的心跳响应
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooClientHeartbeatResponse {
     pub client_id: String,
     pub seccess: bool,
@@ -140,7 +140,7 @@ impl EnDecoder for CooClientHeartbeatResponse {
 type CooClientTopicList = Topics;
 
 // Client 向 Coo 发起 NewTopic 请求
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooNewTopicRequest {
     // 请求创建的 topic 名称
     pub topic: String,
@@ -184,7 +184,7 @@ impl EnDecoder for ClientCooNewTopicRequest {
 }
 
 // Coo 响应给 Client : NewTopic的结果
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooClientNewTopicResponse {
     pub code: u16,
     pub message: String,
@@ -215,7 +215,7 @@ impl EnDecoder for CooClientNewTopicResponse {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooAddPartitionRequest {
     // 需要添加分区的 topic 名称
     pub topic: String,
@@ -251,7 +251,7 @@ impl EnDecoder for ClientCooAddPartitionRequest {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooClientAddPartitionResponse {
     pub code: u16,
     pub message: String,
@@ -283,7 +283,7 @@ impl EnDecoder for CooClientAddPartitionResponse {
 }
 
 // Client 向 Coo: 发起订阅请求
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooSubRequest {
     pub group_id: u32,
     pub option: Option<ClientCooSubOption>,
@@ -313,7 +313,7 @@ impl EnDecoder for ClientCooSubRequest {
     }
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooSubOption {
     pub sub_topics: Vec<ClientCooSubTopic>,
     pub auto_commit: bool,
@@ -321,7 +321,7 @@ pub struct ClientCooSubOption {
     pub consumer_slide_window_size: u64,
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooSubTopic {
     pub topic: String,
     // 起始消费位移（1表示最新，0表示从头开始消费）
@@ -329,20 +329,20 @@ pub struct ClientCooSubTopic {
     pub head_offset: u8,
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct ClientCooCommitRequest {
     pub topic: String,
     pub pos: SegmentOffset,
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooClientCommitResponse {
     pub topic: String,
     pub pos: SegmentOffset,
     pub code: u16,
 }
 
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct CooClientSubResponse {
     pub code: u16,
     pub message: String,

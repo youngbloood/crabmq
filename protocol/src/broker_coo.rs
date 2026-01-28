@@ -7,7 +7,7 @@ use crate::{
 use anyhow::Result;
 
 // Broker COO 心跳请求
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct BrokerCooHeartbeatRequest {
     pub broker_id: u32,
     pub broker_addr: String,
@@ -55,7 +55,7 @@ impl EnDecoder for BrokerCooHeartbeatRequest {
 }
 
 // Broker COO 心跳响应
-#[derive(Debug, Default, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Default, bincode::Encode, bincode::Decode, Clone)]
 pub struct BrokerCooHeartbeatResponse {
     pub code: u16,
     pub message: String,

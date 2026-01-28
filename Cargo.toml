@@ -5,25 +5,11 @@
 [workspace]
 resolver = "2"
 
-# members = [
-#    "common",
-#    "core",
-#    "cmd/crabmqd",
-#    "protocol",
-#    "storage",
-#    "broker",
-#    "coo",
-#    "logic_node",
-#    "storagev2",
-#    "grpcx",
-#    "client", "cmd/client_bench", "cmd/storage_bench", "cmd/client_sub_bench", "protocolv2", 
-#    "raftx", "transporter",
-# ]
-
 members = [
+    "coo",
     "common",
-    "protocolv2",
+    "protocol",
     "storagev2",
     "transporter",
-    "raftx", "raftxv2",
+    "raftx",
 ]
