@@ -1,14 +1,12 @@
-use tokio::net::tcp::OwnedWriteHalf;
-
 pub struct Conn {
-    pub w: OwnedWriteHalf,
+    pub t: Transporter,
     pub role: ConnRole,
 }
 
 impl Conn {
-    pub fn new(w: OwnedWriteHalf) -> Self {
+    pub fn new(t: Transporter) -> Self {
         Self {
-            w,
+            t,
             role: ConnRole::Unknown,
         }
     }

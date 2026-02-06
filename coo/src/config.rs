@@ -1,16 +1,27 @@
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
+use transporter::TransportProtocol;
 
 #[derive(Clone)]
 pub struct Config {
     // coordinator 节点id
     pub id: u32,
 
-    // coordinator 节点监听的地址
-    pub coo_addr: String,
+    // coo 配置
+    pub coo: Base,
+    // raftx 配置
+    pub raftx_config: raftx::Config,
+}
 
-    // coordinator 节点间的
-    pub raft_addr: String,
+struct Base {
+    // coordinator 节点监听的地址
+    pub addr: String,
+
+    pub protocol: TransportProtocol,
+
+    pub incoming_max_connections: usize,
+
+    pub outgoing_max_connections: usize,
 
     // Db 存储路径
     pub db_path: PathBuf,
@@ -36,9 +47,6 @@ pub struct Config {
 
     // 客户端调用 pull 时缓冲区大小
     pub client_pull_buffer_size: usize,
-
-    // broker 调用 pull 时缓冲区大小
-    pub broker_pull_buffer_size: usize,
 }
 
 impl Config {
@@ -114,19 +122,20 @@ impl Config {
 }
 
 pub fn default_config() -> Config {
-    Config {
-        id: 0,
-        coo_addr: String::new(),
-        raft_addr: String::new(),
-        db_path: PathBuf::from("./data"),
-        check_self_is_leader_interval: 2,
-        new_topic_timeout: 3,
-        new_topic_partition_factor: "10n".to_string(),
-        add_partition_timeout: 3,
-        event_bus_buffer_size: 12,
-        client_pull_buffer_size: 12,
-        broker_pull_buffer_size: 12,
-        new_topic_partition_replication_count: 3,
-        new_topic_partition_replication_readble: true,
-    }
+    // Config {
+    //     id: 0,
+    //     coo_addr: String::new(),
+    //     raft_addr: String::new(),
+    //     db_path: PathBuf::from("./data"),
+    //     check_self_is_leader_interval: 2,
+    //     new_topic_timeout: 3,
+    //     new_topic_partition_factor: "10n".to_string(),
+    //     add_partition_timeout: 3,
+    //     event_bus_buffer_size: 12,
+    //     client_pull_buffer_size: 12,
+    //     broker_pull_buffer_size: 12,
+    //     new_topic_partition_replication_count: 3,
+    //     new_topic_partition_replication_readble: true,
+    // }
+    todo!()
 }

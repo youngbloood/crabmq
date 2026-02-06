@@ -1,10 +1,8 @@
 use super::Config as CooConfig;
 use super::partition;
 use super::raftx;
-use crate::ClientNode;
-use crate::broker_status::BrokerState;
-use crate::broker_status::BrokerStatus;
-use crate::conn::Conn;
+use crate::broker::Broker;
+use crate::client::Client;
 use crate::consumer_group::ConsumerGroupManager;
 use crate::event_bus::EventBus;
 use crate::partition::PartitionPolicy;
@@ -21,7 +19,8 @@ use log::warn;
 use partition::PartitionManager;
 use protobuf::Message as _;
 use raft::prelude::*;
-use raftx::RaftNode;
+use raftx::Node as RaftNode;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -38,6 +37,7 @@ use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
 use transporter::TransportMessage;
+use transporter::Transporter;
 
 #[derive(Clone)]
 pub struct Coordinator {
@@ -46,20 +46,16 @@ pub struct Coordinator {
 
     pub conf: CooConfig,
 
-    // raft_node 节点
-    raft_node: Arc<RaftNode<PartitionManager>>,
     // 向 raft_node 节点发送消息的通道
     raft_node_sender: mpsc::Sender<TransportMessage>,
 
-    cmd_tx: Sender<Command>,
-    cmd_rx: Arc<Receiver<Command>>,
+    // 连接 coo 的 brokers
+    // broker_id -> Broker
+    brokers: Arc<DashMap<u32, Broker>>,
 
-    // coo: leader 收集到的 broker 上报信息
-    // broker_id -> BrokerState
-    brokers: Arc<DashMap<u32, BrokerState>>,
-
-    // 链接 coo 的客户端
-    clients: Arc<DashMap<String, ClientNode>>,
+    // 连接 coo 的 clients
+    // client_addr -> Client
+    clients: Arc<DashMap<String, Client>>,
 
     // (Leadder)集群的 Topic-Partition 变更事件总线
     broker_event_bus: EventBus<PartitionEvent>,
@@ -87,20 +83,15 @@ impl Coordinator {
     pub fn new(
         raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中，为空时表示自己为当前集群的第一个节点 */
         conf: CooConfig,
-    ) -> Self {
+        raft_node_sender: mpsc::Sender<TransportMessage>,
+    ) -> Result<Self> {
+        conf.validate()?;
+
         let partition_manager =
             PartitionManager::new(PartitionPolicy::default(), conf.db_path.clone());
-        let (raft_node, raft_node_sender) = RaftNode::new(
-            conf.id,
-            conf.raft_addr.clone(),
-            conf.coo_addr.clone(),
-            partition_manager.clone(),
-        );
-        let raft_node = Arc::new(raft_node);
 
-        Self {
+        Ok(Self {
             raft_leader_addr,
-            raft_node: raft_node.clone(),
             raft_node_sender,
             brokers: Arc::new(DashMap::new()),
             clients: Arc::new(DashMap::new()),
@@ -110,11 +101,7 @@ impl Coordinator {
             consumer_group_manager: ConsumerGroupManager::new(partition_manager.all_topics.clone()),
             partition_manager,
             conf,
-            cmd_tx: todo!(),
-            cmd_rx: todo!(),
-            // broker_consumer_bus: todo!(),
-            // client_consumer_bus: todo!(),
-        }
+        })
     }
 
     pub async fn is_leader(&self) -> bool {
@@ -142,14 +129,14 @@ impl Coordinator {
     /// broker_pull
     ///
     /// 用于本地的 `broker` 向 coo 报道自身信息
-    pub fn apply_broker_report(&self, state: BrokerState) {
+    pub fn apply_broker_report(&self, state: BrokerNode) {
         let id = state.id;
         self.brokers
             .entry(id)
             .and_modify(|entry| {
                 // TODO: 修改值
                 *entry = state.clone();
-                *entry.status = BrokerStatus::Online;
+                *entry.status = Status::Online;
             })
             .or_insert(state.clone());
     }
@@ -159,6 +146,9 @@ impl Coordinator {
         if self.conf.coo_addr.is_empty() || self.coo_grpc_addr.is_empty() {
             return Err(anyhow!("must both have coo_addr and coo_grpc_addr"));
         }
+
+        self.raft_node.run().await;
+        self.t.start().await?;
         // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
         self.start_main_loop();
 
@@ -224,9 +214,71 @@ impl Coordinator {
         Ok(())
     }
 
-    // coo 模块所有循环
-    fn start_main_loop(&self) {
+    /// broker_pull
+    ///
+    /// 用于本地的 `broker` 获取 coo 中的 TopicList 最新数据
+    pub async fn broker_pull(
+        &self,
+        broker_id: u32,
+    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicPartitionResp, Status>>> {
+        let id = format!("local_broker_{}", broker_id);
+        let (_, mut recver) = self.broker_event_bus.subscribe(id.clone());
+        let bus = self.broker_event_bus.clone();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let init = self.qeury_topics(&[], &[broker_id], &[], &[]).await;
+        // 返回初始值
+
         let raft_node = self.raft_node.clone();
+        tokio::spawn(async move {
+            // 发送初始值
+            let _ = tx.send(Ok(init));
+
+            // 发送后续增量值
+            while let Some(part) = recver.recv().await {
+                match part {
+                    PartitionEvent::NotLeader {
+                        new_leader_id,
+                        new_coo_leader_addr,
+                        new_raft_leader_addr,
+                    } => {
+                        let _ = tx.send(Err(raft_node
+                            .get_not_leader_err_status(format!(
+                                "Leader changed to [{}:{}:{}]",
+                                new_leader_id, new_coo_leader_addr, new_raft_leader_addr
+                            ))
+                            .await));
+                        break;
+                    }
+
+                    PartitionEvent::NewTopic { partitions } => {
+                        if let Some(partitions) =
+                            filter_single_partition(partitions, &[], &[broker_id], &[], &[])
+                        {
+                            let res = convert_to_pull_resp(partitions, raft_node.get_term().await);
+                            let _ = tx.send(Ok(res));
+                        }
+                    }
+
+                    PartitionEvent::AddPartitions { added } => {
+                        if let Some(added) =
+                            filter_single_partition(added, &[], &[broker_id], &[], &[])
+                        {
+                            let _ = tx
+                                .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)));
+                        }
+                    }
+                }
+            }
+            bus.unsubscribe(&id);
+        });
+
+        Ok(rx)
+    }
+
+    // coo 模块所有循环
+    fn loop_check(self: Arc<Self>, raft_node: Arc<RaftNode<PartitionManager>>) {
+        let raft_node = raft_node.clone();
         let broker_event_bus = self.broker_event_bus.clone();
         let client_event_bus = self.client_event_bus.clone();
         let check_self_is_leader_interval = self.conf.check_self_is_leader_interval;
@@ -296,87 +348,25 @@ impl Coordinator {
         // });
     }
 
-    /// broker_pull
-    ///
-    /// 用于本地的 `broker` 获取 coo 中的 TopicList 最新数据
-    pub async fn broker_pull(
-        &self,
-        broker_id: u32,
-    ) -> Result<mpsc::UnboundedReceiver<Result<commonsvc::TopicPartitionResp, Status>>> {
-        let id = format!("local_broker_{}", broker_id);
-        let (_, mut recver) = self.broker_event_bus.subscribe(id.clone());
-        let bus = self.broker_event_bus.clone();
+    // pub(crate) async fn send_command(&self, cmd: Command) -> Result<()> {
+    //     self.cmd_tx.send(cmd).await?;
+    //     Ok(())
+    // }
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        let init = self.qeury_topics(&[], &[broker_id], &[], &[]).await;
-        // 返回初始值
+    // pub(crate) async fn get_command(&mut self) -> Result<Command> {
+    //     Ok(self.cmd_rx.recv().await?)
+    // }
 
-        let raft_node = self.raft_node.clone();
-        tokio::spawn(async move {
-            // 发送初始值
-            let _ = tx.send(Ok(init));
-
-            // 发送后续增量值
-            while let Some(part) = recver.recv().await {
-                match part {
-                    PartitionEvent::NotLeader {
-                        new_leader_id,
-                        new_coo_leader_addr,
-                        new_raft_leader_addr,
-                    } => {
-                        let _ = tx.send(Err(raft_node
-                            .get_not_leader_err_status(format!(
-                                "Leader changed to [{}:{}:{}]",
-                                new_leader_id, new_coo_leader_addr, new_raft_leader_addr
-                            ))
-                            .await));
-                        break;
-                    }
-
-                    PartitionEvent::NewTopic { partitions } => {
-                        if let Some(partitions) =
-                            filter_single_partition(partitions, &[], &[broker_id], &[], &[])
-                        {
-                            let res = convert_to_pull_resp(partitions, raft_node.get_term().await);
-                            let _ = tx.send(Ok(res));
-                        }
-                    }
-
-                    PartitionEvent::AddPartitions { added } => {
-                        if let Some(added) =
-                            filter_single_partition(added, &[], &[broker_id], &[], &[])
-                        {
-                            let _ = tx
-                                .send(Ok(convert_to_pull_resp(added, raft_node.get_term().await)));
-                        }
-                    }
-                }
-            }
-            bus.unsubscribe(&id);
-        });
-
-        Ok(rx)
-    }
-
-    pub(crate) async fn send_command(&self, cmd: Command) -> Result<()> {
-        self.cmd_tx.send(cmd).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn get_command(&mut self) -> Result<Command> {
-        Ok(self.cmd_rx.recv().await?)
-    }
-
-    pub(crate) async fn handle_command(&self, cmd: Command) {
-        loop {
-            let cmd = self.cmd_rx.recv().await;
-            if let Some(cmd) = cmd {
-                match cmd.index {
-                    protocol::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {}
-                }
-            }
-        }
-    }
+    // pub(crate) async fn handle_command(&self, cmd: Command) {
+    //     loop {
+    //         let cmd = self.cmd_rx.recv().await;
+    //         if let Some(cmd) = cmd {
+    //             match cmd.index {
+    //                 protocol::BROKER_COO_HEARTBEAT_REQUEST_INDEX => {}
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 impl Coordinator {
@@ -1206,6 +1196,8 @@ impl From<SinglePartition> for commonsvc::TopicPartitionResp {
 mod test {
     use std::path::Path;
 
+    use tokio::sync::mpsc;
+
     use crate::coo::Coordinator;
     use crate::default_config;
     #[tokio::test]
@@ -1216,7 +1208,8 @@ mod test {
         conf = conf
             .with_id(id)
             .with_db_path(Path::new("..").join(&db_path).join(format!("coo{}", id)));
-        let coo = Coordinator::new("".to_string(), conf);
+        let (tx, rx) = mpsc::channel(1);
+        let coo = Coordinator::new("".to_string(), conf, tx);
 
         let ts = coo
             .qeury_topics(&["mytopic1".to_string()], &[], &[], &[])

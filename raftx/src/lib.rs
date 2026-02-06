@@ -25,7 +25,6 @@ pub struct RaftConfig {
     pub write_timeout_milli: u64,
     pub protocol: TransportProtocol,
     pub meta: HashMap<String, String>,
-    pub db_conf: DbConfig,
 
     pub election_tick: u64,
     pub heartbeat_tick: u64,

@@ -17,11 +17,11 @@ const ENTRY_PREFIX: &[u8] = b"entry:";
 const META_FIRST_INDEX: &[u8] = b"meta_first";
 const META_LAST_INDEX: &[u8] = b"meta_last";
 
-#[derive(Clone)]
-pub struct DbConfig {
-    pub id: u64,
-    pub db_path: String,
-}
+// #[derive(Clone)]
+// pub struct DbConfig {
+//     pub id: u64,
+//     pub db_path: String,
+// }
 
 #[derive(Debug, Clone)]
 pub struct SledStorage {

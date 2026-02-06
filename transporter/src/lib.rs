@@ -36,6 +36,20 @@ pub struct Config {
     pub outgoing_max_connections: usize,
 }
 
+impl Config {
+    fn fix(&mut self) {
+        if self.addr.is_empty() {
+            self.addr = "localhost:4343".to_string();
+        }
+        if self.incoming_max_connections == 0 {
+            self.incoming_max_connections = 100;
+        }
+        if self.outgoing_max_connections == 0 {
+            self.outgoing_max_connections = 100;
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -49,10 +63,33 @@ impl Default for Config {
 
 #[derive(Clone, Copy)]
 pub enum TransportProtocol {
-    TCP,
-    UDP,
-    QUIC,
-    KCP,
+    TCP = "tcp",
+    UDP = "udp",
+    QUIC = "quic",
+    KCP = "kcp",
+}
+
+impl From<&str> for TransportProtocol {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "tcp" => TransportProtocol::TCP,
+            "udp" => TransportProtocol::UDP,
+            "quic" => TransportProtocol::QUIC,
+            "kcp" => TransportProtocol::KCP,
+            _ => TransportProtocol::TCP,
+        }
+    }
+}
+
+impl To<&str> for TransportProtocol {
+    fn to(&self) -> &str {
+        match self {
+            TransportProtocol::TCP => "tcp",
+            TransportProtocol::UDP => "udp",
+            TransportProtocol::QUIC => "quic",
+            TransportProtocol::KCP => "kcp",
+        }
+    }
 }
 
 #[derive(Clone)]

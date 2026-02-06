@@ -1,4 +1,4 @@
-use crate::{Config as SelfConfig, mailbox::Mailbox, peer::PeerState, storage::SledStorage};
+use crate::{Config as RaftxConfig, mailbox::Mailbox, peer::PeerState, storage::SledStorage};
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
@@ -22,7 +22,7 @@ use transporter::{TransportMessage, Transporter};
 pub struct Node {
     pub id: u32,
 
-    conf: Arc<SelfConfig>,
+    conf: Arc<RaftxConfig>,
     // raft node
     pub raw_node: Arc<Mutex<RawNode<SledStorage>>>,
 

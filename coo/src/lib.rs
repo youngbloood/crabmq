@@ -1,4 +1,5 @@
-mod broker_status;
+mod broker;
+mod client;
 pub mod config;
 mod conn;
 mod consumer_group;
@@ -15,8 +16,6 @@ use grpcx::{brokercoosvc, commonsvc::TopicPartitionMeta};
 struct BrokerNode {
     state: brokercoosvc::BrokerState,
 }
-
-struct ClientNode {}
 
 pub trait Filter {}
 

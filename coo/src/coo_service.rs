@@ -1,66 +1,67 @@
+use tokio::sync::mpsc;
+
 use crate::coo::Coordinator;
 
 pub struct CoordinatorService {
-    pub coo_addr: String,
+    // raft_node 节点
+    raft_node: Arc<RaftNode<PartitionManager>>,
 
-    coo: Coordinator,
+    t: Transporter,
+
+    coo: Arc<Coordinator>,
+
+    shutdown: CancelToken,
 }
 
 impl CoordinatorService {
+    pub fn new(
+        raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中，为空时表示自己为当前集群的第一个节点 */
+        conf: CooConfig,
+    ) -> Result<Self> {
+        conf.validate()?;
+
+        let (raft_node, raft_node_sender) = RaftNode::new(conf.raftx_config);
+        let raft_node = Arc::new(raft_node);
+        Ok(Self {
+            raft_node,
+            t: Transporter::new(transporter::Config {
+                addr: conf.coo.addr.clone(),
+                protocol: conf.coo.protocol.clone(),
+                incoming_max_connections: conf.coo.incoming_max_connections,
+                outgoing_max_connections: conf.coo.outgoing_max_connections,
+            })?,
+            coo: Coordinator::new(raft_leader_addr, conf, raft_node_sender),
+            shutdown: todo!(),
+        })
+    }
+
     /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
-        if self.coo_addr.is_empty() || self.coo_grpc_addr.is_empty() {
-            return Err(anyhow!("must both have coo_addr and coo_grpc_addr"));
-        }
-        // 定期检查本节点从: 主 -> 非主，并发送 NotLeader 消息，用户通知 broker 和 client 变更链接逻辑
-        // self.start_main_loop();
+        let (tx, rx) = mpsc::unbounded_channel();
 
-        self.loop_handle_command();
-
-        let handle = tokio::net::TcpListener::bind(&self.coo_addr)
-            .await
-            .map_err(|e| anyhow!("Coo bind addr {} err: {:?}", &self.conf.coo_addr, e))?;
-
-        loop {
-            let h = handle.accept().await;
-            if let Ok((stream, addr)) = h {
-                let (rh, wh) = stream.into_split();
-                let _addr = addr.ip().to_string().clone();
-                self.conns.insert(addr.ip().to_string(), Conn::new(wh));
-                let conns = self.conns.clone();
-                let cmd_tx = self.cmd_tx.clone();
-                let coo = self.coo.clone();
-
-                tokio::spawn(async move {
-                    let mut head = [0; 5];
-                    loop {
-                        match rh.read_exact(&mut head).await {
-                            Ok(size) => {
-                                if size != head.len() {
-                                    conns.remove(_addr);
-                                    break;
-                                }
-
-                                // 根据 类型和长度解析，然后
-
-                                coo.send_command(Command {
-                                    addr: (),
-                                    index: (),
-                                    endecoder: (),
-                                })
-                                .await?;
-                            }
-                            Err(e) => todo!(),
-                        }
-                    }
-                });
-            }
-        }
-
+        self.raft_node
+            .run(async move |m| {
+                if let Err(e) = tx.send(m).await {
+                    error!("RaftNode upload message error: {}", e);
+                }
+            })
+            .await?;
+        self.t.start().await?;
+        self.loop_handle_command(rx);
         Ok(())
     }
 
-    fn loop_handle_command(&self) {
+    fn loop_handle_command(&self, rx: mpsc::UnboundedReceiver<RaftMessage>) {
+        select! {
+            Some(msg) = rx.recv() => {
+                let coo = self.coo.clone();
+                tokio::spawn(async move {
+                    coo.handle_raft_message(msg).await;
+                });
+            }
+
+
+        }
         let mut coo = self.coo.clone();
         tokio::spawn(async move {
             loop {
