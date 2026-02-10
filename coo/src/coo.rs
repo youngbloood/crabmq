@@ -38,6 +38,33 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, transport::Server};
 use transporter::TransportMessage;
 use transporter::Transporter;
+use crate::{
+    BrokerNode, Filter,
+    client::Client,
+    coo::config::CooConfig,
+    event_bus::EventBus,
+    partition::{PartitionManager, TopicPartitionMeta, SinglePartition},
+    raftx::{ProposeData, TopicPartitionData},
+};
+use anyhow::{Result, anyhow};
+use bincode::config;
+use dashmap::DashMap;
+use grpcx::{
+    brokercoosvc::BrokerState,
+    smart_client::SmartClient,
+};
+use raftx::Node as RaftNode;
+use std::{ops::Deref, sync::Arc, time::Duration};
+use tokio::sync::mpsc;
+use tonic::{Request, Response, Status};
+use transporter::{TransportMessage, Transporter};
+use protocol::{CooRaftProposeMessage, CooRaftProposeType, EnDecoder};
+use prost::Message;
+
+// use crate::raftx::Callback; // Use coo::raftx::Callback? No, coo::raftx re-exports? No.
+// coo/src/raftx.rs: use raftx::Callback; ... pub callback: Option<Callback>
+// So uses raftx::Callback.
+use raftx::Callback;
 
 #[derive(Clone)]
 pub struct Coordinator {
@@ -48,6 +75,8 @@ pub struct Coordinator {
 
     // 向 raft_node 节点发送消息的通道
     raft_node_sender: mpsc::Sender<TransportMessage>,
+
+    raft_node: Arc<RaftNode<PartitionManager>>,
 
     // 连接 coo 的 brokers
     // broker_id -> Broker
@@ -65,7 +94,7 @@ pub struct Coordinator {
     peer_change_bus: EventBus<Result<CooListResp, Status>>,
 
     // 分区管理
-    partition_manager: PartitionManager,
+    partition_manager: Arc<PartitionManager>,
 
     // 消费者组管理器
     consumer_group_manager: ConsumerGroupManager,
@@ -81,26 +110,28 @@ impl Deref for Coordinator {
 
 impl Coordinator {
     pub fn new(
-        raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中，为空时表示自己为当前集群的第一个节点 */
         conf: CooConfig,
         raft_node_sender: mpsc::Sender<TransportMessage>,
+        raft_node: Arc<RaftNode<PartitionManager>>,
+        partition_manager: Arc<PartitionManager>,
     ) -> Result<Self> {
         conf.validate()?;
 
-        let partition_manager =
-            PartitionManager::new(PartitionPolicy::default(), conf.db_path.clone());
+        let brokers = Arc::new(DashMap::new());
+        let consumer_group_manager = ConsumerGroupManager::new(partition_manager.all_topics.clone());
 
         Ok(Self {
-            raft_leader_addr,
+            raft_leader_addr: "".to_string(),
+            conf,
             raft_node_sender,
-            brokers: Arc::new(DashMap::new()),
+            raft_node,
+            brokers: brokers.clone(),
             clients: Arc::new(DashMap::new()),
             broker_event_bus: EventBus::new(conf.event_bus_buffer_size),
             client_event_bus: EventBus::new(conf.event_bus_buffer_size),
             peer_change_bus: EventBus::new(conf.event_bus_buffer_size),
-            consumer_group_manager: ConsumerGroupManager::new(partition_manager.all_topics.clone()),
             partition_manager,
-            conf,
+            consumer_group_manager,
         })
     }
 
@@ -402,17 +433,34 @@ impl Coordinator {
 
     async fn propose(
         &self,
-        partitions: &SinglePartition,
+        partitions: SinglePartition,
         callback: Option<Callback>,
     ) -> Result<()> {
-        self.raft_node_sender
-            .send(AllMessageType::RaftPropose(ProposeData::TopicPartition(
-                TopicPartitionData {
-                    topic: partitions.clone(),
-                    callback,
-                },
-            )))
-            .await?;
+        let unique_id = nanoid::nanoid!();
+        if let Some(cb) = callback.clone() {
+            self.raft_node.register_callback(unique_id.clone(), cb);
+        }
+
+        let propose_data = ProposeData::TopicPartition(TopicPartitionData {
+            topic: partitions,
+            callback,
+        });
+
+        let data = bincode::encode_to_vec(propose_data, config::standard())?;
+        
+        let msg = CooRaftProposeMessage {
+            index: CooRaftProposeType::ProposeTypePartition as i32,
+            unique_id,
+            message: Bytes::from(data),
+        };
+
+        let transport_message = TransportMessage {
+            index: protocol::COO_RAFT_PROPOSE_MESSAGE_INDEX,
+            remote_addr: "".to_string(),
+            message: Arc::new(Box::new(msg)),
+        };
+
+        self.raft_node_sender.send(transport_message).await?;
         Ok(())
     }
 

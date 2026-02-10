@@ -1,0 +1,110 @@
+syntax = "proto3";
+package crabmq.protocol.v1;
+
+import "common.proto";
+
+message ClientCooAuthRequest {
+    string client_id = 1;
+    string secret = 2;
+}
+
+message ClientCooAuthResponse {
+    uint32 code = 1;
+    string message = 2;
+    string token = 3;
+}
+
+message ClientCooHeartbeatRequest {
+    string client_id = 1;
+    string token = 2;
+}
+
+// Coo 返回给 Client 的心跳响应
+message CooClientHeartbeatResponse {
+    string client_id = 1;
+    bool success = 2;
+    // 额外消息索引
+    uint32 ext_msg_index = 3;
+    // 额外消息内容
+    bytes ext_msg = 4;
+}
+
+// Client 向 Coo 发起 NewTopic 请求
+message ClientCooNewTopicRequest {
+    // 请求创建的 topic 名称
+    string topic = 1;
+    // 创建 topic 时的分区因子，仅有两种类型，数字类型和类似“100n”类型。后者表示当前的broker每个分配100个。
+    string partition_factor = 2;
+    // 每个分区的副本数
+    // <0: 不创建分区副本
+    // =0: 按coo配置的来创建分区副本数量
+    // >0: 创建指定分区副本数量
+    int32 partition_replication_count = 3;
+    // 副本分区是否可读
+    bool partition_replication_readble = 4;
+    // 每个broker最多可存在多少个分区，超过这个数量后不再分配分区到这个broker上
+    uint32 broker_partition_replication_limit = 5;
+    // 创建的超时时间，单位: s
+    uint64 timeout = 6;
+}
+
+// Coo 响应给 Client : NewTopic的结果
+message CooClientNewTopicResponse {
+    uint32 code = 1;
+    string message = 2;
+    optional TopicInfo topic = 3;
+}
+
+message ClientCooAddPartitionRequest {
+    // 需要添加分区的 topic 名称
+    string topic = 1;
+    // 需要添加的分区数量
+    uint32 partition_count = 2;
+    // 负载均衡的 key
+    string key = 3;
+    // 添加分区的超时时间，单位: s
+    uint64 timeout = 4;
+}
+
+message CooClientAddPartitionResponse {
+    uint32 code = 1;
+    string message = 2;
+    optional TopicInfo topic = 3;
+}
+
+message ClientCooSubTopic {
+    string topic = 1;
+    // 起始消费位移（1表示最新，0表示从头开始消费）
+    // 仅每个组中的第一个消费者的 offset 设置有效
+    uint32 head_offset = 2; // u8 in rust, promoted to uint32
+}
+
+message ClientCooSubOption {
+    repeated ClientCooSubTopic sub_topics = 1;
+    bool auto_commit = 2;
+    // 设置滑动窗口大小，用于 broker 中单个 consumer 限制 read_ptr 与 commit_ptr 之间的窗口大小，防止consumer过度占用资源
+    uint64 consumer_slide_window_size = 3;
+}
+
+// Client 向 Coo: 发起订阅请求
+message ClientCooSubRequest {
+    uint32 group_id = 1;
+    optional ClientCooSubOption option = 2;
+}
+
+message CooClientSubResponse {
+    uint32 code = 1;
+    string message = 2;
+    repeated TopicInfo topics = 3;
+}
+
+message ClientCooCommitRequest {
+    string topic = 1;
+    SegmentOffset pos = 2;
+}
+
+message CooClientCommitResponse {
+    string topic = 1;
+    SegmentOffset pos = 2;
+    uint32 code = 3; // u16 -> uint32
+}

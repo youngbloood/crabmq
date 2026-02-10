@@ -1,6 +1,5 @@
 use crate::{
-    ProtocolTransporterManager, ProtocolTransporterWriter, TransportMessage,
-    TransporterWriter,
+    ProtocolTransporterManager, ProtocolTransporterWriter, TransportMessage, TransporterWriter,
     err::{ErrorCode, TransporterError},
     handle_message,
 };
@@ -307,15 +306,19 @@ pub(crate) struct TcpReader {
 
 impl TcpReader {
     async fn loop_handle(mut self) {
-        let mut head = [0_u8; 5];
+        // head[0]: version
+        // head[1..3]: index
+        // head[3..7]: body length
+        let mut head = [0_u8; 7];
         loop {
             select! {
                 head_res = self.r.read_exact(&mut head) => {
                     match head_res {
-                        Ok(n) if n ==0 || n != 5 => break, // 连接关闭
+                        Ok(n) if n ==0 || n != 7 => break, // 连接关闭
                         Ok(_) => {
-                            let index = head[0];
-                            let length = u32::from_be_bytes(head[1..5].try_into().unwrap());
+                            let version = head[0];
+                            let index = u16::from_be_bytes(head[1..3].try_into().unwrap());
+                            let length = u32::from_be_bytes(head[3..7].try_into().unwrap());
 
                             let mut body = vec![0_u8; length as usize];
 
@@ -324,7 +327,7 @@ impl TcpReader {
                                     match body_res {
                                         Ok(n) if n == 0 || n != length as usize => break, // 连接关闭
                                         Ok(_n) =>  {
-                                            if let Err(e) = handle_message(self.tx.clone(), index, &body, self.remote_addr.clone()) {
+                                            if let Err(e) = handle_message(self.tx.clone(),version, index, &body, self.remote_addr.clone()) {
                                                 error!("{}", e);
                                                 break;
                                             }

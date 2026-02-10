@@ -1,10 +1,13 @@
-use crate::{Config as RaftxConfig, mailbox::Mailbox, peer::PeerState, storage::SledStorage};
+use crate::{
+    Config as RaftxConfig, StateApply, mailbox::Mailbox, peer::PeerState, storage::SledStorage,
+};
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
-use protobuf::Message as _;
+use prost::Message as ProstMessage; // Alias prost::Message
+use protobuf::Message as ProtobufMessage; // Alias protobuf::Message
 use protocol::{CooRaftOriginMessage, EnDecoder};
 use raft::{
     Config, RawNode, StateRole,
@@ -18,8 +21,7 @@ use tokio::{
 };
 use transporter::{TransportMessage, Transporter};
 
-#[derive(Clone)]
-pub struct Node {
+pub struct Node<S: StateApply> {
     pub id: u32,
 
     conf: Arc<RaftxConfig>,
@@ -34,17 +36,37 @@ pub struct Node {
     // 集群中其他节点的信息(包含自身)
     peer: Arc<DashMap<u32, Arc<PeerState>>>,
 
-    // db: P, // Key-value store
-    callbacks: Arc<DashMap<String, Callback>>,
+    // callbacks
+    pub callbacks: Arc<DashMap<String, Callback>>,
+
+    // finite state machine
+    fsm: Arc<S>,
 
     trans: Transporter,
+}
+
+impl<S: StateApply> Clone for Node<S> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            conf: self.conf.clone(),
+            raw_node: self.raw_node.clone(),
+            my_mailbox_sender: self.my_mailbox_sender.clone(),
+            my_mailbox: self.my_mailbox.clone(),
+            mailboxes: self.mailboxes.clone(),
+            peer: self.peer.clone(),
+            callbacks: self.callbacks.clone(),
+            fsm: self.fsm.clone(),
+            trans: self.trans.clone(),
+        }
+    }
 }
 
 pub type Callback = mpsc::Sender<Result<String>>;
 
 // impl self functions
-impl Node {
-    pub fn new(conf: SelfConfig) -> (Self, mpsc::Sender<TransportMessage>) {
+impl<S: StateApply> Node<S> {
+    pub fn new(conf: RaftxConfig, fsm: S) -> (Self, mpsc::Sender<TransportMessage>) {
         let config = Config {
             id: conf.id as _,
             election_tick: 10,
@@ -82,6 +104,7 @@ impl Node {
             trans: Transporter::new(transporter::Config::default()),
             conf: Arc::new(conf),
             callbacks: Arc::new(DashMap::new()),
+            fsm: Arc::new(fsm),
         };
         node.peer.insert(
             node.conf.id.into(),
@@ -100,19 +123,23 @@ impl Node {
         raw_node.raft.state == raft::StateRole::Leader
     }
 
+    pub fn register_callback(&self, unique_id: String, cb: Callback) {
+        self.callbacks.insert(unique_id, cb);
+    }
+
     async fn handle_meta_req(&self, remote_addr: &str, req: &protocol::CooRaftGetMetaRequest) {
         if req.id == self.conf.id {
             let resp = protocol::ErrorResponse {
-                code: protocol::ErrorCode::RaftIDConflict,
+                code: protocol::ErrorCode::RaftIdConflict as i32,
                 message: "".to_string(),
-                meta: None,
+                meta: HashMap::new(),
             };
-            let t = TransportMessage {
-                index: 1,
-                remote_addr: remote_addr.clone().to_string(),
-                message: (Box::new(resp) as Box<dyn EnDecoder>).into(),
-            };
-            self.trans.send(&t).await;
+            let t = TransportMessage::new_v1(
+                1,
+                remote_addr.clone().to_string(),
+                (Box::new(resp) as Box<dyn EnDecoder>).into(),
+            );
+            let _ = self.trans.send(&t).await;
             self.trans.close(remote_addr).await;
             return;
         }
@@ -125,52 +152,47 @@ impl Node {
             raft_addr: self.conf.raft.addr.clone(),
             meta: self.conf.raft.meta.clone(),
         };
-        let t = TransportMessage {
-            index: 1,
-            remote_addr: remote_addr.clone().to_string(),
-            message: (Box::new(resp) as Box<dyn EnDecoder>).into(),
-        };
-        self.trans.send(&t).await;
+        let t = TransportMessage::new_v1(
+            1,
+            remote_addr.clone().to_string(),
+            (Box::new(resp) as Box<dyn EnDecoder>).into(),
+        );
+        let _ = self.trans.send(&t).await;
     }
 
     async fn handle_conf_change(&self, req: &protocol::CooRaftConfChangeRequest) {
-        match req.version {
-            protocol::ConfChangeVersion::V1 => {
-                let mut cc = ConfChange::new();
-                cc.merge_from_bytes(&req.message);
-                let mut raw_node = self.raw_node.lock().await;
-                raw_node.propose_conf_change(vec![], cc).unwrap();
-            }
-
-            protocol::ConfChangeVersion::V2 => {
-                let mut ccv2 = ConfChangeV2::default();
-                ccv2.merge_from_bytes(&req.message).unwrap();
-                let mut raw_node = self.raw_node.lock().await;
-                raw_node.propose_conf_change(vec![], ccv2).unwrap();
-            }
+        if req.version == protocol::ConfChangeVersion::V1 as i32 {
+            let mut cc = ConfChange::new();
+            let _ = cc.merge_from_bytes(&req.message);
+            let mut raw_node = self.raw_node.lock().await;
+            raw_node.propose_conf_change(vec![], cc).unwrap();
+        } else if req.version == protocol::ConfChangeVersion::V2 as i32 {
+            let mut ccv2 = ConfChangeV2::default();
+            ccv2.merge_from_bytes(&req.message).unwrap();
+            let mut raw_node = self.raw_node.lock().await;
+            raw_node.propose_conf_change(vec![], ccv2).unwrap();
         }
     }
 
     async fn handle_raft_message(&self, req: &protocol::CooRaftOriginMessage) {
         let mut msg = Message::new();
-        msg.merge_from_bytes(&req.message);
-        self.raw_node.lock().await.step(msg);
+        let _ = msg.merge_from_bytes(&req.message);
+        let _ = self.raw_node.lock().await.step(msg);
     }
 
     async fn handle_propose_message(&self, req: &protocol::CooRaftProposeMessage) {
-        match req.index {
-            protocol::CooRaftProposeType::Partition => {
-                self.raw_node
-                    .lock()
-                    .await
-                    .propose(vec![], req.message.to_vec());
-            }
-            protocol::CooRaftProposeType::ConsumerGroupOffset => {
-                self.raw_node
-                    .lock()
-                    .await
-                    .propose(vec![], req.message.to_vec());
-            }
+        if req.index == protocol::CooRaftProposeType::ProposeTypePartition as i32 {
+            let _ = self
+                .raw_node
+                .lock()
+                .await
+                .propose(vec![], req.encode_to_vec());
+        } else if req.index == protocol::CooRaftProposeType::ProposeTypeConsumerGroupOffset as i32 {
+            let _ = self
+                .raw_node
+                .lock()
+                .await
+                .propose(vec![], req.encode_to_vec());
         }
     }
 
@@ -260,7 +282,7 @@ impl Node {
 }
 
 // impl raft functions
-impl Node {
+impl<S: StateApply> Node<S> {
     pub async fn run<F>(&self, hooker: F) -> Result<()>
     where
         F: AsyncFn(TransportMessage),
@@ -272,11 +294,11 @@ impl Node {
         self.trans.start().await?;
 
         if self.is_leader().await && !is_initial_conf_committed {
-            self.commit_self_conf_change().await;
+            let _ = self.commit_self_conf_change().await;
             is_initial_conf_committed = true;
         }
 
-        let node: Node = self.clone();
+        let node: Node<S> = self.clone();
         let mut trans = self.trans.clone();
 
         let inner_index = [
@@ -440,11 +462,11 @@ impl Node {
                     message: msg.write_to_bytes().unwrap(),
                 };
 
-                let t = TransportMessage {
-                    index: protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX,
-                    remote_addr: "".to_string(),
-                    message: (Box::new(msg) as Box<dyn EnDecoder>).into(),
-                };
+                let t = TransportMessage::new_v1(
+                    protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX,
+                    "".to_string(),
+                    (Box::new(msg) as Box<dyn EnDecoder>).into(),
+                );
 
                 if let Err(e) = sender.send(t).await {
                     error!(
@@ -475,22 +497,28 @@ impl Node {
                 EntryType::EntryNormal => {
                     let data = &entry.data;
 
-                    // let part: SinglePartition =
-                    //     bincode::serde::decode_from_slice(data, config::standard())
-                    //         .unwrap()
-                    //         .0;
-                    // let unique_id = part.unique_id.clone();
-                    // self.db.apply(part);
-                    // // quorum 确认机制
-                    // if let Some((unique_id, cb)) = self.callbacks.remove(&unique_id) {
-                    //     let _ = cb.send(Ok(unique_id)).await;
-                    // }
+                    match protocol::CooRaftProposeMessage::decode(&data[..]) {
+                        Ok(req) => {
+                            if let Err(e) = self.fsm.apply(&req.message) {
+                                error!("RAFTX[{}]: fsm apply failed: {:?}", self.id, e);
+                            }
+                            if let Some((_, cb)) = self.callbacks.remove(&req.unique_id) {
+                                let _ = cb.send(Ok(req.unique_id)).await;
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "RAFTX[{}]: decode CooRaftProposeMessage failed: {:?}",
+                                self.id, e
+                            );
+                        }
+                    }
                 }
 
                 EntryType::EntryConfChange => {
                     debug!("RAFTX[{}]: 收到 EntryConfChange", self.id);
                     let mut cc = ConfChange::default();
-                    cc.merge_from_bytes(&entry.data).unwrap();
+                    let _ = cc.merge_from_bytes(&entry.data).unwrap();
 
                     let mut raw_node = self.raw_node.lock().await;
                     let cs = raw_node.apply_conf_change(&cc).unwrap();

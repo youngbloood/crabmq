@@ -1,0 +1,50 @@
+syntax = "proto3";
+package crabmq.protocol.v1;
+
+message Topics {
+    uint64 term = 1;
+    repeated TopicInfo topics = 2;
+}
+
+message TopicInfo {
+    uint64 term = 1;
+    // 主题名称
+    string topic = 2;
+    // 主题的分区集群信息
+    map<uint32, PartitionCluster> partitions_cluster = 3;
+}
+
+message PartitionCluster {
+    // 集群 ID
+    uint32 cluster_id = 1;
+    // Leader 分区 ID
+    uint32 leader_partition_id = 2;
+    // Follower 分区 ID 列表
+    repeated uint32 follow_partition_ids = 3;
+    // 分区信息列表
+    map<uint32, PartitionInfo> partitions = 4;
+}
+
+message PartitionInfo {
+    // 该分区 ID
+    uint32 id = 1;
+    // 该分区所属的集群 ID
+    uint32 cluster_id = 2;
+    // 该分区所在的 Broker ID
+    uint32 broker_id = 3;
+    // 该分区所在的 Broker 地址
+    string broker_addr = 4;
+    // 该分区的高水位偏移量
+    SegmentOffset hw = 5;
+    // 该分区是否为 Leader
+    bool is_leader = 6;
+    // 该分区的最新偏移量
+    SegmentOffset log_end_offset = 7;
+    // 该分区是否可读
+    bool readble = 8;
+}
+
+message SegmentOffset {
+    uint32 segment_id = 1;
+    uint64 offset = 2;
+}

@@ -1,0 +1,4 @@
+syntax = "proto3";
+package crabmq.protocol.v1;
+
+// Currently empty in Rust source, creating placeholder file.

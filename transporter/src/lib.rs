@@ -13,16 +13,27 @@ use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 #[derive(Clone)]
 pub struct TransportMessage {
-    pub index: u8,
+    pub version: u8,
+    pub index: u16,
     pub remote_addr: String,
     pub message: Arc<Box<dyn EnDecoder>>,
 }
 
 impl TransportMessage {
+    pub fn new_v1(index: u16, remote_addr: String, message: Box<dyn EnDecoder>) -> Self {
+        TransportMessage {
+            version: protocol::VERSION1,
+            index,
+            remote_addr,
+            message: Arc::new(message),
+        }
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = vec![self.index];
+        let mut bytes = vec![self.version];
+        bytes.extend_from_slice(self.index.to_be_bytes().as_slice());
         let mut message_bytes = self.message.encode()?;
-        bytes.extend_from_slice(message_bytes.len().to_be_bytes().as_slice());
+        bytes.extend_from_slice((message_bytes.len() as u32).to_be_bytes().as_slice());
         bytes.extend_from_slice(&mut message_bytes);
         Ok(bytes)
     }
@@ -61,12 +72,12 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum TransportProtocol {
-    TCP = "tcp",
-    UDP = "udp",
-    QUIC = "quic",
-    KCP = "kcp",
+    TCP,
+    UDP,
+    QUIC,
+    KCP,
 }
 
 impl From<&str> for TransportProtocol {
@@ -81,8 +92,8 @@ impl From<&str> for TransportProtocol {
     }
 }
 
-impl To<&str> for TransportProtocol {
-    fn to(&self) -> &str {
+impl TransportProtocol {
+    pub fn as_str(&self) -> &str {
         match self {
             TransportProtocol::TCP => "tcp",
             TransportProtocol::UDP => "udp",
@@ -279,13 +290,15 @@ impl TransporterWriter {
 
 fn handle_message(
     tx: UnboundedSender<TransportMessage>,
-    index: u8,
+    version: u8,
+    index: u16,
     body: &[u8],
     remote_addr: String,
 ) -> Result<()> {
-    let message = decode_to_message(index, body, remote_addr).map_err(|e| -> anyhow::Error {
-        TransporterError::new(ErrorCode::DecodeError, e.to_string()).into()
-    })?;
+    let message =
+        decode_to_message(version, index, body, remote_addr).map_err(|e| -> anyhow::Error {
+            TransporterError::new(ErrorCode::DecodeError, e.to_string()).into()
+        })?;
 
     tx.send(message).map_err(|e| -> anyhow::Error {
         TransporterError::new(ErrorCode::SendError, e.to_string()).into()
@@ -294,11 +307,17 @@ fn handle_message(
     Ok(())
 }
 
-fn decode_to_message(index: u8, body: &[u8], remote_addr: String) -> Result<TransportMessage> {
+fn decode_to_message(
+    version: u8,
+    index: u16,
+    body: &[u8],
+    remote_addr: String,
+) -> Result<TransportMessage> {
     let message = protocol::decode_message(index, body).map_err(|e| -> anyhow::Error {
         TransporterError::new(ErrorCode::UnknownMessageTypeError, e.to_string()).into()
     })?;
     Ok(TransportMessage {
+        version,
         index,
         remote_addr,
         message: Arc::new(message),

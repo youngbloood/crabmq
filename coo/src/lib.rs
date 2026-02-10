@@ -7,6 +7,7 @@ pub mod coo;
 mod coo_service;
 mod event_bus;
 mod partition;
+pub mod raftx;
 
 // mod topic_meta;
 use std::collections::HashMap;

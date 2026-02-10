@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use transporter::{Transporter, TransporterWriter};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Client {
     // base info
     pub id: u64,

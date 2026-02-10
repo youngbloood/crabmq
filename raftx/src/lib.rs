@@ -3,11 +3,17 @@ mod node;
 mod peer;
 mod storage;
 
-use crate::storage::DbConfig;
+
 use std::collections::HashMap;
 use transporter::TransportProtocol;
 
 pub use node::Node;
+pub use node::Callback;
+use anyhow::Result;
+
+pub trait StateApply: Send + Sync + 'static {
+    fn apply(&self, message: &[u8]) -> Result<()>;
+}
 
 pub struct Config {
     // 节点 id

@@ -1,37 +1,42 @@
 use tokio::sync::mpsc;
 
 use crate::coo::Coordinator;
+use crate::coo::config::CooConfig;
+use crate::partition::{PartitionManager, PartitionPolicy};
+use anyhow::Result;
+use raftx::Node as RaftNode;
+use std::sync::Arc;
+use transporter::{TransportMessage, Transporter};
 
 pub struct CoordinatorService {
-    // raft_node 节点
-    raft_node: Arc<RaftNode<PartitionManager>>,
-
-    t: Transporter,
-
     coo: Arc<Coordinator>,
-
-    shutdown: CancelToken,
+    trans: Transporter,
+    raft_node: Arc<RaftNode<PartitionManager>>,
 }
 
 impl CoordinatorService {
-    pub fn new(
-        raft_leader_addr: String, /* 用于后续的 raft 节点 join 之前的集群中，为空时表示自己为当前集群的第一个节点 */
-        conf: CooConfig,
-    ) -> Result<Self> {
-        conf.validate()?;
+    pub fn new(conf: CooConfig) -> Result<Self> {
+        let partition_manager = Arc::new(PartitionManager::new(
+            PartitionPolicy::default(),
+            conf.db_path.clone(),
+        ));
 
-        let (raft_node, raft_node_sender) = RaftNode::new(conf.raftx_config);
+        let (raft_node, raft_node_sender) =
+            RaftNode::new(conf.raftx_config.clone(), partition_manager.clone());
         let raft_node = Arc::new(raft_node);
+
+        let trans = Transporter::new(conf.transporter_config.clone());
+        let coo = Arc::new(Coordinator::new(
+            conf,
+            raft_node_sender,
+            raft_node.clone(),
+            partition_manager,
+        )?);
+
         Ok(Self {
+            coo,
+            trans,
             raft_node,
-            t: Transporter::new(transporter::Config {
-                addr: conf.coo.addr.clone(),
-                protocol: conf.coo.protocol.clone(),
-                incoming_max_connections: conf.coo.incoming_max_connections,
-                outgoing_max_connections: conf.coo.outgoing_max_connections,
-            })?,
-            coo: Coordinator::new(raft_leader_addr, conf, raft_node_sender),
-            shutdown: todo!(),
         })
     }
 

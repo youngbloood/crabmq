@@ -1,0 +1,44 @@
+syntax = "proto3";
+package crabmq.protocol.v1;
+
+message CooRaftGetMetaRequest {
+    uint32 id = 1;
+    string addr = 2;
+    map<string, string> meta = 3;
+}
+
+message CooRaftGetMetaResponse {
+    uint32 id = 1;
+    string raft_addr = 2;
+    map<string, string> meta = 3;
+}
+
+enum ConfChangeVersion {
+    CONF_CHANGE_VERSION_V1 = 0;
+    CONF_CHANGE_VERSION_V2 = 1;
+}
+
+// 支持 ConfChange 和 ConfChangeV2
+message CooRaftConfChangeRequest {
+    ConfChangeVersion version = 1;
+    bytes message = 2;
+}
+
+// raft 原生信息，对应 raft::eraftpb::Message
+message CooRaftOriginMessage {
+    bytes message = 1;
+}
+
+enum CooRaftProposeType {
+    // 提交的分区信息
+    PROPOSE_TYPE_PARTITION = 0;
+    // 提交的消费者组的消费偏移量
+    PROPOSE_TYPE_CONSUMER_GROUP_OFFSET = 1;
+}
+
+// 向 raft 集群中提案的信息
+message CooRaftProposeMessage {
+    CooRaftProposeType index = 1;
+    bytes message = 2;
+    string unique_id = 3;
+}

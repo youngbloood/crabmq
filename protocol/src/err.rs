@@ -1,39 +1,11 @@
-use crate::{Decoder, EnDecoder, Encoder};
-use anyhow::Result;
-use std::{any::Any, collections::HashMap};
+use std::any::Any;
 
-#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
-pub enum ErrorCode {
-    // raft id conflict
-    RaftIDConflict = 1,
-    // broker id conflict
-    BrokerIDConflict = 2,
-}
+use crate::EnDecoder;
 
-// ErrorResponse contains all error code and message and metadata
-#[derive(Debug, bincode::Encode, bincode::Decode, Clone)]
-pub struct ErrorResponse {
-    pub code: ErrorCode,
-    pub message: String,
-    pub meta: Option<HashMap<String, String>>,
-}
-
-impl Encoder for ErrorResponse {
-    fn encode(&self) -> Result<Vec<u8>> {
-        Ok(bincode::encode_to_vec(self, bincode::config::standard())?)
-    }
-}
-
-impl Decoder for ErrorResponse {
-    fn decode(data: &[u8]) -> Result<Self> {
-        let (obj, _): (ErrorResponse, usize) =
-            bincode::decode_from_slice(&data[..], bincode::config::standard())?;
-        Ok(obj)
-    }
-}
+pub use crate::pbv1::{ErrorCode, ErrorResponse};
 
 impl EnDecoder for ErrorResponse {
-    fn index(&self) -> u8 {
+    fn index(&self) -> u16 {
         1
     }
 

@@ -1,4 +1,5 @@
 use crate::{BrokerNode, raftx::PartitionApply};
+use crate::raftx::ProposeData;
 use anyhow::{Result, anyhow};
 use bincode::config;
 use dashmap::DashMap;
@@ -7,6 +8,7 @@ use grpcx::{
     commonsvc::TopicPartitionMeta,
     topic_meta::{TopicPartitionDetail, TopicPartitionDetailSnapshot},
 };
+use raftx::StateApply;
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::{collections::HashMap, num::ParseIntError, sync::Arc};
@@ -301,6 +303,18 @@ impl PartitionApply for PartitionManager {
 
     fn get_db(&self) -> Db {
         self.db.clone()
+    }
+}
+
+impl StateApply for PartitionManager {
+    fn apply(&self, message: &[u8]) -> Result<()> {
+        let (data, _): (ProposeData, usize) = bincode::decode_from_slice(message, config::standard())?;
+        match data {
+            ProposeData::TopicPartition(tp_data) => {
+                <Self as PartitionApply>::apply(self, tp_data.topic)?;
+            }
+        }
+        Ok(())
     }
 }
 
