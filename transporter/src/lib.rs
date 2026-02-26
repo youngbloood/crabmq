@@ -109,6 +109,9 @@ pub struct Transporter {
     pt: Option<Arc<Mutex<Box<dyn ProtocolTransporterManager>>>>,
 }
 
+unsafe impl Send for Transporter {}
+unsafe impl Sync for Transporter {}
+
 impl Transporter {
     pub fn new(conf: Config) -> Self {
         let pt: Option<Arc<Mutex<Box<dyn ProtocolTransporterManager>>>> = match conf.protocol {
@@ -223,7 +226,7 @@ impl Transporter {
 }
 
 #[async_trait::async_trait]
-pub trait ProtocolTransporterManager {
+pub trait ProtocolTransporterManager: Send + Sync {
     // 启动本地监听服务
     async fn start(&self) -> Result<()>;
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
@@ -313,7 +316,7 @@ fn decode_to_message(
     body: &[u8],
     remote_addr: String,
 ) -> Result<TransportMessage> {
-    let message = protocol::decode_message(index, body).map_err(|e| -> anyhow::Error {
+    let message = protocol::decode_message(version, index, body).map_err(|e| -> anyhow::Error {
         TransporterError::new(ErrorCode::UnknownMessageTypeError, e.to_string()).into()
     })?;
     Ok(TransportMessage {

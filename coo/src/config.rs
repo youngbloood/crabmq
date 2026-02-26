@@ -13,7 +13,8 @@ pub struct Config {
     pub raftx_config: raftx::Config,
 }
 
-struct Base {
+#[derive(Clone)]
+pub struct Base {
     // coordinator 节点监听的地址
     pub addr: String,
 
@@ -56,17 +57,17 @@ impl Config {
     }
 
     pub fn with_coo_addr(mut self, coo_addr: String) -> Self {
-        self.coo_addr = coo_addr;
+        self.coo.addr = coo_addr;
         self
     }
 
     pub fn with_raft_addr(mut self, raft_addr: String) -> Self {
-        self.raft_addr = raft_addr;
+        self.raftx_config.raft.addr = raft_addr;
         self
     }
 
-    pub fn with_db_path(mut self, db_path: PathBuf) -> Self {
-        self.db_path = db_path;
+    pub fn with_db_path(mut self, db_path: String) -> Self {
+        self.raftx_config.db.path = db_path;
         self
     }
 
@@ -80,13 +81,19 @@ impl Config {
         must_gt_zero("id", self.id)?;
         must_gt_zero(
             "check_self_is_leader_interval",
-            self.check_self_is_leader_interval as _,
+            self.coo.check_self_is_leader_interval as _,
         )?;
-        must_gt_zero("new_topic_timeout", self.new_topic_timeout as _)?;
-        must_gt_zero("add_partition_timeout", self.add_partition_timeout as _)?;
-        must_gt_zero("event_bus_buffer_size", self.event_bus_buffer_size as _)?;
-        must_gt_zero("client_pull_buffer_size", self.client_pull_buffer_size as _)?;
-        must_gt_zero("broker_pull_buffer_size", self.broker_pull_buffer_size as _)?;
+        must_gt_zero("new_topic_timeout", self.coo.new_topic_timeout as _)?;
+        must_gt_zero("add_partition_timeout", self.coo.add_partition_timeout as _)?;
+        must_gt_zero("event_bus_buffer_size", self.coo.event_bus_buffer_size as _)?;
+        must_gt_zero(
+            "client_pull_buffer_size",
+            self.coo.client_pull_buffer_size as _,
+        )?;
+        // must_gt_zero(
+        //     "broker_pull_buffer_size",
+        //     self.coo.broker_pull_buffer_size as _,
+        // )?;
 
         let must_not_empty = |attr, v: &str| -> Result<()> {
             if v.is_empty() {
@@ -94,14 +101,14 @@ impl Config {
             }
             Ok(())
         };
-        must_not_empty("coo_addr", &self.coo_addr)?;
-        must_not_empty("raft_addr", &self.raft_addr)?;
+        must_not_empty("coo.addr", &self.coo.addr)?;
+        must_not_empty("raftx_config.raft.addr", &self.raftx_config.raft.addr)?;
 
         // 检查是否以 n/N 结尾，并验证前面是数字
-        if let Some(last) = self.new_topic_partition_factor.chars().last() {
+        if let Some(last) = self.coo.new_topic_partition_factor.chars().last() {
             if last == 'n' || last == 'N' {
-                let num_part =
-                    &self.new_topic_partition_factor[..self.new_topic_partition_factor.len() - 1];
+                let num_part = &self.coo.new_topic_partition_factor
+                    [..self.coo.new_topic_partition_factor.len() - 1];
                 if !(!num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit())) {
                     return Err(anyhow!("illigal new_topic_partition_factor"));
                 }
@@ -109,6 +116,7 @@ impl Config {
         } else {
             // 检查纯数字
             if !self
+                .coo
                 .new_topic_partition_factor
                 .chars()
                 .all(|c| c.is_ascii_digit())

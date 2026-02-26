@@ -1,13 +1,11 @@
 mod broker;
 mod client;
 pub mod config;
-mod conn;
 mod consumer_group;
 pub mod coo;
 mod coo_service;
 mod event_bus;
 mod partition;
-pub mod raftx;
 
 // mod topic_meta;
 use std::collections::HashMap;

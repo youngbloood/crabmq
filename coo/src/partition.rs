@@ -1,5 +1,4 @@
-use crate::{BrokerNode, raftx::PartitionApply};
-use crate::raftx::ProposeData;
+use crate::BrokerNode;
 use anyhow::{Result, anyhow};
 use bincode::config;
 use dashmap::DashMap;
@@ -8,6 +7,8 @@ use grpcx::{
     commonsvc::TopicPartitionMeta,
     topic_meta::{TopicPartitionDetail, TopicPartitionDetailSnapshot},
 };
+use protocol::pbv1::CooRaftProposeMessage as CooRaftProposeMessageV1;
+use protocol::{Decoder, aggregation::CooRaftProposeMessage};
 use raftx::StateApply;
 use serde::{Deserialize, Serialize};
 use sled::Db;
@@ -235,85 +236,107 @@ impl PartitionManager {
     }
 }
 
-impl PartitionApply for PartitionManager {
-    /// 将 SinglePartition 落盘并写入内存中
-    fn apply(&self, part: SinglePartition) -> Result<()> {
-        // 开启事务
-        let mut batch = sled::Batch::default();
+// impl PartitionApply for PartitionManager {
+//     /// 将 SinglePartition 落盘并写入内存中
+//     fn apply(&self, part: SinglePartition) -> Result<()> {
+//         // 开启事务
+//         let mut batch = sled::Batch::default();
 
-        // 1. 存储元数据
-        let meta_key = format!("{}{}", TOPIC_META_PREFIX, &part.topic);
-        let meta = TopicMeta {
-            version: 1, // 简化版本管理
-            num_partition: part.partitions.len() as u64,
-            next_round_robin: 1, // 简化轮询管理
-        };
-        batch.insert(
-            meta_key.into_bytes(),
-            bincode::serde::encode_to_vec(&meta, config::standard())?,
-        );
+//         // 1. 存储元数据
+//         let meta_key = format!("{}{}", TOPIC_META_PREFIX, &part.topic);
+//         let meta = TopicMeta {
+//             version: 1, // 简化版本管理
+//             num_partition: part.partitions.len() as u64,
+//             next_round_robin: 1, // 简化轮询管理
+//         };
+//         batch.insert(
+//             meta_key.into_bytes(),
+//             bincode::serde::encode_to_vec(&meta, config::standard())?,
+//         );
 
-        // 2. 存储分区数据
-        for p in &part.partitions {
-            let partition_key = format!("{}{}/{}", TOPIC_PARTITION_PREFIX, &part.topic, p.id);
-            batch.insert(
-                partition_key.into_bytes(),
-                bincode::serde::encode_to_vec(p, config::standard())?,
-            );
-        }
+//         // 2. 存储分区数据
+//         for p in &part.partitions {
+//             let partition_key = format!("{}{}/{}", TOPIC_PARTITION_PREFIX, &part.topic, p.id);
+//             batch.insert(
+//                 partition_key.into_bytes(),
+//                 bincode::serde::encode_to_vec(p, config::standard())?,
+//             );
+//         }
 
-        // 3. 原子性写入
-        self.db.apply_batch(batch)?;
+//         // 3. 原子性写入
+//         self.db.apply_batch(batch)?;
 
-        // 4. 更新内存状态
+//         // 4. 更新内存状态
 
-        // match self.assignments.get(&part.topic){
-        //     Some(entry) => {
-        //         for pm in &part.partitions{
-        //             for v in entry.iter_mut(){
-        //                 if v.id==pm.id{
-        //                     // 有则更新
-        //                 }
-        //             }
-        //         }
-        //     },
-        //     None => todo!(),
-        // }
+//         // match self.assignments.get(&part.topic){
+//         //     Some(entry) => {
+//         //         for pm in &part.partitions{
+//         //             for v in entry.iter_mut(){
+//         //                 if v.id==pm.id{
+//         //                     // 有则更新
+//         //                 }
+//         //             }
+//         //         }
+//         //     },
+//         //     None => todo!(),
+//         // }
 
-        self.all_topics
-            .entry(part.topic)
-            .and_modify(|pms| {
-                for pm in pms {
-                    if let Some(v) = part.partitions.iter().find(|f| f.id == pm.partition_id) {
-                        // 该 partition_id 已经存在，更新
-                        // TODO: 如何应用？
-                        // if v.broker_leader_id
-                    }
-                }
-            })
-            .or_insert(
-                part.partitions
-                    .iter()
-                    .map(|v| TopicPartitionDetail::from(v.clone()))
-                    .collect(),
-            );
+//         self.all_topics
+//             .entry(part.topic)
+//             .and_modify(|pms| {
+//                 for pm in pms {
+//                     if let Some(v) = part.partitions.iter().find(|f| f.id == pm.partition_id) {
+//                         // 该 partition_id 已经存在，更新
+//                         // TODO: 如何应用？
+//                         // if v.broker_leader_id
+//                     }
+//                 }
+//             })
+//             .or_insert(
+//                 part.partitions
+//                     .iter()
+//                     .map(|v| TopicPartitionDetail::from(v.clone()))
+//                     .collect(),
+//             );
 
-        Ok(())
-    }
+//         Ok(())
+//     }
 
-    fn get_db(&self) -> Db {
-        self.db.clone()
-    }
-}
+//     fn get_db(&self) -> Db {
+//         self.db.clone()
+//     }
+// }
 
 impl StateApply for PartitionManager {
-    fn apply(&self, message: &[u8]) -> Result<()> {
-        let (data, _): (ProposeData, usize) = bincode::decode_from_slice(message, config::standard())?;
-        match data {
-            ProposeData::TopicPartition(tp_data) => {
-                <Self as PartitionApply>::apply(self, tp_data.topic)?;
+    fn apply(&self, v: u8, message: &[u8]) -> Result<()> {
+        match v {
+            protocol::VERSION1 => {
+                let data = CooRaftProposeMessageV1::decode(&message[..])?;
+                match data.index {
+                    1 => {
+                        todo!()
+                    }
+                    _ => {
+                        return Err(anyhow!("Unsupported message type: {}", data.index));
+                    } // protocol::pbv1::CooRaftProposeMessageTypeV1::TopicPartition => {
+                      //     single_partition,
+                      // } => {
+                      //     self.apply_topic_partition_detail(
+                      //         single_partition
+                      //             .partitions
+                      //             .iter()
+                      //             .map(|p| TopicPartitionDetail::from(p.clone()))
+                      //             .collect(),
+                      //     );
+                      // }
+                }
+            }
+
+            _ => {
+                return Err(anyhow!("Unsupported message version: {}", v));
             }
         }
+
         Ok(())
     }
 }

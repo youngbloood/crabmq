@@ -1,5 +1,6 @@
 use crate::{
-    Config as RaftxConfig, StateApply, mailbox::Mailbox, peer::PeerState, storage::SledStorage,
+    Callback, Config as RaftxConfig, StateApply, mailbox::Mailbox, peer::PeerState,
+    storage::SledStorage,
 };
 use anyhow::Result;
 use bincode::{Decode, Encode};
@@ -8,7 +9,10 @@ use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use prost::Message as ProstMessage; // Alias prost::Message
 use protobuf::Message as ProtobufMessage; // Alias protobuf::Message
-use protocol::{CooRaftOriginMessage, EnDecoder};
+use protocol::{
+    CooRaftOriginMessage, EnDecoder, aggregation::CooRaftProposeMessage,
+    pbv1::CooRaftProposeMessage as CooRaftProposeMessageV1,
+};
 use raft::{
     Config, RawNode, StateRole,
     prelude::{ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Message, Snapshot},
@@ -61,8 +65,6 @@ impl<S: StateApply> Clone for Node<S> {
         }
     }
 }
-
-pub type Callback = mpsc::Sender<Result<String>>;
 
 // impl self functions
 impl<S: StateApply> Node<S> {
@@ -180,19 +182,27 @@ impl<S: StateApply> Node<S> {
         let _ = self.raw_node.lock().await.step(msg);
     }
 
-    async fn handle_propose_message(&self, req: &protocol::CooRaftProposeMessage) {
-        if req.index == protocol::CooRaftProposeType::ProposeTypePartition as i32 {
-            let _ = self
-                .raw_node
-                .lock()
-                .await
-                .propose(vec![], req.encode_to_vec());
-        } else if req.index == protocol::CooRaftProposeType::ProposeTypeConsumerGroupOffset as i32 {
-            let _ = self
-                .raw_node
-                .lock()
-                .await
-                .propose(vec![], req.encode_to_vec());
+    async fn handle_propose_message(&self, req: &CooRaftProposeMessage) {
+        match req {
+            CooRaftProposeMessage::ProposeV1(coo_raft_propose_message) => {
+                if coo_raft_propose_message.index
+                    == protocol::CooRaftProposeType::ProposeTypePartition as i32
+                {
+                    let _ = self
+                        .raw_node
+                        .lock()
+                        .await
+                        .propose(vec![1], coo_raft_propose_message.encode_to_vec());
+                } else if coo_raft_propose_message.index
+                    == protocol::CooRaftProposeType::ProposeTypeConsumerGroupOffset as i32
+                {
+                    let _ = self
+                        .raw_node
+                        .lock()
+                        .await
+                        .propose(vec![1], coo_raft_propose_message.encode_to_vec());
+                }
+            }
         }
     }
 
@@ -229,7 +239,7 @@ impl<S: StateApply> Node<S> {
                 let req = msg
                     .message
                     .as_any()
-                    .downcast_ref::<protocol::CooRaftProposeMessage>()
+                    .downcast_ref::<CooRaftProposeMessage>()
                     .expect("");
                 self.handle_propose_message(req).await;
             }
@@ -495,22 +505,29 @@ impl<S: StateApply> Node<S> {
             }
             match entry.get_entry_type() {
                 EntryType::EntryNormal => {
+                    let v = entry.context[0];
                     let data = &entry.data;
 
-                    match protocol::CooRaftProposeMessage::decode(&data[..]) {
-                        Ok(req) => {
-                            if let Err(e) = self.fsm.apply(&req.message) {
-                                error!("RAFTX[{}]: fsm apply failed: {:?}", self.id, e);
+                    match v {
+                        protocol::VERSION1 => match CooRaftProposeMessageV1::decode(&data[..]) {
+                            Ok(req) => {
+                                if let Err(e) = self.fsm.apply(protocol::VERSION1, &req.message) {
+                                    error!("RAFTX[{}]: fsm apply failed: {:?}", self.id, e);
+                                }
+                                if let Some((_, cb)) = self.callbacks.remove(&req.unique_id) {
+                                    let _ = cb.send(Ok(req.unique_id)).await;
+                                }
                             }
-                            if let Some((_, cb)) = self.callbacks.remove(&req.unique_id) {
-                                let _ = cb.send(Ok(req.unique_id)).await;
+                            Err(e) => {
+                                error!(
+                                    "RAFTX[{}]: decode CooRaftProposeMessage failed: {:?}",
+                                    self.id, e
+                                );
                             }
-                        }
-                        Err(e) => {
-                            error!(
-                                "RAFTX[{}]: decode CooRaftProposeMessage failed: {:?}",
-                                self.id, e
-                            );
+                        },
+
+                        _ => {
+                            error!("RAFTX[{}]: unknown entry version: {}", self.id, v);
                         }
                     }
                 }

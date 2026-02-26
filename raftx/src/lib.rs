@@ -3,18 +3,18 @@ mod node;
 mod peer;
 mod storage;
 
-
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use transporter::TransportProtocol;
 
-pub use node::Node;
-pub use node::Callback;
 use anyhow::Result;
+pub use node::Node;
 
 pub trait StateApply: Send + Sync + 'static {
-    fn apply(&self, message: &[u8]) -> Result<()>;
+    fn apply(&self, v: u8, message: &[u8]) -> Result<()>;
 }
 
+#[derive(Clone)]
 pub struct Config {
     // 节点 id
     pub id: u32,
@@ -26,6 +26,7 @@ pub struct Config {
     pub db: DBConfig,
 }
 
+#[derive(Clone)]
 pub struct RaftConfig {
     pub addr: String,
     pub write_timeout_milli: u64,
@@ -39,7 +40,10 @@ pub struct RaftConfig {
     pub max_inflight_msgs: u64,
 }
 
+#[derive(Clone)]
 pub struct DBConfig {
     pub path: String,
     pub max_size: u64,
 }
+
+pub type Callback = mpsc::Sender<Result<String>>;

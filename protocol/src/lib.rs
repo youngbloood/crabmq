@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use prost::Message;
 use std::{any::Any, collections::HashMap, fmt::Debug};
 
+pub mod aggregation;
 pub mod broker_coo;
 pub mod client_broker;
 pub mod client_coo;
@@ -129,7 +130,7 @@ lazy_static! {
 ///
 /// # Returns
 /// A boxed `EnDecoder` trait object or an error
-pub fn decode_message(index: u16, data: &[u8]) -> Result<Box<dyn EnDecoder>> {
+pub fn decode_message(version: u8, index: u16, data: &[u8]) -> Result<Box<dyn EnDecoder>> {
     DECODER_REGISTRY
         .get(&index)
         .ok_or_else(|| anyhow::anyhow!("Unknown message type index: {}", index))?(data)

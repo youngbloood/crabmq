@@ -1,12 +1,14 @@
+use log::error;
+use tokio::select;
 use tokio::sync::mpsc;
 
+use crate::config::Config as CooConfig;
 use crate::coo::Coordinator;
-use crate::coo::config::CooConfig;
 use crate::partition::{PartitionManager, PartitionPolicy};
 use anyhow::Result;
 use raftx::Node as RaftNode;
 use std::sync::Arc;
-use transporter::{TransportMessage, Transporter};
+use transporter::{TransportMessage, TransportProtocol, Transporter};
 
 pub struct CoordinatorService {
     coo: Arc<Coordinator>,
@@ -16,20 +18,25 @@ pub struct CoordinatorService {
 
 impl CoordinatorService {
     pub fn new(conf: CooConfig) -> Result<Self> {
-        let partition_manager = Arc::new(PartitionManager::new(
+        let partition_manager = PartitionManager::new(
             PartitionPolicy::default(),
-            conf.db_path.clone(),
-        ));
+            conf.raftx_config.db.path.clone(),
+        );
 
         let (raft_node, raft_node_sender) =
             RaftNode::new(conf.raftx_config.clone(), partition_manager.clone());
         let raft_node = Arc::new(raft_node);
 
-        let trans = Transporter::new(conf.transporter_config.clone());
+        let trans = Transporter::new(transporter::Config {
+            addr: conf.coo.addr.clone(),
+            protocol: conf.coo.protocol,
+            incoming_max_connections: conf.coo.incoming_max_connections,
+            outgoing_max_connections: conf.coo.outgoing_max_connections,
+        });
+
         let coo = Arc::new(Coordinator::new(
-            conf,
+            conf.clone(),
             raft_node_sender,
-            raft_node.clone(),
             partition_manager,
         )?);
 
@@ -46,35 +53,44 @@ impl CoordinatorService {
 
         self.raft_node
             .run(async move |m| {
-                if let Err(e) = tx.send(m).await {
+                if let Err(e) = tx.send(m) {
                     error!("RaftNode upload message error: {}", e);
                 }
             })
             .await?;
-        self.t.start().await?;
-        self.loop_handle_command(rx);
-        Ok(())
-    }
-
-    fn loop_handle_command(&self, rx: mpsc::UnboundedReceiver<RaftMessage>) {
-        select! {
-            Some(msg) = rx.recv() => {
-                let coo = self.coo.clone();
-                tokio::spawn(async move {
-                    coo.handle_raft_message(msg).await;
-                });
-            }
-
-
-        }
-        let mut coo = self.coo.clone();
+        self.trans.start().await?;
+        // 确保仅有一个线程调用 recv 来获取消息并处理
+        let mut trans = self.trans.clone();
         tokio::spawn(async move {
             loop {
-                let cmd = coo.get_command().await;
-                if let Ok(cmd) = cmd {
-                    coo.handle_command(cmd).await;
+                select! {
+                    msg = trans.recv(0) => {
+                        if msg.is_none() {
+                            continue;
+                        }
+                        let msg = msg.unwrap();
+                        // 处理接收到的命令
+                            todo!();
+                    }
                 }
             }
         });
+        self.loop_handle_command(rx).await;
+        Ok(())
+    }
+
+    async fn loop_handle_command(&self, mut rx: mpsc::UnboundedReceiver<TransportMessage>) {
+        loop {
+            select! {
+                    Some(msg) = rx.recv() => {
+                        let coo = self.coo.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =  coo.handle_raft_message(msg).await{
+                                error!("handle raft message error: {}", e);
+                            }
+                        });
+                    }
+            }
+        }
     }
 }

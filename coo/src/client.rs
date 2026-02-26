@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use transporter::{Transporter, TransporterWriter};
 
@@ -16,9 +16,10 @@ pub struct Client {
     // 该 broker 当前状态
     pub status: Status,
 
-    w: TransporterWriter,
+    w: Arc<TransporterWriter>,
 }
 
+#[derive(Clone)]
 struct State {
     // 该 broker 网络速率
     pub netrate: u32,
@@ -35,6 +36,7 @@ struct State {
     pub pub_count: u32,
 }
 
+#[derive(Clone)]
 pub enum Status {
     Online,
     Offline,
@@ -64,7 +66,7 @@ impl Client {
                 pub_count: 0,
             },
             status: Status::Offline,
-            w,
+            w: Arc::new(w),
         }
     }
 
