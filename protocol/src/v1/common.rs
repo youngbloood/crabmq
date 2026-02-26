@@ -1,5 +1,7 @@
-use crate::{EnDecoder, TOPICS_INDEX};
 use std::any::Any;
+
+use crate::{EnDecoder};
+use super::TOPICS_INDEX;
 
 pub use crate::pbv1::{PartitionCluster, PartitionInfo, SegmentOffset, TopicInfo, Topics};
 

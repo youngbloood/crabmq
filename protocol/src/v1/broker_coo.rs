@@ -1,9 +1,9 @@
-use crate::{
-    BROKER_COO_HEARTBEAT_REQUEST_INDEX, BROKER_COO_HEARTBEAT_RESPONSE_INDEX, Decoder, EnDecoder,
-    Encoder,
-};
-use anyhow::Result;
 use std::any::Any;
+
+use crate::EnDecoder;
+use super::{
+    BROKER_COO_HEARTBEAT_REQUEST_INDEX, BROKER_COO_HEARTBEAT_RESPONSE_INDEX,
+};
 
 pub use crate::pbv1::{BrokerCooHeartbeatRequest, BrokerCooHeartbeatResponse};
 

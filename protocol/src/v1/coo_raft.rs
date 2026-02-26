@@ -1,9 +1,10 @@
 use std::any::Any;
 
-use crate::{
+use crate::EnDecoder;
+use super::{
     COO_RAFT_CONF_CHANGE_REQUEST_INDEX, COO_RAFT_GET_META_REQUEST_INDEX,
     COO_RAFT_GET_META_RESPONSE_INDEX, COO_RAFT_ORIGIN_MESSAGE_INDEX,
-    COO_RAFT_PROPOSE_MESSAGE_INDEX, EnDecoder,
+    COO_RAFT_PROPOSE_MESSAGE_INDEX,
 };
 
 pub use crate::pbv1::{

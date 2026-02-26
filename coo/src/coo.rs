@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::Result;
 use dashmap::DashMap;
-use protocol::aggregation::Event;
+use protocol::{aggregation::Event, pbv1};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use transporter::TransportMessage;
@@ -64,13 +64,27 @@ impl Coordinator {
     }
 }
 
+// handle all message
 impl Coordinator {
     pub async fn handle_raft_message(&self, msg: TransportMessage) -> Result<()> {
-        // 处理来自 raft_node 的消息
-        // 1. 解码消息
-        // 2. 根据消息类型进行处理，例如：
-        //    - 如果是 TopicPartition 变更事件，则更新 partition_manager，并通过 broker_event_bus 发布事件通知 brokers
-        //    - 如果是 Peer 变更事件，则通过 peer_change_bus 发布事件通知 brokers 和 clients
+        match msg.version {
+            1 => self.handle_raft_message_v1(msg).await,
+            _ => anyhow::bail!("unsupported message version: {}", msg.version),
+        }
+    }
+
+    async fn handle_raft_message_v1(&self, msg: TransportMessage) -> Result<()> {
+        match msg.index {
+            protocol::v1::BROKER_COO_HEARTBEAT_REQUEST_INDEX => self.handle_v1_heartbeat(msg).await,
+            _ => todo!(),
+        }
+    }
+
+    async fn handle_v1_heartbeat(&self, msg: TransportMessage) -> Result<()> {
+        // 处理 Broker 心跳消息
+        // 1. 解析消息内容，获取 Broker 信息
+        // 2. 更新 brokers 中对应的 Broker 状态和信息
+        // 3. 触发 broker_event_bus 发布 Broker 状态变更事件
         Ok(())
     }
 }

@@ -208,7 +208,7 @@ impl<S: StateApply> Node<S> {
 
     async fn proccess_received_message(&self, msg: TransportMessage) {
         match msg.index {
-            protocol::COO_RAFT_GET_META_REQUEST_INDEX => {
+            protocol::v1::COO_RAFT_GET_META_REQUEST_INDEX => {
                 let req = msg
                     .message
                     .as_any()
@@ -217,7 +217,7 @@ impl<S: StateApply> Node<S> {
                 self.handle_meta_req(&msg.remote_addr, req).await;
             }
 
-            protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
+            protocol::v1::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
                 let req = msg
                     .message
                     .as_any()
@@ -226,7 +226,7 @@ impl<S: StateApply> Node<S> {
                 self.handle_raft_message(req).await;
             }
 
-            protocol::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
+            protocol::v1::COO_RAFT_CONF_CHANGE_REQUEST_INDEX => {
                 let req = msg
                     .message
                     .as_any()
@@ -235,7 +235,7 @@ impl<S: StateApply> Node<S> {
                 self.handle_conf_change(req).await;
             }
 
-            protocol::COO_RAFT_PROPOSE_MESSAGE_INDEX => {
+            protocol::v1::COO_RAFT_PROPOSE_MESSAGE_INDEX => {
                 let req = msg
                     .message
                     .as_any()
@@ -312,9 +312,9 @@ impl<S: StateApply> Node<S> {
         let mut trans = self.trans.clone();
 
         let inner_index = [
-            protocol::COO_RAFT_CONF_CHANGE_REQUEST_INDEX,
-            protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX,
-            protocol::COO_RAFT_PROPOSE_MESSAGE_INDEX,
+            protocol::v1::COO_RAFT_CONF_CHANGE_REQUEST_INDEX,
+            protocol::v1::COO_RAFT_ORIGIN_MESSAGE_INDEX,
+            protocol::v1::COO_RAFT_PROPOSE_MESSAGE_INDEX,
         ];
 
         loop {
@@ -473,7 +473,7 @@ impl<S: StateApply> Node<S> {
                 };
 
                 let t = TransportMessage::new_v1(
-                    protocol::COO_RAFT_ORIGIN_MESSAGE_INDEX,
+                    protocol::v1::COO_RAFT_ORIGIN_MESSAGE_INDEX,
                     "".to_string(),
                     (Box::new(msg) as Box<dyn EnDecoder>).into(),
                 );
