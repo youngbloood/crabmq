@@ -26,6 +26,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "service")]
 pub struct TcpService {
     max_connection: usize, // 接受的最大连接数
     sema: Arc<Semaphore>,  // 用于限制最大连接数的信号量
@@ -39,6 +40,7 @@ pub struct TcpService {
     shutdown: CancellationToken,
 }
 
+#[cfg(feature = "service")]
 impl TcpService {
     pub fn new(addr: String, max_connection: usize) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -54,6 +56,7 @@ impl TcpService {
     }
 }
 
+#[cfg(feature = "service")]
 #[async_trait::async_trait]
 impl ProtocolTransporterService for TcpService {
     async fn run(&self) -> Result<()> {
@@ -247,6 +250,7 @@ impl ProtocolTransporterService for TcpService {
     }
 }
 
+#[cfg(feature = "service")]
 #[async_trait::async_trait]
 impl ProtocolTransporterWriter for TcpService {
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
@@ -266,6 +270,7 @@ impl ProtocolTransporterWriter for TcpService {
     }
 }
 
+#[cfg(feature = "service")]
 #[async_trait::async_trait]
 impl ProtocolTransporterReader for TcpService {
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
@@ -287,6 +292,7 @@ impl ProtocolTransporterReader for TcpService {
     }
 }
 
+#[cfg(feature = "service")]
 #[async_trait::async_trait]
 impl ProtocolTransporterShutdown for TcpService {
     async fn shutdown(&self) {
@@ -305,6 +311,7 @@ impl ProtocolTransporterShutdown for TcpService {
  * TcpClient 定义了连接到远端地址的接口，建立连接并加入到管理器中
  * 可以链接多个远端地址，每个远端地址对应一个连接
  */
+#[cfg(feature = "client")]
 pub(crate) struct TcpClient {
     sema: OwnedSemaphorePermit, // 用于限制最大连接数的信号量
     tx: UnboundedSender<TransportMessage>,
@@ -315,6 +322,7 @@ pub(crate) struct TcpClient {
     shutdown: CancellationToken,
 }
 
+#[cfg(feature = "client")]
 impl TcpClient {
     pub fn new(addr: String, sema: OwnedSemaphorePermit) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -328,12 +336,14 @@ impl TcpClient {
     }
 }
 
+#[cfg(feature = "client")]
 impl Drop for TcpClient {
     fn drop(&mut self) {
         self.shutdown.cancel();
     }
 }
 
+#[cfg(feature = "client")]
 #[async_trait::async_trait]
 impl ProtocolTransporterClient for TcpClient {
     // 连接到远端地址，建立连接并加入到管理器中
@@ -365,6 +375,7 @@ impl ProtocolTransporterClient for TcpClient {
     }
 }
 
+#[cfg(feature = "client")]
 #[async_trait::async_trait]
 impl ProtocolTransporterReader for TcpClient {
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
@@ -386,6 +397,7 @@ impl ProtocolTransporterReader for TcpClient {
     }
 }
 
+#[cfg(feature = "client")]
 #[async_trait::async_trait]
 impl ProtocolTransporterShutdown for TcpClient {
     async fn shutdown(&self) {
@@ -396,6 +408,7 @@ impl ProtocolTransporterShutdown for TcpClient {
     }
 }
 
+#[cfg(feature = "client")]
 #[async_trait::async_trait]
 impl ProtocolTransporterWriter for TcpClient {
     async fn send(&self, cmd: &TransportMessage, timeout: Option<Duration>) -> Result<()> {
@@ -421,6 +434,7 @@ impl ProtocolTransporterWriter for TcpClient {
     }
 }
 
+#[cfg(feature = "client")]
 #[async_trait::async_trait]
 impl ProtocolTransporterCloser for TcpClient {
     // 关闭指定连接
@@ -509,7 +523,7 @@ impl TcpReader {
 }
 
 #[derive(Clone)]
-pub struct TcpWriter {
+pub(crate) struct TcpWriter {
     // 连接地址
     remote_addr: String,
     w: WriteHalf,

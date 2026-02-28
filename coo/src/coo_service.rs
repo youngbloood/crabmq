@@ -69,7 +69,7 @@ impl CoordinatorService {
                         }
                         let msg = msg.unwrap();
                         // 处理接收到的命令
-                            todo!();
+                        todo!();
                     }
                 }
             }
