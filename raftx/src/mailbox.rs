@@ -45,7 +45,7 @@ impl Mailbox {
                     }
                     let msg = msg.unwrap();
                     trace!("Mailbox[{}->{}]: timeout: {}s", self.src_id, self.dst_id, self.send_timeout);
-                    match self.w.send_timeout(&msg,Duration::from_millis(self.send_timeout.get())).await {
+                    match self.w.send(&msg, Some(Duration::from_millis(self.send_timeout.get()))).await {
                         Ok(_) => {
                             self.status.rotate_upgrade().await;
                             debug!("Mailbox[{}->{}] sent message successfully", self.src_id, self.dst_id);

@@ -1,5 +1,9 @@
 use crate::{
-    ProtocolTransporterManager, ProtocolTransporterWriter, TransportMessage, TransporterWriter,
+    TransportMessage, TransporterWriter,
+    conn::{
+        ProtocolTransporterClient, ProtocolTransporterCloser, ProtocolTransporterReader,
+        ProtocolTransporterService, ProtocolTransporterShutdown, ProtocolTransporterWriter,
+    },
     err::{ErrorCode, TransporterError},
     handle_message,
 };
@@ -16,59 +20,47 @@ use tokio::{
     select,
     sync::{
         Mutex, OwnedSemaphorePermit, Semaphore,
-        mpsc::Receiver,
         mpsc::{UnboundedReceiver, UnboundedSender},
     },
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
-pub struct Tcp {
-    incoming_max_connection: usize, // 接受的最大连接数
-    incoming_sema: Arc<Semaphore>,  // 用于限制最大连接数的信号量
-
-    outgoing_max_connection: usize, // 连接的最大连接数
-    outgoing_sema: Arc<Semaphore>,  // 用于限制最大连接数的信号量
+pub struct TcpService {
+    max_connection: usize, // 接受的最大连接数
+    sema: Arc<Semaphore>,  // 用于限制最大连接数的信号量
 
     addr: String,
     tx: UnboundedSender<TransportMessage>,
     rx: UnboundedReceiver<TransportMessage>,
 
-    incoming: Arc<DashMap<String, WriteHalf>>,
-    outgoing: Arc<DashMap<String, WriteHalf>>,
+    conns: Arc<DashMap<String, WriteHalf>>,
 
     shutdown: CancellationToken,
 }
 
-impl Tcp {
-    pub fn new(
-        addr: String,
-        incoming_max_connection: usize,
-        outgoing_max_connection: usize,
-    ) -> Self {
+impl TcpService {
+    pub fn new(addr: String, max_connection: usize) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        Tcp {
+        TcpService {
             addr,
             tx,
             rx,
-            incoming_max_connection,
-            incoming_sema: Arc::new(Semaphore::new(incoming_max_connection)),
-            outgoing_max_connection,
-            outgoing_sema: Arc::new(Semaphore::new(outgoing_max_connection)),
-            incoming: Arc::new(DashMap::new()),
-            outgoing: Arc::new(DashMap::new()),
+            max_connection,
+            sema: Arc::new(Semaphore::new(max_connection)),
+            conns: Arc::new(DashMap::new()),
             shutdown: CancellationToken::new(),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ProtocolTransporterManager for Tcp {
-    async fn start(&self) -> Result<()> {
+impl ProtocolTransporterService for TcpService {
+    async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr).await?;
         let tx = self.tx.clone();
-        let incoming = self.incoming.clone();
-        let sema = self.incoming_sema.clone();
+        let incoming = self.conns.clone();
+        let sema = self.sema.clone();
         let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
             loop {
@@ -96,7 +88,6 @@ impl ProtocolTransporterManager for Tcp {
                                 let reader = TcpReader {
                                     r: rh,
                                     tx,
-                                    sp,
                                     remote_addr: addr.clone(),
                                     shutdown: shutdown.clone(),
                                 };
@@ -120,126 +111,250 @@ impl ProtocolTransporterManager for Tcp {
         Ok(())
     }
 
+    // 广播
+    async fn broadcast(&self, cmd: &TransportMessage) -> Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+        }
+        for cell in self.conns.iter_mut() {
+            cell.value()
+                .w
+                .lock()
+                .await
+                .write_all(&cmd.to_bytes()?)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn split_writer(&self, remote: &str) -> Option<TransporterWriter> {
+        if let Some(cell) = self.conns.get(remote) {
+            Some(TransporterWriter::Tcp(TcpWriter {
+                remote_addr: remote.to_string(),
+                w: cell.value().clone(),
+            }))
+        } else {
+            None
+        }
+    }
+
+    // // 广播到所有连接至本地的 endpoints
+    // async fn broadcast_incoming(&self, cmd: &TransportMessage) -> Result<()> {
+    //     if self.shutdown.is_cancelled() {
+    //         return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+    //     }
+    //     for cell in self.incoming.iter_mut() {
+    //         cell.value()
+    //             .w
+    //             .lock()
+    //             .await
+    //             .write_all(&cmd.to_bytes()?)
+    //             .await?;
+    //     }
+    //     Ok(())
+    // }
+
+    // // 广播到所有连接至远端的 endpoints
+    // async fn broadcast_outgoing(&self, cmd: &TransportMessage) -> Result<()> {
+    //     if self.shutdown.is_cancelled() {
+    //         return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+    //     }
+    //     for cell in self.outgoing.iter_mut() {
+    //         cell.value()
+    //             .w
+    //             .lock()
+    //             .await
+    //             .write_all(&cmd.to_bytes()?)
+    //             .await?;
+    //     }
+    //     Ok(())
+    // }
+
+    // // 连接到远端地址，建立连接并加入到管理器中
+    // async fn connect(&self, remote_addr: &str) -> Result<()> {
+    //     let shutdown = self.shutdown.clone();
+    //     let outgoing = self.outgoing.clone();
+    //     select! {
+    //         sp =  self.outgoing_sema.clone().acquire_owned() => {
+    //             if sp.is_err() {
+    //                 return  Err(TransporterError::from_code(ErrorCode::MaxOutgoingReached).into());
+    //             }
+    //             let sp = sp.unwrap();
+    //             select!{
+    //                 stream =  tokio::net::TcpStream::connect(&remote_addr) => {
+    //                     if stream.is_err(){
+    //                         return Err(TransporterError::new(ErrorCode::ConnectError, stream.unwrap_err().to_string()).into());
+    //                     }
+    //                     let stream = stream.unwrap();
+    //                     let (rh, wh) = stream.into_split();
+    //                     let tx = self.tx.clone();
+    //                     let shutdown = CancellationToken::new();
+    //                     let reader = TcpReader {
+    //                         r: rh,
+    //                         tx,
+    //                         sp,
+    //                         remote_addr: remote_addr.to_string(),
+    //                         shutdown: shutdown.clone(),
+    //                     };
+    //                     tokio::spawn(reader.loop_handle());
+    //                     outgoing.insert(remote_addr.to_string(), WriteHalf::new(wh, shutdown));
+    //                 }
+
+    //                 _ = shutdown.cancelled() => {
+    //                     return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+    //                 }
+    //             }
+    //         }
+
+    //         _ = shutdown.cancelled() => {
+    //             return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+    //         }
+    //     }
+    //     Ok(())
+    // }
+
+    // async fn send(&self, cmd: &TransportMessage) -> Result<()> {
+    //     if self.shutdown.is_cancelled() {
+    //         return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+    //     }
+    //     if let Some(cell) = self.outgoing.get(&cmd.remote_addr) {
+    //         cell.value()
+    //             .w
+    //             .lock()
+    //             .await
+    //             .write_all(&cmd.to_bytes()?)
+    //             .await?;
+    //     }
+
+    //     if let Some(cell) = self.incoming.get(&cmd.remote_addr) {
+    //         cell.value()
+    //             .w
+    //             .lock()
+    //             .await
+    //             .write_all(&cmd.to_bytes()?)
+    //             .await?;
+    //     }
+
+    //     Ok(())
+    // }
+
+    // 关闭指定连接
+    async fn close(&self, remote_addr: &str) -> Result<()> {
+        if let Some(pair) = self.conns.remove(remote_addr) {
+            pair.1.close();
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolTransporterWriter for TcpService {
     // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
-    async fn recv(&mut self, timeout: u64) -> Option<TransportMessage> {
+    async fn send(&self, cmd: &TransportMessage, timeout: Option<Duration>) -> Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+        }
+        if let Some(cell) = self.conns.get(&cmd.remote_addr) {
+            cell.value()
+                .w
+                .lock()
+                .await
+                .write_all(&cmd.to_bytes()?)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolTransporterReader for TcpService {
+    // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
+    async fn recv(&mut self, timeout: Option<Duration>) -> Option<TransportMessage> {
         let shutdown = self.shutdown.clone();
-        if timeout == 0 {
+        if timeout.is_none() {
             select! {
                 msg = self.rx.recv() => msg,
                 _ = shutdown.cancelled() => None,
             }
         } else {
             select! {
-                msg = tokio::time::timeout(std::time::Duration::from_secs(timeout), self.rx.recv()) => {
+                msg = tokio::time::timeout(timeout.unwrap(), self.rx.recv()) => {
                     msg.ok().flatten()
                 },
                 _ = shutdown.cancelled() => None,
             }
         }
     }
-    // 将本地监听服务分离出一个新的 TransporterWriter，remote_addr 是要分离的连接地址
-    async fn split_writer(&self, remote_addr: &str) -> Option<TransporterWriter> {
-        if let Some(pair) = self.incoming.remove(remote_addr) {
-            let tcp_writer = TcpWriter {
-                remote_addr: pair.0.to_string(),
-                w: pair.1,
-            };
-            Some(TransporterWriter::from_tcp(tcp_writer))
-        } else {
-            None
-        }
-    }
+}
 
-    // 广播
-    async fn broadcast_all(&self, cmd: &TransportMessage) -> Result<()> {
+#[async_trait::async_trait]
+impl ProtocolTransporterShutdown for TcpService {
+    async fn shutdown(&self) {
         if self.shutdown.is_cancelled() {
-            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+            return;
         }
-        for cell in self.incoming.iter_mut() {
-            cell.value()
-                .w
-                .lock()
-                .await
-                .write_all(&cmd.to_bytes()?)
-                .await?;
+        self.shutdown.cancel();
+        // 关闭所有入站连接
+        for cell in self.conns.iter_mut() {
+            cell.value().close();
         }
-        for cell in self.outgoing.iter_mut() {
-            cell.value()
-                .w
-                .lock()
-                .await
-                .write_all(&cmd.to_bytes()?)
-                .await?;
-        }
-        Ok(())
     }
+}
 
-    // 广播到所有连接至本地的 endpoints
-    async fn broadcast_incoming(&self, cmd: &TransportMessage) -> Result<()> {
-        if self.shutdown.is_cancelled() {
-            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+/**
+ * TcpClient 定义了连接到远端地址的接口，建立连接并加入到管理器中
+ * 可以链接多个远端地址，每个远端地址对应一个连接
+ */
+pub(crate) struct TcpClient {
+    sema: OwnedSemaphorePermit, // 用于限制最大连接数的信号量
+    tx: UnboundedSender<TransportMessage>,
+    rx: UnboundedReceiver<TransportMessage>,
+
+    conn: Option<WriteHalf>,
+
+    shutdown: CancellationToken,
+}
+
+impl TcpClient {
+    pub fn new(addr: String, sema: OwnedSemaphorePermit) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        TcpClient {
+            tx,
+            rx,
+            conn: None,
+            sema,
+            shutdown: CancellationToken::new(),
         }
-        for cell in self.incoming.iter_mut() {
-            cell.value()
-                .w
-                .lock()
-                .await
-                .write_all(&cmd.to_bytes()?)
-                .await?;
-        }
-        Ok(())
     }
+}
 
-    // 广播到所有连接至远端的 endpoints
-    async fn broadcast_outgoing(&self, cmd: &TransportMessage) -> Result<()> {
-        if self.shutdown.is_cancelled() {
-            return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
-        }
-        for cell in self.outgoing.iter_mut() {
-            cell.value()
-                .w
-                .lock()
-                .await
-                .write_all(&cmd.to_bytes()?)
-                .await?;
-        }
-        Ok(())
+impl Drop for TcpClient {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
     }
+}
 
+#[async_trait::async_trait]
+impl ProtocolTransporterClient for TcpClient {
     // 连接到远端地址，建立连接并加入到管理器中
     async fn connect(&self, remote_addr: &str) -> Result<()> {
         let shutdown = self.shutdown.clone();
-        let outgoing = self.outgoing.clone();
         select! {
-            sp =  self.outgoing_sema.clone().acquire_owned() => {
-                if sp.is_err() {
-                    return  Err(TransporterError::from_code(ErrorCode::MaxOutgoingReached).into());
+            stream =  tokio::net::TcpStream::connect(&remote_addr) => {
+                if stream.is_err(){
+                    return Err(TransporterError::new(ErrorCode::ConnectError, stream.unwrap_err().to_string()).into());
                 }
-                let sp = sp.unwrap();
-                select!{
-                    stream =  tokio::net::TcpStream::connect(&remote_addr) => {
-                        if stream.is_err(){
-                            return Err(TransporterError::new(ErrorCode::ConnectError, stream.unwrap_err().to_string()).into());
-                        }
-                        let stream = stream.unwrap();
-                        let (rh, wh) = stream.into_split();
-                        let tx = self.tx.clone();
-                        let shutdown = CancellationToken::new();
-                        let reader = TcpReader {
-                            r: rh,
-                            tx,
-                            sp,
-                            remote_addr: remote_addr.to_string(),
-                            shutdown: shutdown.clone(),
-                        };
-                        tokio::spawn(reader.loop_handle());
-                        outgoing.insert(remote_addr.to_string(), WriteHalf::new(wh, shutdown));
-                    }
-
-                    _ = shutdown.cancelled() => {
-                        return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
-                    }
-                }
+                let stream = stream.unwrap();
+                let (rh, wh) = stream.into_split();
+                let tx = self.tx.clone();
+                let shutdown = CancellationToken::new();
+                let reader = TcpReader {
+                    r: rh,
+                    tx,
+                    remote_addr: remote_addr.to_string(),
+                    shutdown: shutdown.clone(),
+                };
+                tokio::spawn(reader.loop_handle());
             }
 
             _ = shutdown.cancelled() => {
@@ -248,52 +363,73 @@ impl ProtocolTransporterManager for Tcp {
         }
         Ok(())
     }
+}
 
-    async fn send(&self, cmd: &TransportMessage) -> Result<()> {
+#[async_trait::async_trait]
+impl ProtocolTransporterReader for TcpClient {
+    // 本地的监听服务启动后，从 channel 中获取消息，timeout 为 0 表示一直等待直到有消息到来
+    async fn recv(&mut self, timeout: Option<Duration>) -> Option<TransportMessage> {
+        let shutdown = self.shutdown.clone();
+        if timeout.is_none() {
+            select! {
+                msg = self.rx.recv() => msg,
+                _ = shutdown.cancelled() => None,
+            }
+        } else {
+            select! {
+                msg = tokio::time::timeout(timeout.unwrap(), self.rx.recv()) => {
+                    msg.ok().flatten()
+                },
+                _ = shutdown.cancelled() => None,
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolTransporterShutdown for TcpClient {
+    async fn shutdown(&self) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
+        self.shutdown.cancel();
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolTransporterWriter for TcpClient {
+    async fn send(&self, cmd: &TransportMessage, timeout: Option<Duration>) -> Result<()> {
         if self.shutdown.is_cancelled() {
             return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
         }
-        if let Some(cell) = self.outgoing.get(&cmd.remote_addr) {
-            cell.value()
-                .w
-                .lock()
-                .await
-                .write_all(&cmd.to_bytes()?)
-                .await?;
+        if self.conn.is_none() {
+            return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
         }
 
-        if let Some(cell) = self.incoming.get(&cmd.remote_addr) {
-            cell.value()
-                .w
-                .lock()
-                .await
-                .write_all(&cmd.to_bytes()?)
-                .await?;
-        }
+        let shutdown = self.shutdown.clone();
+        select! {
+            _ = async {
+                let conn = self.conn.as_ref().unwrap();
+                conn.send(cmd, timeout)
+            } => {}
 
+            _ = shutdown.cancelled() => {
+                return Err(TransporterError::from_code(ErrorCode::ServiceShutdown).into());
+            }
+        }
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl ProtocolTransporterCloser for TcpClient {
     // 关闭指定连接
-    async fn close(&self, remote_addr: &str) {
-        if let Some(pair) = self.incoming.remove(remote_addr) {
-            pair.1.close();
-        }
-        if let Some(pair) = self.outgoing.remove(remote_addr) {
-            pair.1.close();
-        }
+    async fn close(&self) {
+        todo!()
     }
-
-    async fn shutdown(&self) {
-        self.shutdown.cancel();
-        // 关闭所有入站连接
-        for cell in self.incoming.iter_mut() {
-            cell.value().close();
-        }
-        // 关闭所有出站连接
-        for cell in self.outgoing.iter_mut() {
-            cell.value().close();
-        }
+    // 检查连接是否已关闭
+    async fn closed(&self) -> bool {
+        todo!()
     }
 }
 
@@ -301,8 +437,13 @@ pub(crate) struct TcpReader {
     r: OwnedReadHalf,
     tx: UnboundedSender<TransportMessage>,
     remote_addr: String,
-    sp: OwnedSemaphorePermit,
     shutdown: CancellationToken,
+}
+
+impl Drop for TcpReader {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
 }
 
 impl TcpReader {
@@ -364,7 +505,6 @@ impl TcpReader {
         }
 
         self.shutdown.cancel();
-        self.sp.forget();
     }
 }
 
@@ -380,7 +520,7 @@ unsafe impl Sync for TcpWriter {}
 
 #[async_trait::async_trait]
 impl ProtocolTransporterWriter for TcpWriter {
-    async fn send(&self, cmd: &TransportMessage) -> Result<()> {
+    async fn send(&self, cmd: &TransportMessage, timeout: Option<Duration>) -> Result<()> {
         if self.w.closed() {
             return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
         }
@@ -389,24 +529,10 @@ impl ProtocolTransporterWriter for TcpWriter {
         }
         Ok(())
     }
+}
 
-    async fn send_timeout(&self, cmd: &TransportMessage, t: Duration) -> Result<()> {
-        if self.w.closed() {
-            return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
-        }
-
-        timeout(t, self.w.w.lock().await.write_all(&cmd.to_bytes()?))
-            .await
-            .map_err(|e| -> anyhow::Error {
-                TransporterError::new(ErrorCode::WriteTimeoutError, e.to_string()).into()
-            })?
-            .map_err(|e| -> anyhow::Error {
-                TransporterError::new(ErrorCode::WriteError, e.to_string()).into()
-            })?;
-
-        Ok(())
-    }
-
+#[async_trait::async_trait]
+impl ProtocolTransporterCloser for TcpWriter {
     async fn closed(&self) -> bool {
         self.w.closed()
     }
@@ -436,5 +562,25 @@ impl WriteHalf {
 
     fn close(&self) {
         self.shutdown.cancel();
+    }
+
+    async fn send(&self, cmd: &TransportMessage, t: Option<Duration>) -> Result<()> {
+        if self.closed() {
+            return Err(TransporterError::from_code(ErrorCode::ConnectionClosed).into());
+        }
+
+        if t.is_none() {
+            if let Err(e) = self.w.lock().await.write_all(&cmd.to_bytes()?).await {
+                return Err(TransporterError::new(ErrorCode::WriteError, e.to_string()).into());
+            }
+            return Ok(());
+        }
+
+        timeout(t.unwrap(), self.w.lock().await.write_all(&cmd.to_bytes()?))
+            .await
+            .map_err(|e| -> anyhow::Error {
+                TransporterError::new(ErrorCode::WriteTimeoutError, e.to_string()).into()
+            })?;
+        Ok(())
     }
 }

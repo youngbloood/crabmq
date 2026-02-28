@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
-
-use transporter::{Transporter, TransporterWriter};
+use transporter::{TransporterClientManager, TransporterWriter};
 
 #[derive(Clone)]
 pub struct Client {

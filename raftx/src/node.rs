@@ -23,7 +23,7 @@ use tokio::{
     sync::{Mutex, mpsc},
     time::{self, Instant},
 };
-use transporter::{TransportMessage, Transporter};
+use transporter::{TransportMessage, TransporterServiceManager};
 
 pub struct Node<S: StateApply> {
     pub id: u32,
@@ -46,7 +46,7 @@ pub struct Node<S: StateApply> {
     // finite state machine
     fsm: Arc<S>,
 
-    trans: Transporter,
+    trans_service: TransporterServiceManager,
 }
 
 impl<S: StateApply> Clone for Node<S> {
@@ -61,7 +61,7 @@ impl<S: StateApply> Clone for Node<S> {
             peer: self.peer.clone(),
             callbacks: self.callbacks.clone(),
             fsm: self.fsm.clone(),
-            trans: self.trans.clone(),
+            trans_service: self.trans_service.clone(),
         }
     }
 }
@@ -103,7 +103,9 @@ impl<S: StateApply> Node<S> {
             my_mailbox: Arc::new(Mutex::new(rx)),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
-            trans: Transporter::new(transporter::Config::default()),
+            trans_service: TransporterServiceManager::new(
+                transporter::TransporterServiceConfig::default(),
+            ),
             conf: Arc::new(conf),
             callbacks: Arc::new(DashMap::new()),
             fsm: Arc::new(fsm),
@@ -141,8 +143,8 @@ impl<S: StateApply> Node<S> {
                 remote_addr.clone().to_string(),
                 (Box::new(resp) as Box<dyn EnDecoder>).into(),
             );
-            let _ = self.trans.send(&t).await;
-            self.trans.close(remote_addr).await;
+            let _ = self.trans_service.send(&t, None).await;
+            self.trans_service.close(remote_addr).await;
             return;
         }
 
@@ -159,7 +161,7 @@ impl<S: StateApply> Node<S> {
             remote_addr.clone().to_string(),
             (Box::new(resp) as Box<dyn EnDecoder>).into(),
         );
-        let _ = self.trans.send(&t).await;
+        let _ = self.trans_service.send(&t, None).await;
     }
 
     async fn handle_conf_change(&self, req: &protocol::CooRaftConfChangeRequest) {
@@ -255,7 +257,7 @@ impl<S: StateApply> Node<S> {
 
     async fn add_peer(&self, remote_id: u32, remote_addr: &str, meta: HashMap<String, String>) {
         let (tx, rx) = mpsc::channel(self.conf.mailbox_buffer_len);
-        let w = self.trans.split_writer(remote_addr).await;
+        let w = self.trans_service.split_writer(remote_addr).await;
         if w.is_none() {
             error!(
                 "RAFTX[{}]: not found writer for remote_addr[{}]",
@@ -301,7 +303,7 @@ impl<S: StateApply> Node<S> {
         let mut print_interval = Instant::now();
         let mut is_initial_conf_committed = false;
 
-        self.trans.start().await?;
+        self.trans_service.run().await?;
 
         if self.is_leader().await && !is_initial_conf_committed {
             let _ = self.commit_self_conf_change().await;
@@ -309,7 +311,7 @@ impl<S: StateApply> Node<S> {
         }
 
         let node: Node<S> = self.clone();
-        let mut trans = self.trans.clone();
+        let mut trans = self.trans_service.clone();
 
         let inner_index = [
             protocol::v1::COO_RAFT_CONF_CHANGE_REQUEST_INDEX,
@@ -320,7 +322,10 @@ impl<S: StateApply> Node<S> {
         loop {
             let my_mailbox = self.my_mailbox.clone();
             select! {
-                msg = trans.recv(0) => {
+                msg = trans.recv(None) => {
+                    if msg.is_none() {
+                        continue;
+                    }
                     let msg = msg.unwrap();
                     hooker(msg.clone()).await;
                     if !inner_index.contains(&msg.index) {

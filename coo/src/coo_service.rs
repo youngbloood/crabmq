@@ -8,11 +8,11 @@ use crate::partition::{PartitionManager, PartitionPolicy};
 use anyhow::Result;
 use raftx::Node as RaftNode;
 use std::sync::Arc;
-use transporter::{TransportMessage, TransportProtocol, Transporter};
+use transporter::{TransportMessage, TransporterServiceManager};
 
 pub struct CoordinatorService {
     coo: Arc<Coordinator>,
-    trans: Transporter,
+    trans: TransporterServiceManager,
     raft_node: Arc<RaftNode<PartitionManager>>,
 }
 
@@ -27,11 +27,10 @@ impl CoordinatorService {
             RaftNode::new(conf.raftx_config.clone(), partition_manager.clone());
         let raft_node = Arc::new(raft_node);
 
-        let trans = Transporter::new(transporter::Config {
+        let trans = TransporterServiceManager::new(transporter::TransporterServiceConfig {
             addr: conf.coo.addr.clone(),
             protocol: conf.coo.protocol,
             incoming_max_connections: conf.coo.incoming_max_connections,
-            outgoing_max_connections: conf.coo.outgoing_max_connections,
         });
 
         let coo = Arc::new(Coordinator::new(
@@ -58,13 +57,13 @@ impl CoordinatorService {
                 }
             })
             .await?;
-        self.trans.start().await?;
+        self.trans.run().await?;
         // 确保仅有一个线程调用 recv 来获取消息并处理
         let mut trans = self.trans.clone();
         tokio::spawn(async move {
             loop {
                 select! {
-                    msg = trans.recv(0) => {
+                    msg = trans.recv(None) => {
                         if msg.is_none() {
                             continue;
                         }
