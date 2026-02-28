@@ -1,6 +1,7 @@
 mod conn;
 mod err;
 mod manager;
+
 mod tcp;
 
 pub use manager::*;
@@ -64,7 +65,9 @@ impl From<&str> for TransportProtocol {
             "udp" => TransportProtocol::UDP,
             "quic" => TransportProtocol::QUIC,
             "kcp" => TransportProtocol::KCP,
-            _ => TransportProtocol::TCP,
+            _ => {
+                panic!("Unknown transport protocol: {}", s);
+            }
         }
     }
 }
@@ -80,10 +83,12 @@ impl TransportProtocol {
     }
 }
 
+#[cfg(feature = "service")]
 pub enum TransporterWriter {
     Tcp(tcp::TcpWriter),
 }
 
+#[cfg(feature = "service")]
 impl TransporterWriter {
     fn from_tcp(w: tcp::TcpWriter) -> Self {
         TransporterWriter::Tcp(w)

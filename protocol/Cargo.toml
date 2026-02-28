@@ -3,6 +3,10 @@ name = "protocol"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["v1"]
+v1 = []
+
 [build-dependencies]
 tonic-build = "0.12"
 

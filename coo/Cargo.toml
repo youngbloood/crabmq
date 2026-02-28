@@ -26,5 +26,5 @@ bincode = { version = "2.0.1", features = ["serde"] }
 nanoid = "0.4.0"
 rand = "0.9.1"
 protocol = { version = "0.1.0", path = "../protocol" }
-transporter = { version = "0.1.0", path = "../transporter" }
+transporter = { version = "0.1.0", path = "../transporter" ,features = ["service"]}
 raftx = { version = "0.1.0", path = "../raftx" }

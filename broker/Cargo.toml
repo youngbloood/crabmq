@@ -30,3 +30,4 @@ tokio = "1.45.0"
 tokio-stream = "0.1.17"
 tokio-util = "0.7.15"
 tonic = "0.13.1"
+transporter = { version = "0.1.0", path = "../transporter" }

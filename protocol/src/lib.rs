@@ -1,16 +1,19 @@
 pub mod aggregation;
-pub mod err;
+
+#[cfg(feature = "v1")]
 pub mod v1;
 
 use anyhow::Result;
 use lazy_static::lazy_static;
 use std::{any::Any, collections::HashMap, fmt::Debug};
 
+#[cfg(feature = "v1")]
 // Include generated Protobuf code
 pub mod pbv1 {
     include!(concat!(env!("OUT_DIR"), "/crabmq.protocol.v1.rs"));
 }
 
+#[cfg(feature = "v1")]
 pub use pbv1::*;
 
 pub const VERSION1: u8 = 1;
@@ -58,7 +61,9 @@ pub type MessageDecoder = fn(&[u8]) -> Result<Box<dyn EnDecoder>>;
 lazy_static! {
     static ref DECODER_REGISTRY: HashMap<(u8, u16), MessageDecoder> = {
         let mut m = HashMap::new();
+        #[cfg(feature = "v1")]
         m.extend(v1::decoders());
+
         m
     };
 }

@@ -10,6 +10,7 @@ pub mod client_broker;
 pub mod client_coo;
 pub mod common;
 pub mod coo_raft;
+pub mod err;
 
 // ============================================================================
 // 消息类型索引 (Message Type Indexes) - v1

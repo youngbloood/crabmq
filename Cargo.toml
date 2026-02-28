@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "coo",
     "common",
+    "broker",
     "protocol",
     "storagev2",
     "transporter",

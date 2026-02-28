@@ -1,8 +1,3 @@
-use std::{
-    sync::{Arc, atomic},
-    time::Duration,
-};
-
 use crate::{
     TransportMessage, TransportProtocol, TransporterWriter,
     conn::{ProtocolTransporterClient, ProtocolTransporterService},
@@ -11,8 +6,13 @@ use crate::{
 };
 use anyhow::Result;
 use dashmap::DashMap;
+use std::{
+    sync::{Arc, atomic},
+    time::Duration,
+};
 use tokio::sync::Mutex;
 
+#[cfg(feature = "service")]
 #[derive(Clone)]
 pub struct TransporterServiceConfig {
     pub addr: String,
@@ -20,6 +20,7 @@ pub struct TransporterServiceConfig {
     pub incoming_max_connections: usize,
 }
 
+#[cfg(feature = "service")]
 impl TransporterServiceConfig {
     fn fix(&mut self) {
         if self.addr.is_empty() {
@@ -31,6 +32,7 @@ impl TransporterServiceConfig {
     }
 }
 
+#[cfg(feature = "service")]
 impl Default for TransporterServiceConfig {
     fn default() -> Self {
         TransporterServiceConfig {
@@ -41,12 +43,14 @@ impl Default for TransporterServiceConfig {
     }
 }
 
+#[cfg(feature = "service")]
 #[derive(Clone)]
 pub struct TransporterServiceManager {
     conf: TransporterServiceConfig,
     service: Arc<Mutex<Box<dyn ProtocolTransporterService>>>,
 }
 
+#[cfg(feature = "service")]
 impl TransporterServiceManager {
     pub fn new(conf: TransporterServiceConfig) -> Self {
         let service: Arc<Mutex<Box<dyn ProtocolTransporterService>>> = match conf.protocol {
@@ -118,12 +122,14 @@ impl TransporterServiceManager {
     }
 }
 
+#[cfg(feature = "client")]
 #[derive(Clone)]
 pub struct TransporterClientConfig {
     pub protocol: TransportProtocol,
     pub outgoing_max_connections: usize,
 }
 
+#[cfg(feature = "client")]
 impl Default for TransporterClientConfig {
     fn default() -> Self {
         TransporterClientConfig {
@@ -133,12 +139,14 @@ impl Default for TransporterClientConfig {
     }
 }
 
+#[cfg(feature = "client")]
 struct TransporterClientUnit {
     remote_addr: String,
     round: Arc<atomic::AtomicUsize>,
     client: Box<dyn ProtocolTransporterClient>,
 }
 
+#[cfg(feature = "client")]
 #[derive(Clone)]
 pub struct TransporterClientManager {
     conf: TransporterClientConfig,
@@ -147,6 +155,7 @@ pub struct TransporterClientManager {
     clients: Arc<DashMap<String, TransporterClientUnit>>,
 }
 
+#[cfg(feature = "client")]
 impl TransporterClientManager {
     pub fn new(conf: TransporterClientConfig) -> Self {
         TransporterClientManager {
@@ -190,7 +199,7 @@ impl TransporterClientManager {
 
     pub fn close(&self, remote_addr: &str) {
         if let Some(client) = self.clients.remove(remote_addr) {
-            client.1.client.close();
+            let _ = client.1.client.close();
         }
     }
 }

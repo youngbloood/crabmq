@@ -3,11 +3,16 @@ name = "transporter"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+service = []
+client = []
+
+
 [dependencies]
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 dashmap = "6.1.0"
-protocol = { version = "0.1.0", path = "../protocol" }
+protocol = { version = "0.1.0", path = "../protocol" ,features=["v1"]}
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.18"
 log = "0.4.27"
