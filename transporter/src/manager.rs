@@ -1,9 +1,20 @@
 use crate::{
-    TransportMessage, TransportProtocol, TransporterWriter,
-    conn::{ProtocolTransporterClient, ProtocolTransporterService},
+    TransportMessage, TransportProtocol,
     err::{ErrorCode, TransporterError},
-    tcp::{TcpClient, TcpService},
 };
+
+#[cfg(feature = "service")]
+use crate::TransporterWriter;
+#[cfg(feature = "service")]
+use crate::conn::ProtocolTransporterService;
+#[cfg(feature = "service")]
+use crate::tcp::TcpService;
+
+#[cfg(feature = "client")]
+use crate::conn::ProtocolTransporterClient;
+#[cfg(feature = "client")]
+use crate::tcp::TcpClient;
+
 use anyhow::Result;
 use dashmap::DashMap;
 use std::{

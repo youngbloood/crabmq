@@ -1,8 +1,15 @@
+#[cfg(feature = "service")]
+use crate::TransporterWriter;
+#[cfg(feature = "client")]
+use crate::conn::ProtocolTransporterClient;
+#[cfg(feature = "service")]
+use crate::conn::ProtocolTransporterService;
+
 use crate::{
-    TransportMessage, TransporterWriter,
+    TransportMessage,
     conn::{
-        ProtocolTransporterClient, ProtocolTransporterCloser, ProtocolTransporterReader,
-        ProtocolTransporterService, ProtocolTransporterShutdown, ProtocolTransporterWriter,
+        ProtocolTransporterCloser, ProtocolTransporterReader, ProtocolTransporterShutdown,
+        ProtocolTransporterWriter,
     },
     err::{ErrorCode, TransporterError},
     handle_message,

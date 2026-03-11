@@ -1,7 +1,6 @@
 mod conn;
 mod err;
 mod manager;
-
 mod tcp;
 
 pub use manager::*;

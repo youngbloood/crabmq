@@ -15,8 +15,10 @@ pub struct Config {
 
 #[derive(Clone)]
 pub struct Base {
-    // coordinator 节点监听的地址
-    pub addr: String,
+    // 提供给 brokers 服务节点监听的地址
+    pub for_broker_addr: String,
+    // 提供给 clients 服务节点监听的地址
+    pub for_client_addr: String,
 
     pub protocol: TransportProtocol,
 
@@ -101,7 +103,21 @@ impl Config {
             }
             Ok(())
         };
-        must_not_empty("coo.addr", &self.coo.addr)?;
+
+        let must_not_equal = |attr, v1: &str, v2: &str| -> Result<()> {
+            if v1 == v2 {
+                return Err(anyhow!("'{attr}' must not equal"));
+            }
+            Ok(())
+        };
+
+        must_not_empty("coo.for_broker_addr", &self.coo.for_broker_addr)?;
+        must_not_empty("coo.for_client_addr", &self.coo.for_client_addr)?;
+        must_not_equal(
+            "coo.for_broker_addr and coo.for_client_addr",
+            &self.coo.for_broker_addr,
+            &self.coo.for_client_addr,
+        )?;
         must_not_empty("raftx_config.raft.addr", &self.raftx_config.raft.addr)?;
 
         // 检查是否以 n/N 结尾，并验证前面是数字

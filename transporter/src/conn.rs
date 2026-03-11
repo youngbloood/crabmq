@@ -1,4 +1,6 @@
-use crate::{TransportMessage, TransporterWriter};
+use crate::TransportMessage;
+#[cfg(feature = "service")]
+use crate::TransporterWriter;
 use anyhow::Result;
 use std::time::Duration;
 
@@ -41,6 +43,7 @@ pub trait ProtocolTransporterReader: Send + Sync + 'static {
 /**
  * ProtocolTransporterService 定义了本地监听服务的接口，启动服务并从 channel 中获取消息
  */
+#[cfg(feature = "service")]
 #[async_trait::async_trait]
 pub trait ProtocolTransporterService:
     ProtocolTransporterReader + ProtocolTransporterWriter + ProtocolTransporterShutdown + Send + Sync
@@ -58,6 +61,7 @@ pub trait ProtocolTransporterService:
 /**
  * ProtocolTransporterClient 定义了连接到远端地址的接口，建立连接并加入到管理器中
  */
+#[cfg(feature = "client")]
 #[async_trait::async_trait]
 pub trait ProtocolTransporterClient:
     ProtocolTransporterWriter

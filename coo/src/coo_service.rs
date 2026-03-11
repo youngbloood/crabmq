@@ -12,7 +12,8 @@ use transporter::{TransportMessage, TransporterServiceManager};
 
 pub struct CoordinatorService {
     coo: Arc<Coordinator>,
-    trans: TransporterServiceManager,
+    broker_trans_service: TransporterServiceManager,
+    client_trans_service: TransporterServiceManager,
     raft_node: Arc<RaftNode<PartitionManager>>,
 }
 
@@ -27,11 +28,19 @@ impl CoordinatorService {
             RaftNode::new(conf.raftx_config.clone(), partition_manager.clone());
         let raft_node = Arc::new(raft_node);
 
-        let trans = TransporterServiceManager::new(transporter::TransporterServiceConfig {
-            addr: conf.coo.addr.clone(),
-            protocol: conf.coo.protocol,
-            incoming_max_connections: conf.coo.incoming_max_connections,
-        });
+        let broker_trans_service =
+            TransporterServiceManager::new(transporter::TransporterServiceConfig {
+                addr: conf.coo.for_broker_addr.clone(),
+                protocol: conf.coo.protocol,
+                incoming_max_connections: conf.coo.incoming_max_connections,
+            });
+
+        let client_trans_service =
+            TransporterServiceManager::new(transporter::TransporterServiceConfig {
+                addr: conf.coo.for_client_addr.clone(),
+                protocol: conf.coo.protocol,
+                incoming_max_connections: conf.coo.incoming_max_connections,
+            });
 
         let coo = Arc::new(Coordinator::new(
             conf.clone(),
@@ -41,15 +50,22 @@ impl CoordinatorService {
 
         Ok(Self {
             coo,
-            trans,
+            broker_trans_service,
+            client_trans_service,
             raft_node,
         })
     }
 
     /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        self.run_broker_trans_service().await?;
+        self.run_client_trans_service().await?;
+        self.run_raft_node().await?;
+        Ok(())
+    }
 
+    async fn run_raft_node(&self) -> Result<()> {
+        let (tx, rx) = mpsc::unbounded_channel();
         self.raft_node
             .run(async move |m| {
                 if let Err(e) = tx.send(m) {
@@ -57,9 +73,14 @@ impl CoordinatorService {
                 }
             })
             .await?;
-        self.trans.run().await?;
-        // 确保仅有一个线程调用 recv 来获取消息并处理
-        let mut trans = self.trans.clone();
+
+        self.loop_handle_command(rx).await;
+        Ok(())
+    }
+
+    async fn run_broker_trans_service(&self) -> Result<()> {
+        self.broker_trans_service.run().await?;
+        let mut trans = self.broker_trans_service.clone();
         tokio::spawn(async move {
             loop {
                 select! {
@@ -74,7 +95,26 @@ impl CoordinatorService {
                 }
             }
         });
-        self.loop_handle_command(rx).await;
+        Ok(())
+    }
+
+    async fn run_client_trans_service(&self) -> Result<()> {
+        self.client_trans_service.run().await?;
+        let mut trans = self.client_trans_service.clone();
+        tokio::spawn(async move {
+            loop {
+                select! {
+                    msg = trans.recv(None) => {
+                        if msg.is_none() {
+                            continue;
+                        }
+                        let msg = msg.unwrap();
+                        // 处理接收到的命令
+                        todo!();
+                    }
+                }
+            }
+        });
         Ok(())
     }
 
