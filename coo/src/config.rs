@@ -58,8 +58,13 @@ impl Config {
         self
     }
 
-    pub fn with_coo_addr(mut self, coo_addr: String) -> Self {
-        self.coo.addr = coo_addr;
+    pub fn with_for_broker_addr(mut self, addr: String) -> Self {
+        self.coo.for_broker_addr = addr;
+        self
+    }
+
+    pub fn with_for_client_addr(mut self, addr: String) -> Self {
+        self.coo.for_client_addr = addr;
         self
     }
 

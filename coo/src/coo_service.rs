@@ -58,27 +58,30 @@ impl CoordinatorService {
 
     /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
-        self.run_broker_trans_service().await?;
-        self.run_client_trans_service().await?;
-        self.run_raft_node().await?;
-        Ok(())
-    }
-
-    async fn run_raft_node(&self) -> Result<()> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.raft_node
-            .run(async move |m| {
-                if let Err(e) = tx.send(m) {
-                    error!("RaftNode upload message error: {}", e);
-                }
-            })
-            .await?;
-
+        self.run_broker_trans_service(tx.clone()).await?;
+        self.run_client_trans_service(tx.clone()).await?;
+        self.run_raft_node(tx.clone()).await?;
         self.loop_handle_command(rx).await;
         Ok(())
     }
 
-    async fn run_broker_trans_service(&self) -> Result<()> {
+    async fn run_raft_node(&self, tx: mpsc::UnboundedSender<TransportMessage>) -> Result<()> {
+        let raft_node = self.raft_node.clone();
+        tokio::spawn(async move {
+            raft_node.run(async move |m| {
+                if let Err(e) = tx.send(m) {
+                    error!("RaftNode upload message error: {}", e);
+                }
+            })
+        });
+        Ok(())
+    }
+
+    async fn run_broker_trans_service(
+        &self,
+        tx: mpsc::UnboundedSender<TransportMessage>,
+    ) -> Result<()> {
         self.broker_trans_service.run().await?;
         let mut trans = self.broker_trans_service.clone();
         tokio::spawn(async move {
@@ -89,8 +92,7 @@ impl CoordinatorService {
                             continue;
                         }
                         let msg = msg.unwrap();
-                        // 处理接收到的命令
-                        todo!();
+                        tx.send(msg).await;
                     }
                 }
             }
@@ -98,7 +100,10 @@ impl CoordinatorService {
         Ok(())
     }
 
-    async fn run_client_trans_service(&self) -> Result<()> {
+    async fn run_client_trans_service(
+        &self,
+        tx: mpsc::UnboundedSender<TransportMessage>,
+    ) -> Result<()> {
         self.client_trans_service.run().await?;
         let mut trans = self.client_trans_service.clone();
         tokio::spawn(async move {
@@ -109,8 +114,7 @@ impl CoordinatorService {
                             continue;
                         }
                         let msg = msg.unwrap();
-                        // 处理接收到的命令
-                        todo!();
+                        tx.send(msg).await;
                     }
                 }
             }

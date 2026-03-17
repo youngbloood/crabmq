@@ -29,4 +29,5 @@ message BrokerCooHeartbeatResponse {
     uint32 code = 1; // u16 -> uint32
     string message = 2;
     Topics topics = 3;
+    ConsumerGroups consumer_groups = 4;
 }

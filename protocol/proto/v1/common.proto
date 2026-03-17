@@ -3,7 +3,18 @@ package crabmq.protocol.v1;
 
 message Topics {
     uint64 term = 1;
-    repeated TopicInfo topics = 2;
+    // 主题事件类型
+    TopicEventType event = 2;
+    repeated TopicInfo topics = 3;
+}
+
+enum TopicEventType {
+    // 初始化 topics
+    TOPIC_EVENT_TYPE_INIT = 0;
+    // 增加 topics
+    TOPIC_EVENT_TYPE_ADD = 1;
+    // 减少 topics
+    TOPIC_EVENT_TYPE_REMOVE = 2;
 }
 
 message TopicInfo {
@@ -75,5 +86,11 @@ message EventAddTopic{
 }
 
 message EventRemoveTopic{
+
+}
+
+
+
+message ConsumerGroups {
 
 }
