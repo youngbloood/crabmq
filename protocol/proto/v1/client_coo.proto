@@ -5,7 +5,7 @@ import "common.proto";
 
 message ClientCooAuthRequest {
     string client_id = 1;
-    string secret = 2;
+    string token = 2;
 }
 
 message ClientCooAuthResponse {
@@ -16,7 +16,7 @@ message ClientCooAuthResponse {
 
 message ClientCooHeartbeatRequest {
     string client_id = 1;
-    string token = 2;
+    optional string token = 2;
 }
 
 // Coo 返回给 Client 的心跳响应

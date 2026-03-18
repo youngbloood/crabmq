@@ -5,7 +5,7 @@ message Topics {
     uint64 term = 1;
     // 主题事件类型
     TopicEventType event = 2;
-    repeated TopicInfo topics = 3;
+    repeated TopicInfo list = 3;
 }
 
 enum TopicEventType {
@@ -15,14 +15,15 @@ enum TopicEventType {
     TOPIC_EVENT_TYPE_ADD = 1;
     // 减少 topics
     TOPIC_EVENT_TYPE_REMOVE = 2;
+    // 删除 topics，通知 broker 物理删除响应 topic 相关的分区数据
+    TOPIC_EVENT_TYPE_DELETE = 3;
 }
 
 message TopicInfo {
-    uint64 term = 1;
     // 主题名称
-    string topic = 2;
+    string topic = 1;
     // 主题的分区集群信息
-    map<uint32, PartitionCluster> partitions_cluster = 3;
+    map<uint32, PartitionCluster> partitions_cluster = 2;
 }
 
 message PartitionCluster {
@@ -60,37 +61,79 @@ message SegmentOffset {
     uint64 offset = 2;
 }
 
-
-message Event {
-    EventType event_type = 1;
-    bytes message = 2;
-}
-
-enum EventType {
-    EVENT_TYPE_ADD_RAFT_NODE = 0;
-    EVENT_TYPE_REMOVE_RAFT_NODE = 1;
-    EVENT_TYPE_ADD_TOPIC = 2;
-    EVENT_TYPE_REMOVE_TOPIC = 3;
-}
-
-message EventAddRaftNode{
-
-}
-
-message EventRemoveRaftNode{
-
-}
-
-message EventAddTopic{
-
-}
-
-message EventRemoveTopic{
-
-}
-
-
-
 message ConsumerGroups {
+    uint64 term = 1;
+    // 主题事件类型
+    ConsumerGroupEventType event = 2;
+    repeated ConsumerGroupInfo list = 3;
+}
 
+enum ConsumerGroupEventType {
+    // 初始化 consumer groups
+    CONSUMER_GROUP_EVENT_TYPE_INIT = 0;
+    // 增加 consumer groups
+    CONSUMER_GROUP_EVENT_TYPE_ADD = 1;
+    // 移除 consumer groups
+    CONSUMER_GROUP_EVENT_TYPE_REMOVE = 2;
+    // 增加 consumer groups 的 成员
+    CONSUMER_GROUP_EVENT_TYPE_ADD_MEMBER = 3;
+    // 移除 consumer groups 的 成员
+    CONSUMER_GROUP_EVENT_TYPE_REMOVE_MEMBER = 4;
+}
+
+// 消费者组具体信息
+message ConsumerGroupInfo {
+    // 该消费者组 id
+    string id = 1;
+    // 该消费者组的状态
+    ConsumerGroupStatus status = 2;
+    // 该消费者组的滑动窗口大小
+    uint64  consumer_slide_window_size = 3;
+    // 该消费者组订阅的 topic 和分区列表
+    map<string, uint32> topics = 4;
+    // 该消费者组的成员信息
+    map<string, ConsumerGroupMember> members = 5;
+}
+
+message ConsumerGroupMember {
+    string id = 1;
+}
+
+enum ConsumerGroupStatus{
+    /// 无成员
+    Empty = 0;
+    /// 稳定状态
+    Stable = 1;
+    /// 再平衡中
+    Rebalancing = 2;
+    /// 组已失效
+    Dead = 3;
+}
+
+
+message RaftNodes {
+    uint64 term = 1;
+    // 主题事件类型
+    RaftNodeEventType event = 2;
+    repeated RaftNodeInfo list = 3;
+}
+
+enum RaftNodeEventType {
+    // 初始化 raft nodes
+    RAFT_NODE_EVENT_TYPE_INIT = 0;
+    // 增加 raft nodes
+    RAFT_NODE_EVENT_TYPE_ADD = 1;
+    // 移除 raft nodes
+    RAFT_NODE_EVENT_TYPE_REMOVE = 2;
+}
+
+message RaftNodeInfo {
+    // 该 raft node id
+    uint32 id = 1;
+    // 该 raft node 地址
+    string addr = 2;
+    // 该 raft node 是否为 leader
+    bool is_leader = 3;
+
+    map<string, string> metadata = 4;
 }
