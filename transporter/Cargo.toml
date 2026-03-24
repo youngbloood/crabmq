@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["service", "client"]
 service = []
 client = []
 
@@ -16,3 +17,4 @@ protocol = { version = "0.1.0", path = "../protocol" ,features=["v1"]}
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.18"
 log = "0.4.27"
+tokio-stream = "0.1.18"

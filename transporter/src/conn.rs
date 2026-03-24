@@ -2,7 +2,14 @@ use crate::TransportMessage;
 #[cfg(feature = "service")]
 use crate::TransporterWriter;
 use anyhow::Result;
-use std::time::Duration;
+use std::{net::SocketAddr, net::ToSocketAddrs, time::Duration};
+
+/**
+ * ProtocolGetRemoteAddr 定义了获取远端地址的接口，get_remote_addr 方法根据连接 ID 获取远端地址
+ */
+pub trait ProtocolGetRemoteAddr {
+    fn get_remote_addr(&self, conn_id: u64) -> Option<SocketAddr>;
+}
 
 /**
  * ProtocolTransporterShutdown 定义了关闭服务的接口，shutdown 方法用于停止服务
@@ -33,29 +40,21 @@ pub trait ProtocolTransporterWriter: Send + Sync + 'static {
 }
 
 /**
- * ProtocolTransporterReader 定义了接收消息的接口，recv 方法从链接中获取消息
- */
-#[async_trait::async_trait]
-pub trait ProtocolTransporterReader: Send + Sync + 'static {
-    async fn recv(&mut self, t: Option<Duration>) -> Option<TransportMessage>;
-}
-
-/**
  * ProtocolTransporterService 定义了本地监听服务的接口，启动服务并从 channel 中获取消息
  */
 #[cfg(feature = "service")]
 #[async_trait::async_trait]
 pub trait ProtocolTransporterService:
-    ProtocolTransporterReader + ProtocolTransporterWriter + ProtocolTransporterShutdown + Send + Sync
+    ProtocolTransporterWriter + ProtocolTransporterShutdown + ProtocolGetRemoteAddr + Send + Sync
 {
     // 启动本地监听服务
     async fn run(&self) -> Result<()>;
 
-    async fn split_writer(&self, remote: &str) -> Option<TransporterWriter>;
+    async fn split_writer(&self, conn_id: u64) -> Option<TransporterWriter>;
     // 广播
     async fn broadcast(&self, cmd: &TransportMessage) -> Result<()>;
 
-    async fn close(&self, remote: &str) -> Result<()>;
+    async fn close(&self, conn_id: u64) -> Result<()>;
 }
 
 /**
@@ -64,10 +63,13 @@ pub trait ProtocolTransporterService:
 #[cfg(feature = "client")]
 #[async_trait::async_trait]
 pub trait ProtocolTransporterClient:
-    ProtocolTransporterWriter
-    + ProtocolTransporterReader
-    + ProtocolTransporterShutdown
-    + ProtocolTransporterCloser
+    ProtocolTransporterWriter + ProtocolTransporterShutdown + ProtocolTransporterCloser
 {
-    async fn connect(&self, remote_addr: &str) -> Result<()>;
+    async fn connect(&self, remote_addr: SocketAddr, timeout: Duration) -> Result<u64>;
+}
+
+static CONN_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+// 生成一个全局唯一的连接 ID，可以使用 UUID 或者其他方法来实现
+pub(crate) fn get_conn_id() -> u64 {
+    CONN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

@@ -11,24 +11,31 @@ use crate::conn::ProtocolTransporterService;
 use crate::tcp::TcpService;
 
 #[cfg(feature = "client")]
-use crate::conn::ProtocolTransporterClient;
+use crate::conn::{ProtocolTransporterClient, get_conn_id};
 #[cfg(feature = "client")]
 use crate::tcp::TcpClient;
 
 use anyhow::Result;
 use dashmap::DashMap;
+#[cfg(feature = "client")]
+use std::net::ToSocketAddrs;
+#[cfg(feature = "service")]
+use std::num::NonZeroUsize;
 use std::{
     sync::{Arc, atomic},
     time::Duration,
 };
 use tokio::sync::Mutex;
+#[cfg(feature = "client")]
+use tokio::sync::mpsc::Sender;
 
 #[cfg(feature = "service")]
 #[derive(Clone)]
 pub struct TransporterServiceConfig {
     pub addr: String,
     pub protocol: TransportProtocol,
-    pub incoming_max_connections: usize,
+    pub incoming_max_connections: NonZeroUsize,
+    pub max_frame_body_size: NonZeroUsize,
 }
 
 #[cfg(feature = "service")]
@@ -36,9 +43,6 @@ impl TransporterServiceConfig {
     fn fix(&mut self) {
         if self.addr.is_empty() {
             self.addr = "localhost:4343".to_string();
-        }
-        if self.incoming_max_connections == 0 {
-            self.incoming_max_connections = 100;
         }
     }
 }
@@ -49,7 +53,8 @@ impl Default for TransporterServiceConfig {
         TransporterServiceConfig {
             addr: "localhost:4343".to_string(),
             protocol: TransportProtocol::TCP,
-            incoming_max_connections: 100,
+            incoming_max_connections: NonZeroUsize::new(100).unwrap(),
+            max_frame_body_size: NonZeroUsize::new(10 * 1024 * 1024).unwrap(), // 默认每个消息最大 body 大小为10MB
         }
     }
 }
@@ -58,18 +63,19 @@ impl Default for TransporterServiceConfig {
 #[derive(Clone)]
 pub struct TransporterServiceManager {
     conf: TransporterServiceConfig,
-    service: Arc<Mutex<Box<dyn ProtocolTransporterService>>>,
+    service: Arc<Box<dyn ProtocolTransporterService>>,
 }
 
 #[cfg(feature = "service")]
 impl TransporterServiceManager {
-    pub fn new(conf: TransporterServiceConfig) -> Self {
-        let service: Arc<Mutex<Box<dyn ProtocolTransporterService>>> = match conf.protocol {
-            TransportProtocol::TCP => Arc::new(Mutex::new(Box::new(TcpService::new(
+    pub fn new(conf: TransporterServiceConfig, tx: Sender<TransportMessage>) -> Self {
+        let service: Arc<Box<dyn ProtocolTransporterService>> = match conf.protocol {
+            TransportProtocol::TCP => Arc::new(Box::new(TcpService::new(
                 conf.addr.clone(),
-                conf.incoming_max_connections,
-            ))
-                as Box<dyn ProtocolTransporterService>)),
+                conf.incoming_max_connections.get(),
+                conf.max_frame_body_size.get(),
+                tx,
+            ))),
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -80,7 +86,7 @@ impl TransporterServiceManager {
 
     pub async fn run(&self) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.service.lock().await.run().await,
+            TransportProtocol::TCP => self.service.run().await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -89,7 +95,7 @@ impl TransporterServiceManager {
 
     pub async fn send(&self, msg: &TransportMessage, t: Option<Duration>) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.service.lock().await.send(&msg, t).await,
+            TransportProtocol::TCP => self.service.send(&msg, t).await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -98,34 +104,25 @@ impl TransporterServiceManager {
 
     pub async fn broadcast(&self, msg: &TransportMessage) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.service.lock().await.broadcast(msg).await,
+            TransportProtocol::TCP => self.service.broadcast(msg).await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
         }
     }
 
-    pub async fn recv(&self, t: Option<Duration>) -> Option<TransportMessage> {
+    pub async fn split_writer(&self, conn_id: u64) -> Option<TransporterWriter> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.service.lock().await.recv(t).await,
+            TransportProtocol::TCP => self.service.split_writer(conn_id).await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
         }
     }
 
-    pub async fn split_writer(&self, remote: &str) -> Option<TransporterWriter> {
+    pub async fn close(&self, conn_id: u64) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.service.lock().await.split_writer(remote).await,
-            TransportProtocol::UDP => todo!(),
-            TransportProtocol::QUIC => todo!(),
-            TransportProtocol::KCP => todo!(),
-        }
-    }
-
-    pub async fn close(&self, remote_addr: &str) -> Result<()> {
-        match self.conf.protocol {
-            TransportProtocol::TCP => self.service.lock().await.close(remote_addr).await,
+            TransportProtocol::TCP => self.service.close(conn_id).await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -137,7 +134,8 @@ impl TransporterServiceManager {
 #[derive(Clone)]
 pub struct TransporterClientConfig {
     pub protocol: TransportProtocol,
-    pub outgoing_max_connections: usize,
+    pub outgoing_max_connections: NonZeroUsize,
+    pub max_frame_body_size: NonZeroUsize,
 }
 
 #[cfg(feature = "client")]
@@ -145,7 +143,8 @@ impl Default for TransporterClientConfig {
     fn default() -> Self {
         TransporterClientConfig {
             protocol: TransportProtocol::TCP,
-            outgoing_max_connections: 100,
+            outgoing_max_connections: NonZeroUsize::new(100).unwrap(),
+            max_frame_body_size: NonZeroUsize::new(10 * 1024 * 1024).unwrap(), // 默认每个消息最大 body 大小为10MB
         }
     }
 }
@@ -162,22 +161,33 @@ struct TransporterClientUnit {
 pub struct TransporterClientManager {
     conf: TransporterClientConfig,
     sema: Arc<tokio::sync::Semaphore>,
-    round: Arc<atomic::AtomicUsize>,
-    clients: Arc<DashMap<String, TransporterClientUnit>>,
+    tx: Sender<TransportMessage>,
+    clients: Arc<DashMap<u64, TransporterClientUnit>>,
 }
 
 #[cfg(feature = "client")]
 impl TransporterClientManager {
-    pub fn new(conf: TransporterClientConfig) -> Self {
+    pub fn new(conf: TransporterClientConfig, tx: Sender<TransportMessage>) -> Self {
         TransporterClientManager {
-            sema: Arc::new(tokio::sync::Semaphore::new(conf.outgoing_max_connections)),
+            sema: Arc::new(tokio::sync::Semaphore::new(
+                conf.outgoing_max_connections.get(),
+            )),
             clients: Arc::new(DashMap::new()),
             conf,
-            round: Arc::new(atomic::AtomicUsize::new(0)),
+            tx,
         }
     }
 
-    pub async fn connect(&self, remote_addr: &str, protocol: TransportProtocol) -> Result<()> {
+    pub async fn connect<A: ToSocketAddrs>(
+        &self,
+        remote_addr: A,
+        protocol: TransportProtocol,
+        timeout: Duration,
+    ) -> Result<()> {
+        let remote_addr = remote_addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid remote address"))?;
         let sema = self.sema.clone();
         let permit = sema.acquire_owned().await.map_err(|_| -> anyhow::Error {
             TransporterError::new(
@@ -189,10 +199,15 @@ impl TransporterClientManager {
 
         match protocol {
             TransportProtocol::TCP => {
-                let t = TcpClient::new(remote_addr.to_string(), permit);
-                t.connect(remote_addr).await?;
+                let t = TcpClient::new(
+                    remote_addr,
+                    self.tx.clone(),
+                    permit,
+                    self.conf.max_frame_body_size.get(),
+                );
+                let conn_id = t.connect(remote_addr, timeout).await?;
                 self.clients.insert(
-                    remote_addr.to_string(),
+                    conn_id,
                     TransporterClientUnit {
                         remote_addr: remote_addr.to_string(),
                         round: Arc::new(atomic::AtomicUsize::new(0)),
@@ -208,8 +223,8 @@ impl TransporterClientManager {
         }
     }
 
-    pub fn close(&self, remote_addr: &str) {
-        if let Some(client) = self.clients.remove(remote_addr) {
+    pub fn close(&self, conn_id: u64) {
+        if let Some(client) = self.clients.remove(&conn_id) {
             let _ = client.1.client.close();
         }
     }

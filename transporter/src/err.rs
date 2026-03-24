@@ -10,7 +10,8 @@ static ERROR_MESSAGE: LazyLock<HashMap<ErrorCode, &'static str>> = LazyLock::new
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     ServiceShutdown = 999,
-    ConnectionClosed = 1000,
+    ConnectTimeout = 1000,
+    ConnectionClosed = 1099,
     ConnectError = 1001,
     AcceptError = 1002,
     WriteError = 1003,
@@ -21,6 +22,7 @@ pub enum ErrorCode {
     SendError = 1007,
     MaxIncomingReached = 1008,
     MaxOutgoingReached = 1009,
+    ExceedMaxMessageSize = 1011,
 }
 
 impl Display for ErrorCode {
