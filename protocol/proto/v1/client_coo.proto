@@ -4,8 +4,12 @@ package crabmq.protocol.v1;
 import "common.proto";
 
 message ClientCooAuthRequest {
-    string client_id = 1;
-    string token = 2;
+    string username = 1;
+    // md5(sha1(password) + salt)， 服务端存储的密码为: sha1(password)
+    string password = 2;
+    // salt 由 client 端随机生成
+    string salt = 3;
+    uint64 timestamp = 4;
 }
 
 message ClientCooAuthResponse {

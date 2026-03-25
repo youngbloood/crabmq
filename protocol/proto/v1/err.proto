@@ -1,17 +1,10 @@
 syntax = "proto3";
 package crabmq.protocol.v1;
 
-enum ErrorCode {
-    ERROR_CODE_UNKNOWN = 0;
-    // raft id conflict
-    ERROR_CODE_RAFT_ID_CONFLICT = 1;
-    // broker id conflict
-    ERROR_CODE_BROKER_ID_CONFLICT = 2;
-}
 
 // ErrorResponse contains all error code and message and metadata
 message ErrorResponse {
-    ErrorCode code = 1;
+    uint32 code = 1;
     string message = 2;
     map<string, string> meta = 3;
 }

@@ -3,6 +3,22 @@ package crabmq.protocol.v1;
 
 import "common.proto";
 
+
+message BrokerCooAuthRequest {
+    // COO 认证 token
+    string token = 1;
+}
+
+message BrokerCooAuthResponse {
+    // 响应码
+    uint64 code = 1;
+    // 响应消息
+    string message = 2;
+}
+
+
+
+
 // Broker COO 心跳请求
 message BrokerCooHeartbeatRequest {
     // COO 认证 token（第一次时需要）
@@ -42,8 +58,12 @@ message BrokerCooHeartbeatResponse {
     uint64 seq = 3;
     // term
     uint64 term = 4;
+
+    // public_key, 用于 broker 对 client 的认证校验
+    optional string public_key = 5;
+
     // 心跳额外携带的信息
-    optional RaftNodes raft_nodes = 5;
-    optional Topics topics = 6;
-    optional ConsumerGroups consumer_groups = 7; 
+    optional RaftNodes raft_nodes = 6;
+    optional Topics topics = 7;
+    optional ConsumerGroups consumer_groups = 8; 
 }
