@@ -139,7 +139,7 @@ impl<S: StateApply> Node<S> {
     async fn handle_meta_req(&self, conn_id: u64, req: &protocol::CooRaftGetMetaRequest) {
         if req.id == self.conf.id {
             let resp = protocol::ErrorResponse {
-                code: protocol::ErrorCode::RaftIdConflict as i32,
+                code: 1,
                 message: "".to_string(),
                 meta: HashMap::new(),
             };

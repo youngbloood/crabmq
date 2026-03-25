@@ -1,7 +1,6 @@
 syntax = "proto3";
 package crabmq.protocol.v1;
 
-
 // ErrorResponse contains all error code and message and metadata
 message ErrorResponse {
     uint32 code = 1;

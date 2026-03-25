@@ -65,7 +65,7 @@ impl CoordinatorService {
     }
 
     /// 启动 Coordinator 服务
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> Result<mpsc::Sender<TransportMessage>> {
         let (tx, rx) = mpsc::channel(1024);
 
         // 启动接收服务，将消息写入 tx
@@ -75,7 +75,7 @@ impl CoordinatorService {
 
         // 消费消息并处理
         self.loop_handle_command(rx).await;
-        Ok(())
+        Ok(tx)
     }
 
     async fn loop_handle_command(&self, mut rx: mpsc::Receiver<TransportMessage>) {
@@ -91,5 +91,9 @@ impl CoordinatorService {
                     }
             }
         }
+    }
+
+    pub async fn is_leader(&self) -> bool {
+        self.raft_node.is_leader().await
     }
 }

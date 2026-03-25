@@ -2,7 +2,7 @@ use std::any::Any;
 
 use crate::EnDecoder;
 
-pub use crate::pbv1::{ErrorCode, ErrorResponse};
+pub use crate::pbv1::ErrorResponse;
 
 impl EnDecoder for ErrorResponse {
     fn index(&self) -> u16 {
