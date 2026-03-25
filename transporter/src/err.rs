@@ -2,35 +2,75 @@ use std::{collections::HashMap, fmt::Display, sync::LazyLock};
 
 static ERROR_MESSAGE: LazyLock<HashMap<ErrorCode, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    m.insert(ErrorCode::DecodeError, "Failed to decode message");
+    m.insert(ErrorCode::ReadError, "Failed to read from connection");
+    m.insert(
+        ErrorCode::ReadTimeoutError,
+        "Read from connection timed out",
+    );
+    m.insert(ErrorCode::WriteError, "Failed to write to connection");
+    m.insert(
+        ErrorCode::WriteTimeoutError,
+        "Write to connection timed out",
+    );
+    m.insert(ErrorCode::SendError, "Failed to send message");
+    m.insert(
+        ErrorCode::ExceedMaxMessageSize,
+        "Message size exceeds the maximum allowed",
+    );
+    m.insert(ErrorCode::UnknownMessageTypeError, "Unknown message type");
     m.insert(ErrorCode::ConnectionClosed, "Connection closed");
+    m.insert(ErrorCode::ConnectTimeout, "Connection timed out");
+    m.insert(ErrorCode::ConnectError, "Failed to connect to server");
+    m.insert(
+        ErrorCode::MaxOutgoingReached,
+        "Maximum outgoing connections reached",
+    );
+    m.insert(ErrorCode::ServiceShutdown, "Service is shutting down");
+    m.insert(ErrorCode::AcceptError, "Failed to accept connection");
+    m.insert(
+        ErrorCode::MaxIncomingReached,
+        "Maximum incoming connections reached",
+    );
+
     m
 });
 
+/**
+ * 错误码定义
+ * 20xx: 公共错误码
+ * 21xx: client 相关错误码
+ * 22xx: service 相关错误码
+ */
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
-    ServiceShutdown = 999,
-    ConnectTimeout = 1000,
-    ConnectionClosed = 1099,
-    ConnectError = 1001,
-    AcceptError = 1002,
-    WriteError = 1003,
-    WriteTimeoutError = 1010,
-    ReadError = 1004,
-    DecodeError = 1005,
-    UnknownMessageTypeError = 1006,
-    SendError = 1007,
-    MaxIncomingReached = 1008,
-    MaxOutgoingReached = 1009,
-    ExceedMaxMessageSize = 1011,
+    DecodeError = 2001,
+    ReadError = 2002,
+    ReadTimeoutError = 2003,
+    WriteError = 2004,
+    WriteTimeoutError = 2005,
+    SendError = 2006,
+    ExceedMaxMessageSize = 2007,
+    UnknownMessageTypeError = 2008,
+    ConnectionClosed = 2009,
+
+    ConnectTimeout = 2101,
+    ConnectError = 2102,
+    MaxOutgoingReached = 2103,
+
+    ServiceShutdown = 2201,
+    AcceptError = 2202,
+    MaxIncomingReached = 2203,
 }
 
 impl Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", *self as u16)
+        write!(f, "Code: {:?}", *self as u16)
     }
 }
 
+#[derive(Debug)]
 pub struct TransporterError {
     pub code: ErrorCode,
     pub message: String,
@@ -72,16 +112,10 @@ impl From<std::io::Error> for TransporterError {
 
 impl Display for TransporterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "TransporterError {{ code: {:?}, message: {} }}",
-            self.code, self.message
-        )
+        write!(f, "Code: {:?}, Message: {} }}", self.code, self.message)
     }
 }
 
-impl Into<anyhow::Error> for TransporterError {
-    fn into(self) -> anyhow::Error {
-        anyhow::anyhow!("{} {}", self.code, self.message)
-    }
-}
+impl std::error::Error for TransporterError {}
+
+

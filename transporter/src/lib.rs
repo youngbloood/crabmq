@@ -5,9 +5,7 @@ mod manager;
 mod tcp;
 
 pub use manager::*;
-#[cfg(feature = "service")]
 use tokio::time::timeout;
-#[cfg(feature = "service")]
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
@@ -16,10 +14,11 @@ use crate::{
 };
 use anyhow::Result;
 use protocol::*;
-#[cfg(feature = "service")]
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::Sender;
+
+const HEAD_LENGHT: usize = 7; // version(1) + index(2) + body_length(4)
 
 #[derive(Clone)]
 pub struct TransportMessage {
@@ -47,11 +46,13 @@ impl TransportMessage {
      * [body] body_length bytes
      */
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = vec![self.version];
+        let message_bytes = self.message.encode()?;
+        // 精确预分配：1(version) + 2(index) + 4(body_length) + body
+        let mut bytes = Vec::with_capacity(HEAD_LENGHT + message_bytes.len());
+        bytes.push(self.version);
         bytes.extend_from_slice(self.index.to_be_bytes().as_slice());
-        let mut message_bytes = self.message.encode()?;
         bytes.extend_from_slice((message_bytes.len() as u32).to_be_bytes().as_slice());
-        bytes.extend_from_slice(&mut message_bytes);
+        bytes.extend_from_slice(&message_bytes);
         Ok(bytes)
     }
 }
@@ -89,15 +90,16 @@ impl TransportProtocol {
     }
 }
 
-#[cfg(feature = "service")]
 #[derive(Clone)]
 pub struct TransporterWriter {
     pub(crate) tx: Sender<Bytes>,
+
+    pub(crate) conn_id: u64,
     pub(crate) remote_addr: SocketAddr,
+
     pub(crate) shotdown: CancellationToken,
 }
 
-#[cfg(feature = "service")]
 impl TransporterWriter {
     pub async fn send(&self, cmd: &TransportMessage, t: Option<Duration>) -> Result<()> {
         let data = cmd.to_bytes()?;

@@ -63,9 +63,13 @@ pub trait ProtocolTransporterService:
 #[cfg(feature = "client")]
 #[async_trait::async_trait]
 pub trait ProtocolTransporterClient:
-    ProtocolTransporterWriter + ProtocolTransporterShutdown + ProtocolTransporterCloser
+    ProtocolTransporterShutdown + ProtocolTransporterCloser
 {
-    async fn connect(&self, remote_addr: SocketAddr, timeout: Duration) -> Result<u64>;
+    async fn connect(
+        &self,
+        remote_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<TransporterWriter>;
 }
 
 static CONN_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
