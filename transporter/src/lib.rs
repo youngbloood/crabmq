@@ -5,21 +5,21 @@ mod manager;
 mod tcp;
 
 pub use manager::*;
-use tokio::time::timeout;
-use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
-use crate::{
-    conn::{ProtocolTransporterCloser as _, ProtocolTransporterWriter},
-    err::{ErrorCode, TransporterError},
-};
+use crate::err::{ErrorCode, TransporterError};
 use anyhow::Result;
 use protocol::*;
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::Sender;
+use tokio::time::timeout;
+use tokio_util::bytes::BytesMut;
+use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
-const HEAD_LENGHT: usize = 7; // version(1) + index(2) + body_length(4)
+/// Wire-format header length: 1 (version) + 2 (index) + 4 (body_length).
+pub(crate) const HEAD_LENGHT: usize = 7;
 
+/// A decoded message received from or to be sent over a transport connection.
 #[derive(Clone)]
 pub struct TransportMessage {
     pub version: u8,
@@ -29,6 +29,7 @@ pub struct TransportMessage {
 }
 
 impl TransportMessage {
+    /// Construct a version-1 message ready for dispatch.
     pub fn new_v1(index: u16, conn_id: u64, message: Box<dyn EnDecoder>) -> Self {
         TransportMessage {
             version: protocol::VERSION1,
@@ -38,25 +39,26 @@ impl TransportMessage {
         }
     }
 
-    /**
-     * Head
-     * [version] 1 byte
-     * [index] 2 bytes
-     * [body_length] 4 bytes
-     * [body] body_length bytes
-     */
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let message_bytes = self.message.encode()?;
-        // 精确预分配：1(version) + 2(index) + 4(body_length) + body
-        let mut bytes = Vec::with_capacity(HEAD_LENGHT + message_bytes.len());
-        bytes.push(self.version);
-        bytes.extend_from_slice(self.index.to_be_bytes().as_slice());
-        bytes.extend_from_slice((message_bytes.len() as u32).to_be_bytes().as_slice());
-        bytes.extend_from_slice(&message_bytes);
-        Ok(bytes)
+    /// Serialize the message into its on-wire binary representation.
+    ///
+    /// Wire format:
+    /// ```text
+    /// [version:1][index:2][body_length:4][body:body_length]
+    /// ```
+    pub fn to_bytes(&self) -> Result<Bytes> {
+        let data = self.message.encode()?;
+
+        let mut buf = BytesMut::with_capacity(HEAD_LENGHT + data.len());
+        buf.extend_from_slice(&[self.version]);
+        buf.extend_from_slice(&self.index.to_be_bytes());
+        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&data);
+
+        return Ok(buf.freeze());
     }
 }
 
+/// Supported transport-layer protocols.
 #[derive(Clone, Copy, Debug)]
 pub enum TransportProtocol {
     TCP,
@@ -72,9 +74,7 @@ impl From<&str> for TransportProtocol {
             "udp" => TransportProtocol::UDP,
             "quic" => TransportProtocol::QUIC,
             "kcp" => TransportProtocol::KCP,
-            _ => {
-                panic!("Unknown transport protocol: {}", s);
-            }
+            _ => panic!("Unknown transport protocol: {}", s),
         }
     }
 }
@@ -90,6 +90,10 @@ impl TransportProtocol {
     }
 }
 
+/// A cloneable write handle to a single logical connection.
+///
+/// Cheaply clone this handle to send from multiple tasks.
+/// Call [`TransporterWriter::close`] explicitly to tear down the connection.
 #[derive(Clone)]
 pub struct TransporterWriter {
     pub(crate) tx: Sender<Bytes>,
@@ -97,21 +101,22 @@ pub struct TransporterWriter {
     pub(crate) conn_id: u64,
     pub(crate) remote_addr: SocketAddr,
 
-    pub(crate) shotdown: CancellationToken,
+    pub(crate) shutdown: CancellationToken,
 }
 
 impl TransporterWriter {
+    /// Serialize `cmd` and enqueue it for writing.
     pub async fn send(&self, cmd: &TransportMessage, t: Option<Duration>) -> Result<()> {
-        let data = cmd.to_bytes()?;
-        let data = Bytes::from(data);
+        let data = Bytes::from(cmd.to_bytes()?);
         self.send_bytes(data, t).await
     }
 
+    /// Enqueue raw bytes for writing without serialization overhead.
     pub async fn send_raw(&self, data: Vec<u8>, t: Option<Duration>) -> Result<()> {
-        let data = Bytes::from(data);
-        self.send_bytes(data, t).await
+        self.send_bytes(Bytes::from(data), t).await
     }
 
+    /// Enqueue a pre-built [`Bytes`] value. Zero-copy for `Arc`-backed allocations.
     pub async fn send_bytes(&self, data: Bytes, t: Option<Duration>) -> Result<()> {
         match t {
             Some(duration) => {
@@ -124,35 +129,28 @@ impl TransporterWriter {
         Ok(())
     }
 
-    pub async fn closed(&self) -> bool {
-        self.shotdown.is_cancelled()
+    /// Returns `true` if the underlying connection has been closed.
+    pub fn closed(&self) -> bool {
+        self.shutdown.is_cancelled()
     }
 
-    pub async fn close(&self) {
-        self.shotdown.cancel();
+    /// Signal the associated [`TcpWriteHalf`] task to shut down gracefully.
+    pub fn close(&self) {
+        self.shutdown.cancel();
+    }
+
+    /// The unique numeric ID assigned to this connection.
+    pub fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
+
+    /// The remote peer address for this connection.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
     }
 }
 
-async fn handle_message(
-    tx: Sender<TransportMessage>,
-    version: u8,
-    index: u16,
-    body: &[u8],
-    conn_id: u64,
-) -> Result<()> {
-    let message =
-        decode_to_message(version, index, conn_id, body).map_err(|e| -> anyhow::Error {
-            TransporterError::new(ErrorCode::DecodeError, e.to_string()).into()
-        })?;
-
-    tx.send(message).await.map_err(|e| -> anyhow::Error {
-        TransporterError::new(ErrorCode::SendError, e.to_string()).into()
-    })?;
-
-    Ok(())
-}
-
-fn decode_to_message(
+pub(crate) fn decode_to_message(
     version: u8,
     index: u16,
     conn_id: u64,

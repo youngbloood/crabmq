@@ -8,7 +8,7 @@ use crate::partition::{PartitionManager, PartitionPolicy};
 use anyhow::Result;
 use raftx::Node as RaftNode;
 use std::sync::Arc;
-use transporter::{TransportMessage, TransporterServiceManager};
+use transporter::{TransportMessage, service::TransporterServiceManager};
 
 pub struct CoordinatorService {
     coo: Arc<Coordinator>,
@@ -29,17 +29,25 @@ impl CoordinatorService {
         let raft_node = Arc::new(raft_node);
 
         let broker_trans_service =
-            TransporterServiceManager::new(transporter::TransporterServiceConfig {
+            TransporterServiceManager::new(transporter::service::TransporterServiceConfig {
                 addr: conf.coo.for_broker_addr.clone(),
                 protocol: conf.coo.protocol,
                 incoming_max_connections: conf.coo.incoming_max_connections,
+                max_frame_body_size: todo!(),
+                send_timeout: todo!(),
+                idle_timeout: todo!(),
+                send_message_buffer_size: todo!(),
             });
 
         let client_trans_service =
-            TransporterServiceManager::new(transporter::TransporterServiceConfig {
+            TransporterServiceManager::new(transporter::service::TransporterServiceConfig {
                 addr: conf.coo.for_client_addr.clone(),
                 protocol: conf.coo.protocol,
                 incoming_max_connections: conf.coo.incoming_max_connections,
+                max_frame_body_size: todo!(),
+                send_timeout: todo!(),
+                idle_timeout: todo!(),
+                send_message_buffer_size: todo!(),
             });
 
         let coo = Arc::new(Coordinator::new(
@@ -58,71 +66,19 @@ impl CoordinatorService {
 
     /// 启动 Coordinator 服务
     pub async fn run(&self) -> Result<()> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.run_broker_trans_service(tx.clone()).await?;
-        self.run_client_trans_service(tx.clone()).await?;
-        self.run_raft_node(tx.clone()).await?;
+        let (tx, rx) = mpsc::channel(1024);
+
+        // 启动接收服务，将消息写入 tx
+        self.raft_node.run(tx.clone()).await?;
+        self.broker_trans_service.run(tx.clone()).await?;
+        self.client_trans_service.run(tx.clone()).await?;
+
+        // 消费消息并处理
         self.loop_handle_command(rx).await;
         Ok(())
     }
 
-    async fn run_raft_node(&self, tx: mpsc::UnboundedSender<TransportMessage>) -> Result<()> {
-        let raft_node = self.raft_node.clone();
-        tokio::spawn(async move {
-            raft_node.run(async move |m| {
-                if let Err(e) = tx.send(m) {
-                    error!("RaftNode upload message error: {}", e);
-                }
-            })
-        });
-        Ok(())
-    }
-
-    async fn run_broker_trans_service(
-        &self,
-        tx: mpsc::UnboundedSender<TransportMessage>,
-    ) -> Result<()> {
-        self.broker_trans_service.run().await?;
-        let mut trans = self.broker_trans_service.clone();
-        tokio::spawn(async move {
-            loop {
-                select! {
-                    msg = trans.recv(None) => {
-                        if msg.is_none() {
-                            continue;
-                        }
-                        let msg = msg.unwrap();
-                        tx.send(msg).await;
-                    }
-                }
-            }
-        });
-        Ok(())
-    }
-
-    async fn run_client_trans_service(
-        &self,
-        tx: mpsc::UnboundedSender<TransportMessage>,
-    ) -> Result<()> {
-        self.client_trans_service.run().await?;
-        let mut trans = self.client_trans_service.clone();
-        tokio::spawn(async move {
-            loop {
-                select! {
-                    msg = trans.recv(None) => {
-                        if msg.is_none() {
-                            continue;
-                        }
-                        let msg = msg.unwrap();
-                        tx.send(msg).await;
-                    }
-                }
-            }
-        });
-        Ok(())
-    }
-
-    async fn loop_handle_command(&self, mut rx: mpsc::UnboundedReceiver<TransportMessage>) {
+    async fn loop_handle_command(&self, mut rx: mpsc::Receiver<TransportMessage>) {
         loop {
             select! {
                     Some(msg) = rx.recv() => {

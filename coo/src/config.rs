@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 use transporter::TransportProtocol;
 
 #[derive(Clone)]
@@ -16,9 +16,9 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Base {
     // 提供给 brokers 服务节点监听的地址
-    pub for_broker_addr: String,
+    pub for_broker_addr: SocketAddr,
     // 提供给 clients 服务节点监听的地址
-    pub for_client_addr: String,
+    pub for_client_addr: SocketAddr,
 
     pub protocol: TransportProtocol,
 
@@ -58,12 +58,12 @@ impl Config {
         self
     }
 
-    pub fn with_for_broker_addr(mut self, addr: String) -> Self {
+    pub fn with_for_broker_addr(mut self, addr: SocketAddr) -> Self {
         self.coo.for_broker_addr = addr;
         self
     }
 
-    pub fn with_for_client_addr(mut self, addr: String) -> Self {
+    pub fn with_for_client_addr(mut self, addr: SocketAddr) -> Self {
         self.coo.for_client_addr = addr;
         self
     }
@@ -116,12 +116,12 @@ impl Config {
             Ok(())
         };
 
-        must_not_empty("coo.for_broker_addr", &self.coo.for_broker_addr)?;
-        must_not_empty("coo.for_client_addr", &self.coo.for_client_addr)?;
+        must_not_empty("coo.for_broker_addr", &self.coo.for_broker_addr.to_string())?;
+        must_not_empty("coo.for_client_addr", &self.coo.for_client_addr.to_string())?;
         must_not_equal(
             "coo.for_broker_addr and coo.for_client_addr",
-            &self.coo.for_broker_addr,
-            &self.coo.for_client_addr,
+            &self.coo.for_broker_addr.to_string(),
+            &self.coo.for_client_addr.to_string(),
         )?;
         must_not_empty("raftx_config.raft.addr", &self.raftx_config.raft.addr)?;
 

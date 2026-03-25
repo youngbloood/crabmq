@@ -1,7 +1,6 @@
 use crate::TransporterWriter;
 use crate::conn::ProtocolTransporterService;
-use crate::conn::{ProtocolTransporterClient, get_conn_id};
-use crate::tcp::TcpClient;
+use crate::conn::get_conn_id;
 use crate::tcp::TcpService;
 use crate::{
     TransportMessage, TransportProtocol,
@@ -85,14 +84,12 @@ pub struct TransporterServiceManager {
 }
 
 impl TransporterServiceManager {
-    pub fn new(mut conf: TransporterServiceConfig, tx: Sender<TransportMessage>) -> Self {
+    pub fn new(mut conf: TransporterServiceConfig) -> Self {
         conf = conf.fix();
         let service: Arc<Box<dyn ProtocolTransporterService>> = match conf.protocol {
-            TransportProtocol::TCP => Arc::new(Box::new(TcpService::new(
-                conf.addr.clone(),
-                conf.clone(),
-                tx,
-            ))),
+            TransportProtocol::TCP => {
+                Arc::new(Box::new(TcpService::new(conf.addr.clone(), conf.clone())))
+            }
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),
@@ -101,9 +98,9 @@ impl TransporterServiceManager {
         TransporterServiceManager { conf, service }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, tx: Sender<TransportMessage>) -> Result<()> {
         match self.conf.protocol {
-            TransportProtocol::TCP => self.service.run().await,
+            TransportProtocol::TCP => self.service.run(tx).await,
             TransportProtocol::UDP => todo!(),
             TransportProtocol::QUIC => todo!(),
             TransportProtocol::KCP => todo!(),

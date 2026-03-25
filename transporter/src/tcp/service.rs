@@ -1,45 +1,30 @@
 use crate::TransporterWriter;
-use crate::conn::ProtocolTransporterService;
-use crate::conn::{self, ProtocolTransporterClient};
+use crate::conn::{
+    ProtocolGetRemoteAddr, ProtocolTransporterService, ProtocolTransporterShutdown,
+    ProtocolTransporterWriter, get_conn_id,
+};
 use crate::service::TransporterServiceConfig;
 use crate::tcp::{TcpReadHalf, TcpWriteHalf};
 use crate::{
     TransportMessage,
-    codec::TransportCodec,
-    conn::{
-        ProtocolGetRemoteAddr, ProtocolTransporterCloser, ProtocolTransporterShutdown,
-        ProtocolTransporterWriter, get_conn_id,
-    },
-    decode_to_message,
     err::{ErrorCode, TransporterError},
-    handle_message,
 };
 use anyhow::Result;
 use dashmap::DashMap;
 use log::error;
-use std::{net::SocketAddr, net::ToSocketAddrs, sync::Arc, time::Duration};
-use tokio::time::timeout;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{
-        TcpListener,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    net::TcpListener,
     select,
-    sync::mpsc::{Receiver, Sender},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc::Sender},
 };
-use tokio_stream::StreamExt;
-use tokio_util::bytes::{Bytes, BytesMut};
-use tokio_util::codec::FramedRead;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 pub struct TcpService {
     addr: SocketAddr,
     conf: TransporterServiceConfig,
     sema: Arc<Semaphore>, // 用于限制最大连接数的信号量
 
-    tx: Sender<TransportMessage>,
     // conn_id -> WriteHalf
     conns: Arc<DashMap<u64, TransporterWriter>>,
 
@@ -47,16 +32,11 @@ pub struct TcpService {
 }
 
 impl TcpService {
-    pub fn new(
-        addr: SocketAddr,
-        conf: TransporterServiceConfig,
-        tx: Sender<TransportMessage>,
-    ) -> Self {
+    pub fn new(addr: SocketAddr, conf: TransporterServiceConfig) -> Self {
         let incoming_max_connections = conf.incoming_max_connections;
         TcpService {
             addr,
             conf,
-            tx,
             sema: Arc::new(Semaphore::new(incoming_max_connections)),
             conns: Arc::new(DashMap::new()),
             shutdown: CancellationToken::new(),
@@ -66,9 +46,8 @@ impl TcpService {
 
 #[async_trait::async_trait]
 impl ProtocolTransporterService for TcpService {
-    async fn run(&self) -> Result<()> {
+    async fn run(&self, tx: Sender<TransportMessage>) -> Result<()> {
         let listener = TcpListener::bind(&self.addr).await?;
-        let tx = self.tx.clone();
         let incoming = self.conns.clone();
         let idle_timeout = self.conf.idle_timeout;
         let sema = self.sema.clone();
@@ -122,7 +101,7 @@ impl ProtocolTransporterService for TcpService {
                                 tokio::spawn(wh.loop_handle(wrx));
 
 
-                                incoming.insert(conn_id, TransporterWriter{ tx: wtx, conn_id, remote_addr:remote_addr, shotdown: shutdown });
+                                incoming.insert(conn_id, TransporterWriter{ tx: wtx, conn_id, remote_addr:remote_addr, shutdown: shutdown });
                             }
 
                             _ = shutdown.cancelled() => {
@@ -169,7 +148,7 @@ impl ProtocolTransporterService for TcpService {
     // 关闭指定连接
     async fn close(&self, conn_id: u64) -> Result<()> {
         if let Some(pair) = self.conns.remove(&conn_id) {
-            pair.1.close().await;
+            pair.1.close();
         }
         Ok(())
     }
@@ -198,7 +177,7 @@ impl ProtocolTransporterShutdown for TcpService {
         self.shutdown.cancel();
         // 关闭所有入站连接
         for cell in self.conns.iter_mut() {
-            cell.value().close().await;
+            cell.value().close();
         }
     }
 }

@@ -1,8 +1,8 @@
 use crate::TransportMessage;
-#[cfg(feature = "service")]
 use crate::TransporterWriter;
 use anyhow::Result;
 use std::{net::SocketAddr, net::ToSocketAddrs, time::Duration};
+use tokio::sync::mpsc::Sender;
 
 /**
  * ProtocolGetRemoteAddr 定义了获取远端地址的接口，get_remote_addr 方法根据连接 ID 获取远端地址
@@ -48,7 +48,7 @@ pub trait ProtocolTransporterService:
     ProtocolTransporterWriter + ProtocolTransporterShutdown + ProtocolGetRemoteAddr + Send + Sync
 {
     // 启动本地监听服务
-    async fn run(&self) -> Result<()>;
+    async fn run(&self, tx: Sender<TransportMessage>) -> Result<()>;
 
     async fn split_writer(&self, conn_id: u64) -> Option<TransporterWriter>;
     // 广播

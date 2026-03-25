@@ -1,8 +1,6 @@
 use crate::TransporterWriter;
-use crate::conn::ProtocolTransporterService;
 use crate::conn::{ProtocolTransporterClient, get_conn_id};
 use crate::tcp::TcpClient;
-use crate::tcp::TcpService;
 use crate::{
     TransportMessage, TransportProtocol,
     err::{ErrorCode, TransporterError},

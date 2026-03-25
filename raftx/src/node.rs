@@ -20,10 +20,16 @@ use raft::{
 use std::{collections::HashMap, num::NonZero, sync::Arc, time::Duration};
 use tokio::{
     select,
-    sync::{Mutex, mpsc},
+    sync::{
+        Mutex,
+        mpsc::{self, Sender},
+    },
     time::{self, Instant},
 };
-use transporter::{TransportMessage, TransporterServiceManager};
+use transporter::{
+    TransportMessage,
+    service::{TransporterServiceConfig, TransporterServiceManager},
+};
 
 pub struct Node<S: StateApply> {
     pub id: u32,
@@ -103,9 +109,7 @@ impl<S: StateApply> Node<S> {
             my_mailbox: Arc::new(Mutex::new(rx)),
             mailboxes: Arc::new(DashMap::new()),
             peer: Arc::new(DashMap::new()),
-            trans_service: TransporterServiceManager::new(
-                transporter::TransporterServiceConfig::default(),
-            ),
+            trans_service: TransporterServiceManager::new(TransporterServiceConfig::default()),
             conf: Arc::new(conf),
             callbacks: Arc::new(DashMap::new()),
             fsm: Arc::new(fsm),
@@ -114,6 +118,7 @@ impl<S: StateApply> Node<S> {
             node.conf.id.into(),
             Arc::new(PeerState::new(
                 node.conf.id.into(),
+                0,
                 node.conf.raft.addr.clone(),
                 node.conf.raft.meta.clone(),
             )),
@@ -131,24 +136,22 @@ impl<S: StateApply> Node<S> {
         self.callbacks.insert(unique_id, cb);
     }
 
-    async fn handle_meta_req(&self, remote_addr: &str, req: &protocol::CooRaftGetMetaRequest) {
+    async fn handle_meta_req(&self, conn_id: u64, req: &protocol::CooRaftGetMetaRequest) {
         if req.id == self.conf.id {
             let resp = protocol::ErrorResponse {
                 code: protocol::ErrorCode::RaftIdConflict as i32,
                 message: "".to_string(),
                 meta: HashMap::new(),
             };
-            let t = TransportMessage::new_v1(
-                1,
-                remote_addr.clone().to_string(),
-                (Box::new(resp) as Box<dyn EnDecoder>).into(),
-            );
+            let t =
+                TransportMessage::new_v1(1, conn_id, (Box::new(resp) as Box<dyn EnDecoder>).into());
             let _ = self.trans_service.send(&t, None).await;
-            self.trans_service.close(remote_addr).await;
+            self.trans_service.close(conn_id).await;
             return;
         }
 
-        self.add_peer(req.id, &req.addr, req.meta.clone()).await;
+        self.add_peer(req.id, conn_id, &req.addr, req.meta.clone())
+            .await;
 
         // 构建响应并发送至对端
         let resp = protocol::CooRaftGetMetaResponse {
@@ -156,11 +159,7 @@ impl<S: StateApply> Node<S> {
             raft_addr: self.conf.raft.addr.clone(),
             meta: self.conf.raft.meta.clone(),
         };
-        let t = TransportMessage::new_v1(
-            1,
-            remote_addr.clone().to_string(),
-            (Box::new(resp) as Box<dyn EnDecoder>).into(),
-        );
+        let t = TransportMessage::new_v1(1, conn_id, (Box::new(resp) as Box<dyn EnDecoder>).into());
         let _ = self.trans_service.send(&t, None).await;
     }
 
@@ -216,7 +215,7 @@ impl<S: StateApply> Node<S> {
                     .as_any()
                     .downcast_ref::<protocol::CooRaftGetMetaRequest>()
                     .unwrap();
-                self.handle_meta_req(&msg.remote_addr, req).await;
+                self.handle_meta_req(msg.conn_id, req).await;
             }
 
             protocol::v1::COO_RAFT_ORIGIN_MESSAGE_INDEX => {
@@ -255,9 +254,15 @@ impl<S: StateApply> Node<S> {
         }
     }
 
-    async fn add_peer(&self, remote_id: u32, remote_addr: &str, meta: HashMap<String, String>) {
+    async fn add_peer(
+        &self,
+        remote_id: u32,
+        conn_id: u64,
+        remote_addr: &str,
+        meta: HashMap<String, String>,
+    ) {
         let (tx, rx) = mpsc::channel(self.conf.mailbox_buffer_len);
-        let w = self.trans_service.split_writer(remote_addr).await;
+        let w = self.trans_service.split_writer(conn_id).await;
         if w.is_none() {
             error!(
                 "RAFTX[{}]: not found writer for remote_addr[{}]",
@@ -271,6 +276,7 @@ impl<S: StateApply> Node<S> {
             .entry(remote_id)
             .or_insert(Arc::new(PeerState::new(
                 remote_id,
+                conn_id,
                 remote_addr.to_string(),
                 meta,
             )));
@@ -295,15 +301,12 @@ impl<S: StateApply> Node<S> {
 
 // impl raft functions
 impl<S: StateApply> Node<S> {
-    pub async fn run<F>(&self, hooker: F) -> Result<()>
-    where
-        F: AsyncFn(TransportMessage),
-    {
+    pub async fn run(&self, tx: Sender<TransportMessage>) -> Result<()> {
         let mut interval = time::interval(Duration::from_millis(100));
         let mut print_interval = Instant::now();
         let mut is_initial_conf_committed = false;
 
-        self.trans_service.run().await?;
+        self.trans_service.run(tx).await?;
 
         if self.is_leader().await && !is_initial_conf_committed {
             let _ = self.commit_self_conf_change().await;
@@ -311,7 +314,6 @@ impl<S: StateApply> Node<S> {
         }
 
         let node: Node<S> = self.clone();
-        let mut trans = self.trans_service.clone();
 
         let inner_index = [
             protocol::v1::COO_RAFT_CONF_CHANGE_REQUEST_INDEX,
@@ -322,21 +324,6 @@ impl<S: StateApply> Node<S> {
         loop {
             let my_mailbox = self.my_mailbox.clone();
             select! {
-                msg = trans.recv(None) => {
-                    if msg.is_none() {
-                        continue;
-                    }
-                    let msg = msg.unwrap();
-                    hooker(msg.clone()).await;
-                    if !inner_index.contains(&msg.index) {
-                        continue;
-                    }
-                    // 交给自身处理
-                    if let Err(e) =  self.my_mailbox_sender.send(msg).await{
-                        error!("RAFTX[{}]: send to self mailbox failed: {:?}", self.id, e);
-                    }
-                }
-
                 msg = async {
                     let mut l = my_mailbox.lock().await;
                     l.recv().await
@@ -479,7 +466,7 @@ impl<S: StateApply> Node<S> {
 
                 let t = TransportMessage::new_v1(
                     protocol::v1::COO_RAFT_ORIGIN_MESSAGE_INDEX,
-                    "".to_string(),
+                    0,
                     (Box::new(msg) as Box<dyn EnDecoder>).into(),
                 );
 
@@ -553,7 +540,8 @@ impl<S: StateApply> Node<S> {
                         bincode::config::standard(),
                     )
                     .unwrap();
-                    self.add_peer(cc.get_id() as _, &ccc.addr, ccc.meta).await;
+                    self.add_peer(cc.get_id() as _, 0, &ccc.addr, ccc.meta)
+                        .await;
                 }
 
                 EntryType::EntryConfChangeV2 => {
@@ -572,7 +560,7 @@ impl<S: StateApply> Node<S> {
                         bincode::config::standard(),
                     )
                     .unwrap();
-                    self.add_peer(ccc.id, &ccc.addr, ccc.meta).await;
+                    self.add_peer(ccc.id, 0, &ccc.addr, ccc.meta).await;
                 }
             }
         }

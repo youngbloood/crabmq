@@ -1,37 +1,18 @@
 use crate::TransporterWriter;
 use crate::client::TransporterClientConfig;
-use crate::conn::ProtocolTransporterService;
-use crate::conn::{self, ProtocolTransporterClient};
+use crate::conn::{
+    ProtocolTransporterClient, ProtocolTransporterCloser, ProtocolTransporterShutdown, get_conn_id,
+};
 use crate::tcp::{TcpReadHalf, TcpWriteHalf};
 use crate::{
     TransportMessage,
-    codec::TransportCodec,
-    conn::{
-        ProtocolTransporterCloser, ProtocolTransporterShutdown, ProtocolTransporterWriter,
-        get_conn_id,
-    },
-    decode_to_message,
     err::{ErrorCode, TransporterError},
-    handle_message,
 };
 use anyhow::Result;
-use dashmap::DashMap;
 use log::error;
-use std::{net::SocketAddr, net::ToSocketAddrs, sync::Arc, time::Duration};
-use tokio::time::timeout;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{
-        TcpListener,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
-    select,
-    sync::mpsc::{Receiver, Sender},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
-};
-use tokio_stream::StreamExt;
-use tokio_util::bytes::{Bytes, BytesMut};
-use tokio_util::codec::FramedRead;
+use std::{net::SocketAddr, time::Duration};
+use tokio::sync::mpsc::Sender;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 /**
@@ -115,7 +96,7 @@ impl ProtocolTransporterClient for TcpClient {
             tx: wtx,
             conn_id,
             remote_addr,
-            shotdown: shutdown,
+            shutdown,
         })
     }
 }

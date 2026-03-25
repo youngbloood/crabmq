@@ -137,3 +137,10 @@ message RaftNodeInfo {
 
     map<string, string> metadata = 4;
 }
+
+
+message Event {
+    optional Topics topics = 1;
+    optional ConsumerGroups consumer_groups = 2;
+    optional RaftNodes raft_nodes = 3;
+}

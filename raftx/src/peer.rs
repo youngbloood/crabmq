@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 #[derive(Debug)]
 pub struct PeerState {
     pub id: u32,
+    pub conn_id: u64,
     pub addr: String,
     pub meta: HashMap<String, String>,
     status: Arc<Mutex<PeerStatus>>,
@@ -19,9 +20,10 @@ enum PeerStatus {
 }
 
 impl PeerState {
-    pub fn new(id: u32, raft_addr: String, meta: HashMap<String, String>) -> Self {
+    pub fn new(id: u32, conn_id: u64, raft_addr: String, meta: HashMap<String, String>) -> Self {
         Self {
             id,
+            conn_id,
             addr: raft_addr,
             meta,
             status: Arc::new(Mutex::new(PeerStatus::Normal)),
