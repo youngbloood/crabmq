@@ -5,7 +5,7 @@
 /// 2. 零拷贝写入（通过IoSlice）
 /// 3. 便于性能测试和切换
 use crate::{MessagePayload, StorageResult};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::io::IoSlice;
 
 /// 序列化结果
@@ -38,13 +38,13 @@ pub trait MessageSerializer: Send + Sync {
     fn serialize<'a>(
         &self,
         msg: &'a MessagePayload,
-        headers: &'a mut Vec<Vec<u8>>,
+        headers: &'a mut BytesMut,
     ) -> StorageResult<SerializedMessage<'a>>;
 
     /// 反序列化消息
     ///
     /// 从字节流构造MessagePayload
-    fn deserialize(&self, data: &[u8]) -> StorageResult<MessagePayload>;
+    fn deserialize(&self, data: Bytes) -> StorageResult<MessagePayload>;
 
     /// 获取序列化格式名称（用于日志和调试）
     fn name(&self) -> &'static str;
@@ -73,13 +73,13 @@ impl MessageSerializer for SgIoSerializer {
     fn serialize<'a>(
         &self,
         msg: &'a MessagePayload,
-        headers: &'a mut Vec<Vec<u8>>,
+        headers: &'a mut BytesMut,
     ) -> StorageResult<SerializedMessage<'a>> {
         // 将在sg_io模块中实现
         crate::serializer::sg_io::serialize_sg_io(msg, headers)
     }
 
-    fn deserialize(&self, data: &[u8]) -> StorageResult<MessagePayload> {
+    fn deserialize(&self, data: Bytes) -> StorageResult<MessagePayload> {
         crate::serializer::sg_io::deserialize_sg_io(data)
     }
 
@@ -92,12 +92,12 @@ impl MessageSerializer for RkyvSerializer {
     fn serialize<'a>(
         &self,
         msg: &'a MessagePayload,
-        headers: &'a mut Vec<Vec<u8>>,
+        headers: &'a mut BytesMut,
     ) -> StorageResult<SerializedMessage<'a>> {
         crate::serializer::rkyv_impl::serialize_rkyv(msg, headers)
     }
 
-    fn deserialize(&self, data: &[u8]) -> StorageResult<MessagePayload> {
+    fn deserialize(&self, data: Bytes) -> StorageResult<MessagePayload> {
         crate::serializer::rkyv_impl::deserialize_rkyv(data)
     }
 
@@ -118,27 +118,27 @@ mod tests {
     #[test]
     fn test_serializer_roundtrip() -> StorageResult<()> {
         let mut metadata = HashMap::new();
-        metadata.insert("key1".to_string(), "value1".to_string());
+        metadata.insert(Bytes::from("key1"), Bytes::from("value1"));
 
         let msg = MessagePayload::new(
-            "test_msg_id".to_string(),
+            Bytes::from("test_msg_id"),
             1234567890,
             metadata,
-            vec![0xAB; 100],
+            Bytes::from(vec![0xAB; 100]),
         );
 
         // 测试 S-G IO
         let sg_io = SgIoSerializer;
-        let mut headers = Vec::new();
+        let mut headers = BytesMut::new();
         let serialized = sg_io.serialize(&msg, &mut headers)?;
 
         // 模拟写入后的读取：需要将IoSlice的数据收集起来
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::new();
         for iov in &serialized.iovecs {
             buf.extend_from_slice(iov);
         }
 
-        let deserialized = sg_io.deserialize(&buf)?;
+        let deserialized = sg_io.deserialize(buf.freeze())?;
         assert_eq!(msg.msg_id, deserialized.msg_id);
         assert_eq!(msg.timestamp, deserialized.timestamp);
         assert_eq!(msg.metadata, deserialized.metadata);

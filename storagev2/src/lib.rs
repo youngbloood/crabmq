@@ -2,6 +2,7 @@ pub mod disk;
 pub mod mem;
 pub mod metrics;
 pub mod serializer;
+use bytes::Bytes;
 pub use mem::*;
 
 use anyhow::Result;
@@ -10,9 +11,9 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::{collections::HashMap, num::NonZero};
 use tokio::sync::oneshot;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MessageMeta {
-    pub msg_id: String,
+    pub msg_id: Bytes,
     pub timestamp: u64,
     pub segment_id: u64,
     pub offset: u64,
@@ -29,21 +30,21 @@ pub(crate) struct MessagePayloadInner {
 }
 
 // 消息负载结构
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MessagePayload {
     // 公开字段以支持直接访问和修改
-    pub msg_id: String,
+    pub msg_id: Bytes,
     pub timestamp: u64,
-    pub metadata: HashMap<String, String>,
-    pub payload: Vec<u8>,
+    pub metadata: HashMap<Bytes, Bytes>,
+    pub payload: Bytes,
 }
 
 impl MessagePayload {
     pub fn new(
-        msg_id: String,
+        msg_id: Bytes,
         timestamp: u64,
-        metadata: HashMap<String, String>,
-        payload: Vec<u8>,
+        metadata: HashMap<Bytes, Bytes>,
+        payload: Bytes,
     ) -> Self {
         Self {
             msg_id,
@@ -54,15 +55,19 @@ impl MessagePayload {
     }
 
     /// 从 rkyv 序列化的字节反序列化（用于性能测试和向后兼容）
-    pub fn from_rkyv_bytes(data: &[u8]) -> Result<Self> {
+    pub fn from_rkyv_bytes(data: Bytes) -> Result<Self> {
         let inner: MessagePayloadInner =
-            rkyv::from_bytes::<MessagePayloadInner, rkyv::rancor::Error>(data)
+            rkyv::from_bytes::<MessagePayloadInner, rkyv::rancor::Error>(data.as_ref())
                 .map_err(|e| anyhow::anyhow!("rkyv deserialize error: {}", e))?;
         Ok(Self::new(
-            inner.msg_id,
+            Bytes::from(inner.msg_id),
             inner.timestamp,
-            inner.metadata,
-            inner.payload,
+            inner
+                .metadata
+                .into_iter()
+                .map(|(k, v)| (Bytes::from(k), Bytes::from(v)))
+                .collect(),
+            Bytes::from(inner.payload),
         ))
     }
 

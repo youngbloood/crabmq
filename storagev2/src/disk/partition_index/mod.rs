@@ -1,3 +1,5 @@
+mod index;
+
 use crate::disk::ROCKSDB_INDEX_DIR;
 use crate::{MessageMeta, SegmentOffset, StorageError, StorageResult};
 use anyhow::Result;
@@ -307,7 +309,9 @@ impl ReadWritePartitionIndexManager {
             .join(ROCKSDB_INDEX_DIR)
             .join(index.to_string());
 
-        self.instance_manager.get_read_only_instance(&db_path, &self.conf).await
+        self.instance_manager
+            .get_read_only_instance(&db_path, &self.conf)
+            .await
     }
 
     /// 批量写入索引
@@ -532,7 +536,9 @@ mod tests {
         let conf = crate::disk::default_config();
 
         // 创建主实例
-        let primary_instance = manager.get_or_create_primary_instance(&db_path, &conf).await;
+        let primary_instance = manager
+            .get_or_create_primary_instance(&db_path, &conf)
+            .await;
         assert!(primary_instance.is_ok(), "创建主实例应该成功");
         let primary_instance = primary_instance.unwrap();
         assert!(primary_instance.is_readable());
@@ -567,8 +573,14 @@ mod tests {
             .unwrap();
 
         // 创建多个只读实例
-        let read_instance1 = manager.get_read_only_instance(&db_path, &conf).await.unwrap();
-        let read_instance2 = manager.get_read_only_instance(&db_path, &conf).await.unwrap();
+        let read_instance1 = manager
+            .get_read_only_instance(&db_path, &conf)
+            .await
+            .unwrap();
+        let read_instance2 = manager
+            .get_read_only_instance(&db_path, &conf)
+            .await
+            .unwrap();
 
         // 验证是不同的实例
         assert_ne!(
@@ -596,7 +608,10 @@ mod tests {
             .get_or_create_primary_instance(&db_path, &conf)
             .await
             .unwrap();
-        let read_instance = manager.get_read_only_instance(&db_path, &conf).await.unwrap();
+        let read_instance = manager
+            .get_read_only_instance(&db_path, &conf)
+            .await
+            .unwrap();
 
         // 测试1：写入后立即读取
         println!("测试1：写入后立即读取");

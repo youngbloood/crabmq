@@ -1,4 +1,5 @@
 use super::BufferFlushable;
+use crate::SegmentOffset;
 use crate::disk::partition_index::ReadWritePartitionIndexManager;
 use crate::{
     MessageMeta, disk::Config as DiskConfig, disk::writer::buffer::switch_queue::SwitchQueue,
@@ -10,7 +11,7 @@ pub struct PartitionIndexWriterBuffer {
     pub topic: String,
     pub partition_id: u32,
     conf: Arc<DiskConfig>,
-    queue: SwitchQueue<MessageMeta>,
+    queue: SwitchQueue<SegmentOffset>,
     // 使用读写分离的索引管理器，专门用于写入
     read_write_index_manager: Arc<ReadWritePartitionIndexManager>,
 }
@@ -39,7 +40,7 @@ impl PartitionIndexWriterBuffer {
     }
 
     /// 写入一批索引
-    pub fn push_batch(&self, metas: Vec<MessageMeta>) -> Result<()> {
+    pub fn push_batch(&self, metas: Vec<SegmentOffset>) -> Result<()> {
         for meta in metas {
             self.queue.push(meta);
         }

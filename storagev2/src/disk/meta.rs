@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::{fs, fs::File as AsyncFile};
 
-use crate::disk::fd_cache::{create_simple_async_file, MetaFileHandler};
+use crate::disk::fd_cache::{MetaFileHandler, create_simple_async_file};
 
 pub const WRITER_PTR_FILENAME: &str = ".writer.ptr";
 pub const TOPIC_META: &str = "meta.bin";
@@ -320,6 +320,10 @@ pub fn gen_filename(factor: u64) -> String {
 
 pub fn gen_record_filename(factor: u64) -> String {
     format!("{}.record", gen_filename(factor))
+}
+
+pub fn gen_index_filename(factor: u64) -> String {
+    format!("{}.index", gen_filename(factor))
 }
 
 /// 从文件名提取 segment_id

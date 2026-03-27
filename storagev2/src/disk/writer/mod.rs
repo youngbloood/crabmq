@@ -594,10 +594,10 @@ mod test {
                     let idx = rand::random::<u32>() as usize;
                     let s = _datas[idx % _datas.len()];
                     let msg = MessagePayload::new(
-                        format!("id_{}_{}", idx, s),
+                        Bytes::from(format!("id_{}_{}", idx, s)),
                         0,
                         HashMap::new(),
-                        s.as_bytes().to_vec(),
+                        Bytes::from(s),
                     );
                     if let Err(e) = _store.store("topic111", 11, vec![msg], None).await {
                         eprintln!("e = {e:?}");

@@ -12,10 +12,7 @@ use dashmap::DashMap;
 use log::{error, warn};
 use std::num::NonZero;
 use std::path::Path;
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicUsize},
-};
+use std::{path::PathBuf, sync::Arc};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::RwLock;
 
@@ -171,9 +168,10 @@ impl StorageReaderSession for DiskStorageReaderSession {
             if !data.is_empty() {
                 // 使用新序列化器反序列化
                 let serializer = SgIoSerializer;
-                let payload = serializer.deserialize(&data)?;
+                let data_len = data.len() as u64;
+                let payload = serializer.deserialize(data)?;
 
-                list.push((payload, data.len() as u64, offset));
+                list.push((payload, data_len, offset));
             }
             if last {
                 break;
@@ -488,6 +486,8 @@ fn extract_segment_id_from_filename(p: &Path) -> u64 {
 
 #[cfg(test)]
 mod test {
+    use bytes::Bytes;
+
     use crate::{
         StorageReader,
         disk::{DiskStorageReader, default_config},
@@ -549,22 +549,22 @@ mod test {
         // 写入多条消息
         let messages = vec![
             MessagePayload::new(
-                "msg_1".to_string(),
+                Bytes::from("msg_1"),
                 1000,
                 Default::default(),
-                b"Hello World 1".to_vec(),
+                Bytes::from("Hello World 1"),
             ),
             MessagePayload::new(
-                "msg_2".to_string(),
+                Bytes::from("msg_2"),
                 1001,
                 Default::default(),
-                b"Hello World 2".to_vec(),
+                Bytes::from("Hello World 2"),
             ),
             MessagePayload::new(
-                "msg_3".to_string(),
+                Bytes::from("msg_3"),
                 1002,
                 Default::default(),
-                b"Hello World 3".to_vec(),
+                Bytes::from("Hello World 3"),
             ),
         ];
 
@@ -579,7 +579,7 @@ mod test {
                 i,
                 result.err()
             );
-            println!("[测试] 写入消息 {}: {}", i, msg.msg_id);
+            println!("[测试] 写入消息 {}: {:?}", i, msg.msg_id);
         }
 
         // 等待数据刷盘
@@ -622,7 +622,7 @@ mod test {
                         break;
                     }
                     for (msg, _, offset) in msgs {
-                        println!("[测试] 读取消息: {}, offset: {:?}", msg.msg_id, offset);
+                        println!("[测试] 读取消息: {:?}, offset: {:?}", msg.msg_id, offset);
                         all_messages.push(msg);
                         all_offsets.push(offset);
                     }
@@ -796,10 +796,10 @@ mod test {
 
         // 写入一条消息
         let msg = MessagePayload::new(
-            "edge_test_msg".to_string(),
+            Bytes::from("edge_test_msg"),
             2000,
             Default::default(),
-            b"Edge test message".to_vec(),
+            Bytes::from("Edge test message"),
         );
 
         writer

@@ -1,3 +1,6 @@
+use bytes::{Bytes, BytesMut};
+
+use crate::serializer::SerializedMessage;
 /// rkyv 序列化实现（保留用于性能对比）
 ///
 /// 磁盘格式：[8:len] + [rkyv_data]
@@ -6,9 +9,7 @@
 /// - 需要拷贝数据到AlignedVec（450-12000ns）
 /// - 需要8字节长度头
 /// - 反序列化略慢于S-G IO
-
 use crate::{MessagePayload, StorageError, StorageResult};
-use crate::serializer::SerializedMessage;
 use std::io::IoSlice;
 
 /// 序列化消息（使用rkyv）
@@ -19,7 +20,7 @@ use std::io::IoSlice;
 /// - 每次都重新序列化，不缓存（rkyv主要用于性能对比）
 pub fn serialize_rkyv<'a>(
     msg: &'a MessagePayload,
-    headers: &'a mut Vec<Vec<u8>>,
+    headers: &'a mut BytesMut,
 ) -> StorageResult<SerializedMessage<'a>> {
     // 直接使用 rkyv 序列化
     let aligned_vec = rkyv::to_bytes::<rkyv::rancor::Error>(msg)
@@ -46,18 +47,22 @@ pub fn serialize_rkyv<'a>(
 }
 
 /// 反序列化消息（使用rkyv）
-pub fn deserialize_rkyv(data: &[u8]) -> StorageResult<MessagePayload> {
+pub fn deserialize_rkyv(data: Bytes) -> StorageResult<MessagePayload> {
     if data.len() < 8 {
-        return Err(StorageError::SerializeError("data too short for rkyv".to_string()));
+        return Err(StorageError::SerializeError(
+            "data too short for rkyv".to_string(),
+        ));
     }
 
     // 读取长度头
     let expected_len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
 
     if data.len() != 8 + expected_len {
-        return Err(StorageError::SerializeError(
-            format!("data length mismatch: expected {}, got {}", 8 + expected_len, data.len())
-        ));
+        return Err(StorageError::SerializeError(format!(
+            "data length mismatch: expected {}, got {}",
+            8 + expected_len,
+            data.len()
+        )));
     }
 
     // 反序列化rkyv数据

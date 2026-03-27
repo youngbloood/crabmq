@@ -1,4 +1,4 @@
-use crossbeam::queue::SegQueue;
+use crossbeam::queue::{ArrayQueue, SegQueue};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -10,8 +10,8 @@ use std::sync::{
 pub struct SwitchQueue<T> {
     switcher: Arc<AtomicBool>,
 
-    queue_a: Arc<SegQueue<T>>,
-    queue_b: Arc<SegQueue<T>>,
+    queue_a: Arc<ArrayQueue<T>>,
+    queue_b: Arc<ArrayQueue<T>>,
 }
 
 impl<T> SwitchQueue<T> {
@@ -19,11 +19,11 @@ impl<T> SwitchQueue<T> {
     const RELEASE_ORDER: Ordering = Ordering::Release;
     const RELAXED_ORDER: Ordering = Ordering::Relaxed;
 
-    pub fn new() -> Self {
+    pub fn new(buf_length: usize) -> Self {
         Self {
             switcher: Arc::new(AtomicBool::new(false)),
-            queue_a: Arc::new(SegQueue::new()),
-            queue_b: Arc::new(SegQueue::new()),
+            queue_a: Arc::new(ArrayQueue::new(buf_length)),
+            queue_b: Arc::new(ArrayQueue::new(buf_length)),
         }
     }
 
@@ -43,7 +43,9 @@ impl<T> SwitchQueue<T> {
         !self.queue_a.is_empty() || !self.queue_b.is_empty()
     }
 
-    // 高性能批量弹出
+    /**
+     * 弹出一批元素，优先从当前活跃队列弹出，如果活跃队列空了且非活跃队列有数据，则切换并继续弹出
+     */
     pub fn pop_batch(&self, batch_size: usize) -> Vec<T> {
         let mut results = Vec::with_capacity(batch_size);
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
@@ -54,7 +56,7 @@ impl<T> SwitchQueue<T> {
             (&self.queue_a, &self.queue_b)
         };
 
-        // 优先处理活跃队列
+        // 优先处理活跃队列，为 None 自动结束循环
         while let Some(item) = active_queue.pop() {
             results.push(item);
             if results.len() >= batch_size {
@@ -75,6 +77,8 @@ impl<T> SwitchQueue<T> {
             } else {
                 &self.queue_b
             };
+
+            // 为 None 自动结束循环
             while let Some(item) = new_active.pop() {
                 results.push(item);
                 if results.len() >= batch_size {
@@ -86,7 +90,9 @@ impl<T> SwitchQueue<T> {
         results
     }
 
-    // 弹出全部元素
+    /**
+     * 弹出所有元素，先清空当前活跃队列，再尝试切换并清空新活跃队列
+     */
     pub fn pop_all(&self) -> Vec<T> {
         let mut results = Vec::new();
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
@@ -117,6 +123,31 @@ impl<T> SwitchQueue<T> {
                 results.push(item);
             }
         }
+
+        results
+    }
+
+    /**
+     * 弹出当前活跃队列中的所有数据，并切换活跃队列
+     */
+    pub fn pop_active(&self) -> Vec<T> {
+        let mut results = Vec::new();
+        let current = self.switcher.load(Self::ACQUIRE_ORDER);
+
+        let (active_queue, _inactive_queue) = if current {
+            (&self.queue_b, &self.queue_a)
+        } else {
+            (&self.queue_a, &self.queue_b)
+        };
+
+        // 清空活跃队列
+        while let Some(item) = active_queue.pop() {
+            results.push(item);
+        }
+
+        // 切换活跃队列
+        self.switcher
+            .compare_exchange(current, !current, Self::RELEASE_ORDER, Self::RELAXED_ORDER);
 
         results
     }
