@@ -17,7 +17,7 @@ use tokio_util::bytes::BytesMut;
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 /// Wire-format header length: 1 (version) + 2 (index) + 4 (body_length).
-pub(crate) const HEAD_LENGHT: usize = 7;
+pub(crate) const HEAD_LENGTH: usize = 7;
 
 /// A decoded message received from or to be sent over a transport connection.
 #[derive(Clone)]
@@ -45,10 +45,12 @@ impl TransportMessage {
     /// ```text
     /// [version:1][index:2][body_length:4][body:body_length]
     /// ```
+    ///
+    /// Returns a zero‑copy Bytes containing the on‑wire representation.
     pub fn to_bytes(&self) -> Result<Bytes> {
         let data = self.message.encode()?;
 
-        let mut buf = BytesMut::with_capacity(HEAD_LENGHT + data.len());
+        let mut buf = BytesMut::with_capacity(HEAD_LENGTH + data.len());
         buf.extend_from_slice(&[self.version]);
         buf.extend_from_slice(&self.index.to_be_bytes());
         buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -107,8 +109,7 @@ pub struct TransporterWriter {
 impl TransporterWriter {
     /// Serialize `cmd` and enqueue it for writing.
     pub async fn send(&self, cmd: &TransportMessage, t: Option<Duration>) -> Result<()> {
-        let data = Bytes::from(cmd.to_bytes()?);
-        self.send_bytes(data, t).await
+        self.send_bytes(cmd.to_bytes()?, t).await
     }
 
     /// Enqueue raw bytes for writing without serialization overhead.

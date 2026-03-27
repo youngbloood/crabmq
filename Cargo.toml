@@ -6,6 +6,7 @@
 resolver = "2"
 
 members = [
+    "cmd/storage_bench",
     "coo",
     "common",
     "broker",
