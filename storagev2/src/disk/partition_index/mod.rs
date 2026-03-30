@@ -319,7 +319,7 @@ impl ReadWritePartitionIndexManager {
         &self,
         topic: &str,
         partition_id: u32,
-        mms: &[MessageMeta],
+        mms: &[SegmentOffset],
     ) -> Result<u64> {
         let instance = self.get_write_instance(topic, partition_id).await?;
         let mms = mms.to_vec(); // 克隆数据以避免生命周期问题

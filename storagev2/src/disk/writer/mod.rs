@@ -596,7 +596,7 @@ mod test {
                     let msg = MessagePayload::new(
                         Bytes::from(format!("id_{}_{}", idx, s)),
                         0,
-                        HashMap::new(),
+                        Vec::new(),
                         Bytes::from(s),
                     );
                     if let Err(e) = _store.store("topic111", 11, vec![msg], None).await {

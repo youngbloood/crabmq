@@ -117,8 +117,8 @@ mod tests {
 
     #[test]
     fn test_serializer_roundtrip() -> StorageResult<()> {
-        let mut metadata = HashMap::new();
-        metadata.insert(Bytes::from("key1"), Bytes::from("value1"));
+        let mut metadata = Vec::new();
+        metadata.push((Bytes::from("key1"), Bytes::from("value1")));
 
         let msg = MessagePayload::new(
             Bytes::from("test_msg_id"),

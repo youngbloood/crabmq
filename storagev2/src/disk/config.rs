@@ -67,9 +67,9 @@ pub struct Config {
 
     // 写时的 worker 任务数量
     pub writer_worker_tasks_num: usize,
-    // 默认每个消息文件中的最大消息数量
+    // 每个消息文件中的最大消息数量
     pub max_msg_num_per_file: u64,
-    // 默认每个消息文件中的最大消息字节数
+    // 每个消息文件中的最大消息字节数
     pub max_size_per_file: u64,
     pub compress_type: u8,
 

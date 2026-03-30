@@ -3,7 +3,7 @@
  */
 
 use crate::{
-    MessageMeta, MessagePayload,
+    MessageMeta, MessagePayload, SegmentOffset,
     disk::{
         Config as DiskConfig,
         fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
@@ -13,23 +13,21 @@ use crate::{
             flusher::Flusher,
         },
     },
-    serializer::{MessageSerializer, SgIoSerializer},
+    serializer::MessageSerializer,
 };
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
-use bytes::Bytes;
 use common::dir_recursive;
 use log::error;
 use std::{
     ffi::OsString,
-    io::{IoSlice, SeekFrom},
+    io::IoSlice,
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
 // use tokio_uring::fs::File as UringFile;
 
 #[derive(Clone)]
@@ -69,6 +67,8 @@ impl BufferFlushable for PartitionWriterBuffer {
     #[cfg(not(target_os = "linux"))]
     async fn flush(&self, all: bool, fsync: bool) -> Result<u64> {
         // 批量获取消息
+
+        use bytes::BytesMut;
         let batch = if all {
             self.queue.pop_all()
         } else {
@@ -90,14 +90,14 @@ impl BufferFlushable for PartitionWriterBuffer {
         //       只要它们在 write_vectored 前保持存活，IoSlice 引用就有效
 
         // 1. 预分配稳定存储（不会被移动或释放）
-        let mut all_headers: Vec<Vec<Vec<u8>>> = vec![Vec::new(); batch.len()];
-        let mut length_headers: Vec<[u8; 8]> = vec![[0u8; 8]; batch.len()];
+        let mut all_headers: Vec<BytesMut> = vec![BytesMut::new(); batch.len()];
+        let mut length_headers: Vec<[u8; 8]> = vec![[0; 8]; batch.len()];
         let mut all_serialized = Vec::with_capacity(batch.len());
         let mut total_bytes = 0u64;
 
         // 2. 单次循环：序列化每条消息，立即组装 IoSlice，完成所有准备工作
         // 使用 zip + iter_mut 让 Rust 理解每次借用的是不同元素
-        let mut iovecs = Vec::with_capacity(batch.len() * 7);
+        let mut iovecs = Vec::with_capacity(batch.len() * 2);
 
         for ((msg, headers), length_header) in batch
             .iter()
@@ -315,7 +315,7 @@ impl PartitionWriterBuffer {
     pub(crate) async fn write_batch_with_metas_and_rotation(
         &self,
         batch: Vec<MessagePayload>,
-    ) -> Result<(u64, Vec<MessageMeta>, bool)> {
+    ) -> Result<(u64, Vec<SegmentOffset>, bool)> {
         if batch.is_empty() {
             return Ok((0, Vec::new(), false));
         }
@@ -326,7 +326,7 @@ impl PartitionWriterBuffer {
         let mut now_ptr_offset = self.write_ptr.get_offset();
         let mut now_batch_total_size = 0;
         let mut now_count = self.write_ptr.get_current_count();
-        let mut message_metas = Vec::with_capacity(batch_len);
+        let mut segment_offsets = Vec::with_capacity(batch_len);
         let mut did_rotate = false;
 
         for data in batch {
@@ -369,8 +369,10 @@ impl PartitionWriterBuffer {
             }
 
             // 生成消息元数据（包含文件段、偏移量等信息）
-            let mm = data.gen_meta(self.current_segment.load(Ordering::Relaxed), now_ptr_offset);
-            message_metas.push(mm);
+            segment_offsets.push(SegmentOffset {
+                segment_id: self.current_segment.load(Ordering::Relaxed),
+                offset: now_ptr_offset,
+            });
 
             // ✅ 直接将 MessagePayload 入队，延迟到 flush 时才序列化（保持零拷贝）
             self.queue.push(data);
@@ -400,20 +402,7 @@ impl PartitionWriterBuffer {
             self.flusher.flush_metas(false, &self.dir).await?;
         }
 
-        Ok((now_batch_total_size, message_metas, did_rotate))
-    }
-
-    pub(crate) async fn write_batch_with_metas(
-        &self,
-        batch: Vec<MessagePayload>,
-    ) -> Result<(u64, Vec<MessageMeta>)> {
-        let (bytes, metas, _) = self.write_batch_with_metas_and_rotation(batch).await?;
-        Ok((bytes, metas))
-    }
-
-    pub(crate) async fn write_batch(&self, batch: Vec<MessagePayload>) -> Result<u64> {
-        let (bytes, _) = self.write_batch_with_metas(batch).await?;
-        Ok(bytes)
+        Ok((now_batch_total_size, segment_offsets, did_rotate))
     }
 
     // 将数据从内存刷盘

@@ -8,6 +8,7 @@ pub use mem::*;
 use anyhow::Result;
 use async_trait::async_trait;
 use rkyv::{Archive, Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::{collections::HashMap, num::NonZero};
 use tokio::sync::oneshot;
 
@@ -29,13 +30,34 @@ pub(crate) struct MessagePayloadInner {
     pub payload: Vec<u8>,
 }
 
-// 消息负载结构
+/**
+ * 消息负载结构
+ *
+ * 磁盘格式：
+ * 8bytes(u64): total_len: 该消息的总长
+ *
+ * msg_id:
+ * 1byte(u8) + nbytes(msg_id): msg_id 的长度 + msg_id
+ * timestamp:
+ * 8bytes(u64): timestamp
+ *
+ * metadata_len:
+ * u16(2bytes): metadata 的数量
+ *
+ * payload_len:
+ * u32(4bytes): payload 的长度
+ *
+ * payload:
+ * nbytes(payload): payload
+ */
 #[derive(Debug, Clone)]
 pub struct MessagePayload {
     // 公开字段以支持直接访问和修改
     pub msg_id: Bytes,
     pub timestamp: u64,
-    pub metadata: HashMap<Bytes, Bytes>,
+    // Key: u8, 最长 255
+    // Value: u16, 最长 255
+    pub(crate) metadata: SmallVec<[(Bytes, Bytes); 5]>,
     pub payload: Bytes,
 }
 
@@ -43,9 +65,10 @@ impl MessagePayload {
     pub fn new(
         msg_id: Bytes,
         timestamp: u64,
-        metadata: HashMap<Bytes, Bytes>,
+        metadata: Vec<(Bytes, Bytes)>,
         payload: Bytes,
     ) -> Self {
+        let metadata = SmallVec::from_vec(metadata);
         Self {
             msg_id,
             timestamp,
@@ -80,6 +103,15 @@ impl MessagePayload {
             // payload 字段的原始长度（不是序列化后的长度）
             msg_len: self.payload.len() as u32,
         }
+    }
+
+    pub fn validate(&self) -> StorageResult<()> {
+        // 简单验证：msg_id 和 payload 不能为空
+        if self.msg_id.len() < u8::MAX as usize {
+            return Err(anyhow::anyhow!("msg_id length exceeds u8 max"));
+        }
+
+        Ok(())
     }
 }
 

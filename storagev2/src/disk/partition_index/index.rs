@@ -1,6 +1,11 @@
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use std::{path::PathBuf, sync::atomic::AtomicU64};
+use std::{
+    fs::File,
+    path::PathBuf,
+    sync::atomic::Ordering,
+    sync::{Arc, atomic::AtomicU64},
+};
 
 use crate::{
     SegmentOffset,
@@ -15,6 +20,7 @@ struct PartitionIndex {
     dir: PathBuf,
     logic_seq: AtomicU64,
 
+    now_file_left: AtomicU64,
     wh: ArcSwap<FileHandlerWriterAsync>,
 }
 
@@ -35,7 +41,9 @@ impl PartitionIndex {
 
     pub fn flush(&self, indexs: &[SegmentOffset]) -> Result<()> {
         for index in indexs {
-            let filename = self.get_filename(index.logic_seq);
+            let filename =
+                self.get_filename(self.logic_seq.load(std::sync::atomic::Ordering::Relaxed));
+            self.wh.load().write(&filename)?;
             let file = File::create(filename)?;
             file.write_all(index.serialize().as_ref())?;
         }
