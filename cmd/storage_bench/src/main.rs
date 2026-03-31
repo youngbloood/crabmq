@@ -361,11 +361,11 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
     if let Ok(write_mode) = std::env::var("DISK_WRITE_MODE") {
         match write_mode.to_lowercase().as_str() {
             "mmap" => {
-                config.disk_write_mode = storagev2::disk::DiskWriteMode::Mmap;
+                config.disk_write_mode = storagev2::disk::DiskReadWriteMode::Mmap;
                 println!("使用 Mmap 写入模式（内存拷贝）");
             }
             "writev" | "writevectored" => {
-                config.disk_write_mode = storagev2::disk::DiskWriteMode::WriteVectored;
+                config.disk_write_mode = storagev2::disk::DiskReadWriteMode::WriteVectored;
                 println!("使用 WriteVectored 写入模式（零拷贝）");
             }
             _ => {

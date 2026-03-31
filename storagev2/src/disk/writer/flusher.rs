@@ -1,6 +1,7 @@
 use crate::{
     StorageError,
     disk::{meta::WriterPositionPtr, writer::buffer::PartitionBufferSet},
+    err::ErrorCode,
     metrics::StorageWriterMetrics,
 };
 use anyhow::{Result, anyhow};
@@ -370,9 +371,7 @@ impl Flusher {
     pub(crate) async fn flush_topic_partition(&self, p: &PathBuf, fsync: bool) -> Result<()> {
         let pbs = self.partition_writer_buffers.get(p);
         if pbs.is_none() {
-            return Err(anyhow!(
-                StorageError::PartitionNotFound("Flusher".to_string()).to_string()
-            ));
+            return Err(anyhow!(StorageError::new(ErrorCode::PartitionNotFound)));
         }
         let pbs = pbs.unwrap();
         let idx = rand::random::<u32>() as usize;
@@ -398,9 +397,7 @@ impl Flusher {
     ) -> Result<()> {
         let wpp = self.partition_writer_ptrs.get(p);
         if wpp.is_none() {
-            return Err(anyhow!(
-                StorageError::PartitionNotFound("Flusher".to_string()).to_string()
-            ));
+            return Err(anyhow!(StorageError::new(ErrorCode::PartitionNotFound)));
         }
 
         let wpp = wpp.unwrap();

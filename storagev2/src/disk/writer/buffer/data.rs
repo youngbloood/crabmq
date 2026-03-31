@@ -126,7 +126,7 @@ impl BufferFlushable for PartitionWriterBuffer {
         let write_mode = self.conf.disk_write_mode;
 
         match write_mode {
-            crate::disk::DiskWriteMode::WriteVectored => {
+            crate::disk::DiskReadWriteMode::WriteVectored => {
                 // 零拷贝写入：使用 write_vectored
                 // 注意：writev 系统调用受 IOV_MAX 限制（每次调用的最大 IoSlice 数量）
                 let iov_max = self.conf.iov_max;
@@ -142,7 +142,7 @@ impl BufferFlushable for PartitionWriterBuffer {
                     }
                 }
             }
-            crate::disk::DiskWriteMode::Mmap => {
+            crate::disk::DiskReadWriteMode::Mmap => {
                 // Mmap 写入：将数据拷贝到连续内存后写入
                 // 优点：不受 IOV_MAX 限制，可以一次性写入大批量数据
                 // 缺点：需要一次内存拷贝
@@ -254,7 +254,7 @@ impl PartitionWriterBuffer {
         dir: &PathBuf,
         max_file: u64,
         offset: u64,
-        mode: crate::disk::DiskWriteMode,
+        mode: crate::disk::DiskReadWriteMode,
     ) -> Result<FileHandlerWriterAsync> {
         let current_fd = create_writer_fd(&dir.join(gen_record_filename(max_file)), mode).await?;
 

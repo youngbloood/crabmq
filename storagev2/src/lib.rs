@@ -5,12 +5,16 @@ pub mod serializer;
 use bytes::Bytes;
 pub use mem::*;
 
+pub mod err;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use rkyv::{Archive, Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{collections::HashMap, num::NonZero};
 use tokio::sync::oneshot;
+
+use crate::err::{ErrorCode, StorageError, StorageResult};
 
 #[derive(Debug, Clone)]
 pub struct MessageMeta {
@@ -106,9 +110,31 @@ impl MessagePayload {
     }
 
     pub fn validate(&self) -> StorageResult<()> {
-        // 简单验证：msg_id 和 payload 不能为空
-        if self.msg_id.len() < u8::MAX as usize {
-            return Err(anyhow::anyhow!("msg_id length exceeds u8 max"));
+        if self.msg_id.len() < 1 {
+            return Err(StorageError::new(ErrorCode::MsgIDTooShort));
+        }
+        if self.msg_id.len() > u8::MAX as usize {
+            return Err(StorageError::new(ErrorCode::MsgIDTooLong));
+        }
+        if self.metadata.len() > u16::MAX as usize {
+            return Err(StorageError::new(ErrorCode::MetadataTooMany));
+        }
+        for (k, v) in &self.metadata {
+            if k.len() > u8::MAX as usize {
+                return Err(StorageError::new(ErrorCode::MetadataKeyTooLong));
+            }
+            if v.len() > u16::MAX as usize {
+                return Err(StorageError::new(ErrorCode::MetadataValueTooLong));
+            }
+        }
+        if self.timestamp == 0 {
+            return Err(StorageError::new(ErrorCode::TimestampInvalid));
+        }
+        if self.payload.is_empty() {
+            return Err(StorageError::new(ErrorCode::PayloadTooShort));
+        }
+        if self.payload.len() > u32::MAX as usize {
+            return Err(StorageError::new(ErrorCode::PayloadTooLong));
         }
 
         Ok(())
@@ -165,41 +191,4 @@ pub struct SegmentOffset {
 pub enum ReadPosition {
     Begin,  // 从头开始消费
     Latest, // 从最新消息开始消费，以第一次调用next为快照
-}
-
-pub type StorageResult<T> = Result<T, StorageError>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StorageError {
-    TopicNotFound(String),     // 主题不存在
-    PartitionNotFound(String), // 分区不存在
-    RecordNotFound(String),    // 记录不存在
-    PathNotExist(String),      // 路径不存在
-    EmptyData,                 // 写入数据为空
-    IoError(String),           // IO 错误
-    SerializeError(String),    // 序列化/反序列化错误
-    DiskFull,                  // 磁盘空间不足
-    PermissionDenied,          // 权限不足
-    NoMoreMessages(String),    // 没有更多消息
-    OffsetMismatch(String),    // Offset 不匹配
-    Unknown(String),           // 其他未知错误
-}
-
-impl ToString for StorageError {
-    fn to_string(&self) -> String {
-        match self {
-            StorageError::TopicNotFound(key) => format!("[{}]: topic not found", key),
-            StorageError::PartitionNotFound(key) => format!("[{}]: partition not found", key),
-            StorageError::RecordNotFound(key) => format!("[{}]: record not found", key),
-            StorageError::PathNotExist(key) => format!("[{}]: path not exist", key),
-            StorageError::EmptyData => "empty data".to_string(),
-            StorageError::IoError(e) => format!("io error: {}", e),
-            StorageError::SerializeError(e) => format!("serialize error: {}", e),
-            StorageError::DiskFull => "disk full".to_string(),
-            StorageError::PermissionDenied => "permission denied".to_string(),
-            StorageError::NoMoreMessages(e) => format!("no more messages: {}", e),
-            StorageError::OffsetMismatch(e) => format!("offset mismatch: {}", e),
-            StorageError::Unknown(e) => format!("unknown error: {}", e),
-        }
-    }
 }

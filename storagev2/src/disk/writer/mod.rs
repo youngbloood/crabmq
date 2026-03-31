@@ -6,6 +6,7 @@ use super::Config as DiskConfig;
 use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
 use crate::disk::meta::WriterPositionPtr;
 use crate::disk::writer::buffer::PartitionBufferSet;
+use crate::err::ErrorCode;
 use crate::metrics::StorageWriterMetrics;
 use crate::{MessagePayload, StorageError, StorageResult, StorageWriter};
 use anyhow::{Result, anyhow};
@@ -295,7 +296,7 @@ impl DiskStorageWriter {
                             let result = tpm.send(&task.topic, task.partition_id, task.payloads).await;
                             let send_result = result.as_ref().map(|_| ());
                             if let Some(notify) = task.notify {
-                                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));
+                                let _ = notify.send(send_result.map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string())));
                             }
                             if let Err(e) = &result {
                                 error!("send data to topic[{}]-partition[{}] err: {:?}", task.topic, task.partition_id, e);
@@ -317,9 +318,7 @@ impl DiskStorageWriter {
             .get_cached_topic_partition(topic, partition_id)
             .is_none()
         {
-            return Err(anyhow!(
-                StorageError::PartitionNotFound("DiskStorageWriter".to_string()).to_string()
-            ));
+            return Err(anyhow!(StorageError::new(ErrorCode::PartitionNotFound,)));
         }
 
         let p = &self
@@ -359,7 +358,7 @@ impl DiskStorageWriter {
         worker
             .send(task)
             .await
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
+            .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
         Ok(())
     }
 
@@ -388,31 +387,18 @@ impl DiskStorageWriter {
         &self,
         topic: &str,
         partition_id: u32,
-        mut payloads: Vec<MessagePayload>,
+        payloads: Vec<MessagePayload>,
         notify: Option<oneshot::Sender<StorageResult<()>>>,
     ) -> StorageResult<()> {
-        if payloads.is_empty() {
-            if let Some(notify) = notify {
-                let _ = notify.send(Err(StorageError::EmptyData));
-            }
-            return Err(StorageError::EmptyData);
-        }
-
         // pre check
-        for msg in &mut payloads {
-            if msg.msg_id.is_empty() {
-                return Err(StorageError::Unknown("msg_id 不能为空".to_string()));
-            }
-            if msg.payload.is_empty() {
-                return Err(StorageError::EmptyData);
-            }
-            if msg.timestamp == 0 {
-                msg.timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-            }
-        }
+        // for msg in &mut payloads {
+        //     if msg.timestamp == 0 {
+        //         msg.timestamp = SystemTime::now()
+        //             .duration_since(UNIX_EPOCH)
+        //             .unwrap()
+        //             .as_secs();
+        //     }
+        // }
 
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
             let result = pwb.write_batch(payloads, true).await;
@@ -420,7 +406,10 @@ impl DiskStorageWriter {
                 .update_last_write_time(topic, partition_id);
             let send_result = result.as_ref().map(|_| ());
             if let Some(notify) = notify {
-                let _ = notify.send(send_result.map_err(|e| StorageError::IoError(e.to_string())));
+                let _ = notify
+                    .send(send_result.map_err(|e| {
+                        StorageError::with_message(ErrorCode::IoError, e.to_string())
+                    }));
             }
             Ok(())
         } else {
@@ -505,10 +494,7 @@ fn partition_to_worker(topic: &str, partition_id: u32, worker_num: u32) -> Resul
 #[cfg(test)]
 mod test {
     use super::{DiskConfig, DiskStorageWriter};
-    use crate::{
-        MessagePayload, StorageWriter as _,
-        disk::{DiskStorageWriterWrapper, default_config},
-    };
+    use crate::{MessagePayload, StorageWriter as _, disk::DiskStorageWriterWrapper};
     use anyhow::Result;
     use bytes::Bytes;
     use futures::future::join_all;
@@ -516,7 +502,7 @@ mod test {
     use tokio::time;
 
     fn new_disk_storage() -> DiskStorageWriterWrapper {
-        let cfg = default_config();
+        let cfg = DiskConfig::default();
         DiskStorageWriterWrapper::new(DiskConfig {
             storage_dir: PathBuf::from("./data"),
             flusher_period: 50,
@@ -555,7 +541,7 @@ mod test {
 
     #[tokio::test]
     async fn storage_store_multi() -> Result<()> {
-        let store = DiskStorageWriterWrapper::new(default_config()).expect("error config");
+        let store = DiskStorageWriterWrapper::new(DiskConfig::default()).expect("error config");
         let datas: Vec<&'static str> = vec![
             "Apple",
             "Banana",

@@ -8,7 +8,7 @@ use std::path::Path;
 pub use mmap::MmapWriter;
 pub use vectored::VectoredWriter;
 
-use super::DiskWriteMode;
+use super::DiskReadWriteMode;
 
 /// 写入 trait：统一抽象不同的磁盘写入方式
 ///
@@ -43,16 +43,16 @@ pub trait Reader: Send + Sync {
 /// 根据配置创建对应的 Writer
 pub async fn create_writer(
     filename: &Path,
-    mode: DiskWriteMode,
+    mode: DiskReadWriteMode,
     prealloc: bool,
     prealloc_size: u64,
 ) -> Result<Box<dyn Writer>> {
     match mode {
-        DiskWriteMode::WriteVectored => {
+        DiskReadWriteMode::WriteVectored => {
             let writer = VectoredWriter::new(filename, prealloc, prealloc_size).await?;
             Ok(Box::new(writer))
         }
-        DiskWriteMode::Mmap => {
+        DiskReadWriteMode::Mmap => {
             let writer = MmapWriter::new(filename, prealloc, prealloc_size).await?;
             Ok(Box::new(writer))
         }
@@ -60,16 +60,13 @@ pub async fn create_writer(
 }
 
 /// 根据配置创建对应的 Reader（未来扩展）
-pub async fn create_reader(
-    filename: &Path,
-    mode: DiskWriteMode,
-) -> Result<Box<dyn Reader>> {
+pub async fn create_reader(filename: &Path, mode: DiskReadWriteMode) -> Result<Box<dyn Reader>> {
     match mode {
-        DiskWriteMode::WriteVectored => {
+        DiskReadWriteMode::WriteVectored => {
             let reader = vectored::VectoredReader::new(filename).await?;
             Ok(Box::new(reader))
         }
-        DiskWriteMode::Mmap => {
+        DiskReadWriteMode::Mmap => {
             let reader = mmap::MmapReader::new(filename).await?;
             Ok(Box::new(reader))
         }
@@ -88,12 +85,8 @@ mod tests {
         let file_path = temp_dir.path().join("test_vectored.dat");
 
         // 测试写入
-        let mut writer = create_writer(
-            &file_path,
-            DiskWriteMode::WriteVectored,
-            false,
-            0,
-        ).await?;
+        let mut writer =
+            create_writer(&file_path, DiskReadWriteMode::WriteVectored, false, 0).await?;
 
         let data1 = b"Hello ";
         let data2 = b"World!";
@@ -107,7 +100,7 @@ mod tests {
         drop(writer);
 
         // 测试读取
-        let mut reader = create_reader(&file_path, DiskWriteMode::WriteVectored).await?;
+        let mut reader = create_reader(&file_path, DiskReadWriteMode::WriteVectored).await?;
         let data = reader.read(12).await?;
         assert_eq!(data, b"Hello World!");
 
@@ -122,10 +115,11 @@ mod tests {
         // 测试写入
         let mut writer = create_writer(
             &file_path,
-            DiskWriteMode::Mmap,
+            DiskReadWriteMode::Mmap,
             true,
             1024 * 1024, // 1MB 预分配
-        ).await?;
+        )
+        .await?;
 
         let data1 = b"Mmap ";
         let data2 = b"Test!";
@@ -139,7 +133,7 @@ mod tests {
         drop(writer);
 
         // 测试读取
-        let mut reader = create_reader(&file_path, DiskWriteMode::Mmap).await?;
+        let mut reader = create_reader(&file_path, DiskReadWriteMode::Mmap).await?;
         let data = reader.read(10).await?;
         assert_eq!(data, b"Mmap Test!");
 
@@ -151,12 +145,8 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let file_path = temp_dir.path().join("test_large.dat");
 
-        let mut writer = create_writer(
-            &file_path,
-            DiskWriteMode::WriteVectored,
-            false,
-            0,
-        ).await?;
+        let mut writer =
+            create_writer(&file_path, DiskReadWriteMode::WriteVectored, false, 0).await?;
 
         // 创建 100 个 IoSlice，每个 8 字节
         let chunks: Vec<Vec<u8>> = (0..100)

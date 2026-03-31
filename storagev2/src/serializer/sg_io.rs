@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use smallvec::SmallVec;
 
+use crate::err::ErrorCode;
 use crate::serializer::SerializedMessage;
 /// S-G IO 序列化实现
 ///
@@ -22,14 +23,6 @@ pub fn serialize_sg_io<'a>(
     msg: &'a MessagePayload,
     header: &'a mut BytesMut,
 ) -> StorageResult<SerializedMessage<'a>> {
-    // 1. msg_id: [1:len] + [data]
-    if msg.msg_id.len() > u8::MAX as usize {
-        return Err(StorageError::SerializeError(format!(
-            "msg_id too long: {}",
-            msg.msg_id.len()
-        )));
-    }
-
     // ===== 计算总长度 =====
     // 1: 存储 msg_id 的长度，u8 + len(msg_id)
     let mut total_data_len = 1 + msg.msg_id.len();

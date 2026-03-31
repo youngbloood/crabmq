@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// 磁盘写入方式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum DiskWriteMode {
+pub enum DiskReadWriteMode {
     /// 使用 write_vectored 零拷贝写入（默认）
     WriteVectored,
     /// 使用 mmap 写入（需要内存拷贝组装连续内存）
@@ -83,7 +83,16 @@ pub struct Config {
     pub enable_index: bool,
 
     // 磁盘写入方式：WriteVectored（零拷贝）或 Mmap（内存拷贝）
-    pub disk_write_mode: DiskWriteMode,
+    pub disk_write_mode: DiskReadWriteMode,
+
+    // 每个分区缓冲区的最大消息字节数，超过该值会写入失败
+    pub message_size_limit_per_partition: usize,
+    // 每个分区缓冲区的最大消息数量，超过该值会写入失败
+    pub message_count_limit_per_partition: usize,
+
+    pub message_size_limit_global: usize, // 全局消息大小限制，超过该值会写入失败
+
+    pub message_count_limit_global: usize, // 全局消息数量限制，超过该值会写入失败
 
     // RocksDB 配置参数
     pub rocksdb_max_open_files: i32,
@@ -122,40 +131,50 @@ impl Config {
         self.storage_dir = storage_dir;
         self
     }
+
+    pub fn fix(mut self) -> Self {
+        // 获取系统 IOV_MAX 值，覆盖默认值
+        if self.iov_max == 0 {
+            self.iov_max = get_system_iov_max();
+        }
+        self
+    }
 }
 
-pub fn default_config() -> Config {
-    Config {
-        storage_dir: PathBuf::from("./messages"),
-        flusher_period: 50,              // 50ms
-        flusher_factor: 1024 * 1024 * 4, // 4M
-        flusher_partition_writer_buffer_tasks_num: 64,
-        flusher_partition_writer_ptr_tasks_num: 64,
-        flusher_partition_meta_tasks_num: 64,
-        partition_writer_prealloc: false,
-        partition_cleanup_interval: 150,
-        partition_inactive_threshold: 300,
-        batch_pop_size_from_buffer: 128, // 优化：128 条消息 × 7 IoSlice = 896 < 1024（单次 write_vectored）
-        iov_max: 1024,                   // Linux/macOS 系统默认值，可通过 getconf IOV_MAX 查询
-        partition_index_num_per_topic: 100,
-        max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
-        max_size_per_file: 1024 * 1024 * 1024, // 1G
-        compress_type: 0,
-        writer_worker_tasks_num: 100,
-        create_next_record_file_threshold: 90,
-        with_metrics: false,
-        enable_index: true, // 默认启用索引，性能测试时可设为 false
-        disk_write_mode: DiskWriteMode::WriteVectored, // 默认使用零拷贝 write_vectored
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            storage_dir: PathBuf::from("./messages"),
+            flusher_period: 50,              // 50ms
+            flusher_factor: 1024 * 1024 * 4, // 4M
+            flusher_partition_writer_buffer_tasks_num: 64,
+            flusher_partition_writer_ptr_tasks_num: 64,
+            flusher_partition_meta_tasks_num: 64,
+            partition_writer_prealloc: false,
+            partition_cleanup_interval: 150,
+            partition_inactive_threshold: 300,
+            batch_pop_size_from_buffer: 128, // 优化：128 条消息 × 7 IoSlice = 896 < 1024（单次 write_vectored）
+            iov_max: get_system_iov_max(),   // Linux/macOS 系统默认值，可通过 getconf IOV_MAX 查询
+            partition_index_num_per_topic: 100,
+            max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
+            max_size_per_file: 1024 * 1024 * 1024, // 1G
+            compress_type: 0,
+            writer_worker_tasks_num: 100,
+            create_next_record_file_threshold: 90,
+            with_metrics: false,
+            enable_index: true, // 默认启用索引，性能测试时可设为 false
+            disk_write_mode: DiskReadWriteMode::WriteVectored, // 默认使用零拷贝 write_vectored
 
-        // RocksDB 配置默认值（针对高性能写入优化）
-        rocksdb_max_open_files: 10000,
-        rocksdb_write_buffer_size: 128 * 1024 * 1024, // 128MB
-        rocksdb_max_write_buffer_number: 8,
-        rocksdb_target_file_size_base: 128 * 1024 * 1024, // 128MB
-        rocksdb_max_background_jobs: 8,
-        rocksdb_level_zero_file_num_compaction_trigger: 8,
-        rocksdb_level_zero_slowdown_writes_trigger: 20,
-        rocksdb_level_zero_stop_writes_trigger: 36,
-        rocksdb_disable_wal: false, // 默认不禁用 WAL，可根据需求设为 true
+            // RocksDB 配置默认值（针对高性能写入优化）
+            rocksdb_max_open_files: 10000,
+            rocksdb_write_buffer_size: 128 * 1024 * 1024, // 128MB
+            rocksdb_max_write_buffer_number: 8,
+            rocksdb_target_file_size_base: 128 * 1024 * 1024, // 128MB
+            rocksdb_max_background_jobs: 8,
+            rocksdb_level_zero_file_num_compaction_trigger: 8,
+            rocksdb_level_zero_slowdown_writes_trigger: 20,
+            rocksdb_level_zero_stop_writes_trigger: 36,
+            rocksdb_disable_wal: false, // 默认不禁用 WAL，可根据需求设为 true
+        }
     }
 }

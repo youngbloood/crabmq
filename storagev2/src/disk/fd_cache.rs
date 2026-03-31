@@ -1,3 +1,4 @@
+use crate::err::ErrorCode;
 use crate::{StorageError, StorageResult};
 
 use super::fd::{self, Writer};
@@ -5,6 +6,7 @@ use super::prealloc::preallocate;
 use anyhow::Result;
 use common::util::{check_and_create_dir, check_exist};
 use lru::LruCache;
+use once_cell::sync::Lazy;
 use std::{
     fs::OpenOptions,
     io::{IoSlice, Seek, SeekFrom},
@@ -18,7 +20,6 @@ use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
     sync::RwLock,
 };
-use once_cell::sync::Lazy;
 
 // 读文件句柄
 #[derive(Clone, Debug)]
@@ -65,11 +66,11 @@ impl FdReaderCacheAync {
         let mut read_fd = OpenOptions::new()
             .read(true)
             .open(key)
-            .map_err(|e| StorageError::IoError(e.to_string()))?;
+            .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
         if read_offset != 0 {
             read_fd
                 .seek(SeekFrom::Start(read_offset))
-                .map_err(|e| StorageError::IoError(e.to_string()))?;
+                .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
         }
         let async_read = Arc::new(RwLock::new(AsyncFile::from_std(read_fd)));
         let handler = FileHandlerReaderAsync { inner: async_read };
@@ -123,7 +124,7 @@ impl FileHandlerWriterAsync {
     pub async fn write(
         &self,
         datas: &[IoSlice<'_>],
-        _mode: crate::disk::DiskWriteMode, // 保留参数兼容性，但不再使用
+        _mode: crate::disk::DiskReadWriteMode, // 保留参数兼容性，但不再使用
     ) -> Result<usize> {
         self.inner.write(datas).await
     }
@@ -164,7 +165,7 @@ pub async fn create_simple_async_file(p: &Path) -> Result<AsyncFile> {
 /// 注意：现在返回 FileHandlerWriterAsync，内部使用 fd::Writer
 pub async fn create_writer_fd(
     p: &Path,
-    mode: crate::disk::DiskWriteMode,
+    mode: crate::disk::DiskReadWriteMode,
 ) -> Result<FileHandlerWriterAsync> {
     let writer = fd::create_writer(p, mode, false, 0).await?;
     Ok(FileHandlerWriterAsync::from_writer(writer))
@@ -176,7 +177,7 @@ pub async fn create_writer_fd(
 pub async fn create_writer_fd_with_prealloc(
     p: &Path,
     alloc_size: u64,
-    mode: crate::disk::DiskWriteMode,
+    mode: crate::disk::DiskReadWriteMode,
 ) -> Result<FileHandlerWriterAsync> {
     let writer = fd::create_writer(p, mode, true, alloc_size).await?;
     Ok(FileHandlerWriterAsync::from_writer(writer))

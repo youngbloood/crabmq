@@ -1,3 +1,4 @@
+use crate::err::ErrorCode;
 use crate::{
     MessagePayload, ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession,
     StorageResult, StorageWriter,
@@ -48,15 +49,16 @@ impl MemStorage {
         partition_id: u32,
         _n: NonZero<u64>,
     ) -> StorageResult<(MessagePayload, u64, SegmentOffset)> {
-        let topic_storage = self
-            .topics
-            .get(topic)
-            .ok_or_else(|| StorageError::TopicNotFound(topic.to_string()))?;
+        let topic_storage = self.topics.get(topic).ok_or_else(|| {
+            StorageError::with_message(ErrorCode::TopicNotFound, topic.to_string())
+        })?;
 
         let partition_queue = topic_storage
             .partitions
             .get_mut(&partition_id)
-            .ok_or_else(|| StorageError::PartitionNotFound(partition_id.to_string()))?;
+            .ok_or_else(|| {
+                StorageError::with_message(ErrorCode::PartitionNotFound, partition_id.to_string())
+            })?;
 
         let msg = {
             let messages_rl = partition_queue.messages.read().await;
@@ -76,15 +78,13 @@ impl MemStorage {
 
     /// 提交消费并移除已处理的消息
     async fn commit(&self, topic: &str, partition: u32) -> StorageResult<()> {
-        let topic_storage = self
-            .topics
-            .get(topic)
-            .ok_or_else(|| StorageError::TopicNotFound(topic.to_string()))?;
+        let topic_storage = self.topics.get(topic).ok_or_else(|| {
+            StorageError::with_message(ErrorCode::TopicNotFound, topic.to_string())
+        })?;
 
-        let partition_queue = topic_storage
-            .partitions
-            .get(&partition)
-            .ok_or_else(|| StorageError::PartitionNotFound(partition.to_string()))?;
+        let partition_queue = topic_storage.partitions.get(&partition).ok_or_else(|| {
+            StorageError::with_message(ErrorCode::PartitionNotFound, partition.to_string())
+        })?;
 
         {
             let mut messages_wl = partition_queue.messages.write().await;
@@ -169,7 +169,8 @@ impl StorageReader for MemStorageReader {
         {
             return Ok(Box::new(MemStorageReaderSession::new(self.storage.clone())));
         }
-        Err(StorageError::Unknown(
+        Err(StorageError::with_message(
+            ErrorCode::Unknown,
             "mem storage only open once session".to_string(),
         ))
     }

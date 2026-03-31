@@ -2,6 +2,7 @@ use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
 use crate::MessagePayload;
 use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
+use crate::err::ErrorCode;
 use crate::serializer::{MessageSerializer, SgIoSerializer};
 use crate::{ReadPosition, SegmentOffset, StorageError, StorageResult};
 use crate::{StorageReader, StorageReaderSession};
@@ -147,7 +148,10 @@ impl StorageReaderSession for DiskStorageReaderSession {
         {
             let partition_dir = self.dir.join(topic).join(partition_id.to_string());
             if !check_exist(&partition_dir) {
-                return Err(StorageError::PathNotExist(format!("{:?}", partition_dir)));
+                return Err(StorageError::with_message(
+                    ErrorCode::PathNotExist,
+                    format!("{:?}", partition_dir),
+                ));
             }
 
             let mut partition =
@@ -193,10 +197,10 @@ impl StorageReaderSession for DiskStorageReaderSession {
             .readers
             .get(&(topic.to_string(), partition_id))
             .ok_or_else(|| {
-                StorageError::PartitionNotFound(format!(
-                    "topic: {}, partition: {}",
-                    topic, partition_id
-                ))
+                StorageError::with_message(
+                    ErrorCode::PartitionNotFound,
+                    format!("topic: {}, partition: {}", topic, partition_id),
+                )
             })?;
 
         // 使用读写分离的索引管理器验证 offset 的有效性
@@ -205,7 +209,10 @@ impl StorageReaderSession for DiskStorageReaderSession {
             .get_msg_id_by_segment_offset(topic, partition_id, &offset)
             .await
             .map_err(|e| {
-                StorageError::OffsetMismatch(format!("Invalid offset {:?}: {:?}", offset, e))
+                StorageError::with_message(
+                    ErrorCode::OffsetMismatch,
+                    format!("Invalid offset {:?}: {:?}", offset, e),
+                )
             })?;
 
         // 验证并更新 commit_ptr
@@ -251,7 +258,7 @@ impl DiskStorageReaderSessionPartition {
             self.reader_ptr = Arc::new(RwLock::new(
                 ReaderPositionPtr::load(&self.reader_ptr_filename)
                     .await
-                    .map_err(|e| StorageError::IoError(e.to_string()))?,
+                    .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?,
             ));
         } else if let Some(parent) = self.reader_ptr_filename.parent() {
             if read_position == &ReadPosition::Latest {
@@ -259,10 +266,12 @@ impl DiskStorageReaderSessionPartition {
 
                 let data = tokio::fs::read_to_string(writer_ptr_filename)
                     .await
-                    .map_err(|e| StorageError::IoError(e.to_string()))?;
+                    .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
                 if !data.is_empty() {
-                    let sp: WriterPositionPtrSnapshot = serde_json::from_str(&data)
-                        .map_err(|e| StorageError::SerializeError(e.to_string()))?;
+                    let sp: WriterPositionPtrSnapshot =
+                        serde_json::from_str(&data).map_err(|e| {
+                            StorageError::with_message(ErrorCode::SerializeError, e.to_string())
+                        })?;
                     let mut wl = self.reader_ptr.write().await;
                     // 从 segment_id 重建 filename
                     wl.filename =
@@ -276,7 +285,7 @@ impl DiskStorageReaderSessionPartition {
             self.commit_ptr = Arc::new(RwLock::new(
                 ReaderPositionPtr::load(&self.commit_ptr_filename)
                     .await
-                    .map_err(|e| StorageError::IoError(e.to_string()))?,
+                    .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?,
             ));
         } else if read_position == &ReadPosition::Latest {
             let (filename, offset) = {
@@ -342,7 +351,10 @@ impl DiskStorageReaderSessionPartition {
             }
             Err(e) => {
                 error!("failed to read header length: {:?}", e);
-                return Err(StorageError::IoError(e.to_string()));
+                return Err(StorageError::with_message(
+                    ErrorCode::IoError,
+                    e.to_string(),
+                ));
             }
         }
 
@@ -364,7 +376,10 @@ impl DiskStorageReaderSessionPartition {
             }
             Err(e) => {
                 error!("failed to read message content: {:?}", e);
-                return Err(StorageError::IoError(e.to_string()));
+                return Err(StorageError::with_message(
+                    ErrorCode::IoError,
+                    e.to_string(),
+                ));
             }
         }
 
@@ -431,10 +446,13 @@ impl DiskStorageReaderSessionPartition {
             || (offset.segment_id == current_commit.segment_id
                 && offset.offset < current_commit.offset)
         {
-            return Err(StorageError::OffsetMismatch(format!(
-                "Cannot commit offset {:?} which is before current commit offset {:?}",
-                offset, current_commit
-            )));
+            return Err(StorageError::with_message(
+                ErrorCode::OffsetMismatch,
+                format!(
+                    "Cannot commit offset {:?} which is before current commit offset {:?}",
+                    offset, current_commit
+                ),
+            ));
         }
 
         // 更新 commit_ptr
@@ -490,14 +508,17 @@ mod test {
 
     use crate::{
         StorageReader,
-        disk::{DiskStorageReader, default_config},
+        disk::{Config, DiskStorageReader},
     };
     use std::{num::NonZero, path::PathBuf, sync::Arc};
 
     #[tokio::test]
     async fn reader_session() {
-        let dsr =
-            DiskStorageReader::new(PathBuf::from("./messages"), 100, Arc::new(default_config()));
+        let dsr = DiskStorageReader::new(
+            PathBuf::from("./messages"),
+            100,
+            Arc::new(Config::default()),
+        );
         let sess = dsr
             .new_session(1001, vec![])
             .await
@@ -506,8 +527,11 @@ mod test {
 
     #[tokio::test]
     async fn reader_session2() {
-        let dsr =
-            DiskStorageReader::new(PathBuf::from("./messages"), 100, Arc::new(default_config()));
+        let dsr = DiskStorageReader::new(
+            PathBuf::from("./messages"),
+            100,
+            Arc::new(Config::default()),
+        );
         let sess = dsr
             .new_session(1001, vec![])
             .await
@@ -519,7 +543,7 @@ mod test {
     async fn test_data_integrity_and_commit_validation() {
         use crate::{
             MessagePayload, ReadPosition, SegmentOffset, StorageWriter,
-            disk::{DiskStorageWriterWrapper, default_config},
+            disk::DiskStorageWriterWrapper,
         };
         use std::fs;
         use tokio::time::Duration;
@@ -537,7 +561,7 @@ mod test {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 创建存储配置
-        let mut config = default_config();
+        let mut config = Config::default();
         config.storage_dir = PathBuf::from(test_dir);
         config.with_metrics = true;
 
@@ -602,7 +626,7 @@ mod test {
 
         // 创建reader并验证数据
         let reader =
-            DiskStorageReader::new(PathBuf::from(test_dir), 100, Arc::new(default_config()));
+            DiskStorageReader::new(PathBuf::from(test_dir), 100, Arc::new(Config::default()));
         let session = reader
             .new_session(group_id, vec![(topic.to_string(), ReadPosition::Begin)])
             .await
@@ -773,7 +797,7 @@ mod test {
     async fn test_commit_offset_edge_cases() {
         use crate::{
             MessagePayload, ReadPosition, SegmentOffset, StorageWriter,
-            disk::{DiskStorageWriterWrapper, default_config},
+            disk::DiskStorageWriterWrapper,
         };
         use std::fs;
         use tokio::time::Duration;
@@ -789,7 +813,7 @@ mod test {
         }
 
         // 创建writer
-        let mut config = default_config();
+        let mut config = Config::default();
         config.storage_dir = PathBuf::from(test_dir);
         config.with_metrics = true;
         let writer = DiskStorageWriterWrapper::new(config).expect("Failed to create writer");
@@ -818,7 +842,7 @@ mod test {
 
         // 创建reader
         let reader =
-            DiskStorageReader::new(PathBuf::from(test_dir), 100, Arc::new(default_config()));
+            DiskStorageReader::new(PathBuf::from(test_dir), 100, Arc::new(Config::default()));
         let session = reader
             .new_session(group_id, vec![(topic.to_string(), ReadPosition::Begin)])
             .await
