@@ -1,5 +1,8 @@
 use bytes::{Bytes, BytesMut};
+use rkyv::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
+use crate::err::ErrorCode;
 use crate::serializer::SerializedMessage;
 /// rkyv 序列化实现（保留用于性能对比）
 ///
@@ -10,7 +13,17 @@ use crate::serializer::SerializedMessage;
 /// - 需要8字节长度头
 /// - 反序列化略慢于S-G IO
 use crate::{MessagePayload, StorageError, StorageResult};
+use std::collections::HashMap;
 use std::io::IoSlice;
+
+// 内部数据结构：只包含数据，可被 rkyv 序列化
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub(crate) struct MessagePayloadRkyv<'a> {
+    pub msg_id: &'a [u8],
+    pub timestamp: u64,
+    pub metadata: &'a Vec<(&[u8], Bytes)>,
+    pub payload: &'a [u8],
+}
 
 /// 序列化消息（使用rkyv）
 ///
@@ -23,8 +36,17 @@ pub fn serialize_rkyv<'a>(
     headers: &'a mut BytesMut,
 ) -> StorageResult<SerializedMessage<'a>> {
     // 直接使用 rkyv 序列化
-    let aligned_vec = rkyv::to_bytes::<rkyv::rancor::Error>(msg)
-        .map_err(|e| StorageError::SerializeError(e.to_string()))?;
+
+    let m = msg.msg_id.as_ref();
+    let inner = MessagePayloadRkyv {
+        msg_id: &msg.msg_id.to_vec(),
+        timestamp: msg.timestamp,
+        metadata: &msg.metadata,
+        payload: &msg.payload.to_vec(),
+    };
+
+    let aligned_vec = rkyv::to_bytes::<rkyv::rancor::Error>(&inner)
+        .map_err(|e| StorageError::with_message(ErrorCode::SerializeError, e.to_string()))?;
 
     let data_len = aligned_vec.len() as u64;
 

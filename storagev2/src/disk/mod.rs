@@ -2,8 +2,9 @@ mod compress;
 pub mod config;
 pub mod fd;
 mod fd_cache;
+mod index;
 mod meta;
-mod partition_index;
+// mod partition_index;
 mod prealloc;
 
 pub mod reader;

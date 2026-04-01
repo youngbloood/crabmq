@@ -17,8 +17,11 @@ impl StorageError {
         Self { code, message }
     }
 
-    pub fn with_message(code: ErrorCode, message: String) -> Self {
-        Self { code, message }
+    pub fn with_message(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -45,14 +48,15 @@ impl Display for StorageError {
  */
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 pub enum ErrorCode {
-    MsgIDTooShort = 1001,
-    MsgIDTooLong = 1002,
-    MetadataTooMany = 1003,
-    MetadataKeyTooLong = 1004,
-    MetadataValueTooLong = 1005,
-    TimestampInvalid = 1006,
-    PayloadTooShort = 1007,
-    PayloadTooLong = 1008,
+    InvalidConfigParameter = 1001,
+    MsgIDTooShort = 1002,
+    MsgIDTooLong = 1003,
+    MetadataTooMany = 1004,
+    MetadataKeyTooLong = 1005,
+    MetadataValueTooLong = 1006,
+    TimestampInvalid = 1007,
+    PayloadTooShort = 1008,
+    PayloadTooLong = 1009,
 
     TopicNotFound = 1101,
     PartitionNotFound = 1102,

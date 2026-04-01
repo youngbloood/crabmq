@@ -278,24 +278,21 @@ impl WriterPositionPtr {
 #[derive(Default, Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ReaderPositionPtr {
     pub group_id: u32,
-    pub filename: PathBuf,
-    pub offset: u64,
+    logic_seq: u64,
 }
 
 impl ReaderPositionPtr {
-    pub fn new(group_id: u32, filename: PathBuf) -> Self {
+    pub fn new(group_id: u32, logic_seq: u64) -> Self {
         Self {
             group_id,
-            filename,
-            offset: Default::default(),
+            logic_seq,
         }
     }
 
     pub fn with_dir_and_group_id(dir: PathBuf, group_id: u32) -> Self {
         ReaderPositionPtr {
             group_id,
-            filename: dir.join(gen_record_filename(0)),
-            offset: 0,
+            logic_seq: 0,
         }
     }
 

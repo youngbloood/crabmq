@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use crate::err::{ErrorCode, StorageError, StorageResult};
 use std::path::PathBuf;
 
 /// 磁盘写入方式
@@ -89,33 +89,71 @@ pub struct Config {
     pub message_size_limit_per_partition: usize,
     // 每个分区缓冲区的最大消息数量，超过该值会写入失败
     pub message_count_limit_per_partition: usize,
-
-    pub message_size_limit_global: usize, // 全局消息大小限制，超过该值会写入失败
-
-    pub message_count_limit_global: usize, // 全局消息数量限制，超过该值会写入失败
-
+    // 全局消息大小限制，超过该值会写入失败
+    pub message_size_limit_global: usize,
+    // 全局消息数量限制，超过该值会写入失败
+    pub message_count_limit_global: usize,
     // RocksDB 配置参数
-    pub rocksdb_max_open_files: i32,
-    pub rocksdb_write_buffer_size: usize, // 单位：字节
-    pub rocksdb_max_write_buffer_number: i32,
-    pub rocksdb_target_file_size_base: u64, // 单位：字节
-    pub rocksdb_max_background_jobs: i32,
-    pub rocksdb_level_zero_file_num_compaction_trigger: i32,
-    pub rocksdb_level_zero_slowdown_writes_trigger: i32,
-    pub rocksdb_level_zero_stop_writes_trigger: i32,
-    pub rocksdb_disable_wal: bool,
+    // pub rocksdb_max_open_files: i32,
+    // pub rocksdb_write_buffer_size: usize, // 单位：字节
+    // pub rocksdb_max_write_buffer_number: i32,
+    // pub rocksdb_target_file_size_base: u64, // 单位：字节
+    // pub rocksdb_max_background_jobs: i32,
+    // pub rocksdb_level_zero_file_num_compaction_trigger: i32,
+    // pub rocksdb_level_zero_slowdown_writes_trigger: i32,
+    // pub rocksdb_level_zero_stop_writes_trigger: i32,
+    // pub rocksdb_disable_wal: bool,
 }
 
 impl Config {
-    pub fn validate(&self) -> Result<()> {
-        let must_gt_zero = |attr, v| -> Result<()> {
+    pub fn validate(&self) -> StorageResult<()> {
+        let must_gt_zero = |attr, v| -> StorageResult<()> {
             if v == 0 {
-                return Err(anyhow!(format!("'{}' must be grater than zero", attr)));
+                return Err(StorageError::with_message(
+                    ErrorCode::InvalidConfigParameter,
+                    format!("'{}' must be grater than 0", attr),
+                )
+                .into());
+            }
+            Ok(())
+        };
+
+        let must_gt_const = |attr: &str, v: usize, const_value: usize| -> StorageResult<()> {
+            if v <= const_value {
+                return Err(StorageError::with_message(
+                    ErrorCode::InvalidConfigParameter,
+                    format!("'{}' must be grater than {}", attr, const_value),
+                )
+                .into());
             }
             Ok(())
         };
         must_gt_zero("flusher_period", self.flusher_period)?;
         must_gt_zero("flusher_factor", self.flusher_factor)?;
+        must_gt_zero(
+            "flusher_partition_writer_buffer_tasks_num",
+            self.flusher_partition_writer_buffer_tasks_num as _,
+        )?;
+        must_gt_zero(
+            "flusher_partition_writer_ptr_tasks_num",
+            self.flusher_partition_writer_ptr_tasks_num as _,
+        )?;
+        must_gt_zero(
+            "flusher_partition_meta_tasks_num",
+            self.flusher_partition_meta_tasks_num as _,
+        )?;
+        must_gt_zero(
+            "partition_cleanup_interval",
+            self.partition_cleanup_interval,
+        )?;
+        must_gt_zero(
+            "partition_inactive_threshold",
+            self.partition_inactive_threshold,
+        )?;
+        must_gt_zero(
+            "partition_index_num_per_topic",
+            self.partition_index_num_per_topic as _,
+        )?;
         must_gt_zero("max_msg_num_per_file", self.max_msg_num_per_file)?;
         must_gt_zero("max_size_per_file", self.max_size_per_file)?;
         must_gt_zero(
@@ -123,6 +161,27 @@ impl Config {
             self.create_next_record_file_threshold as _,
         )?;
         must_gt_zero("pop_size_from_buffer", self.batch_pop_size_from_buffer as _)?;
+
+        must_gt_const(
+            "message_size_limit_per_partition",
+            self.message_size_limit_per_partition as _,
+            2,
+        )?;
+        must_gt_const(
+            "message_count_limit_per_partition",
+            self.message_count_limit_per_partition as _,
+            1024, // 1K
+        )?;
+        must_gt_const(
+            "message_size_limit_global",
+            self.message_size_limit_global as _,
+            100, // 100 条数据
+        )?;
+        must_gt_const(
+            "message_count_limit_global",
+            self.message_count_limit_global as _,
+            50 * 1024, // 50K
+        )?;
 
         Ok(())
     }
@@ -134,8 +193,65 @@ impl Config {
 
     pub fn fix(mut self) -> Self {
         // 获取系统 IOV_MAX 值，覆盖默认值
+        if self.storage_dir.as_os_str().is_empty() {
+            self.storage_dir = PathBuf::from("./messages");
+        }
+        if self.flusher_period == 0 {
+            self.flusher_period = 50;
+        }
+        if self.flusher_factor == 0 {
+            self.flusher_factor = 1024 * 1024 * 4;
+        }
+        if self.flusher_partition_writer_buffer_tasks_num == 0 {
+            self.flusher_partition_writer_buffer_tasks_num = 64;
+        }
+        if self.flusher_partition_writer_ptr_tasks_num == 0 {
+            self.flusher_partition_writer_ptr_tasks_num = 64;
+        }
+        if self.flusher_partition_meta_tasks_num == 0 {
+            self.flusher_partition_meta_tasks_num = 64;
+        }
+        if self.partition_cleanup_interval == 0 {
+            self.partition_cleanup_interval = 150;
+        }
+        if self.partition_inactive_threshold == 0 {
+            self.partition_inactive_threshold = 300;
+        }
+        if self.partition_index_num_per_topic == 0 {
+            self.partition_index_num_per_topic = 100;
+        }
+        if self.max_msg_num_per_file == 0 {
+            self.max_msg_num_per_file = 1024 * 1024 * 1024 * 10;
+        }
+        if self.max_size_per_file == 0 {
+            self.max_size_per_file = 1024 * 1024 * 1024;
+        }
+        if self.compress_type == 0 {
+            self.compress_type = 0;
+        }
+        if self.batch_pop_size_from_buffer == 0 {
+            self.batch_pop_size_from_buffer = 128;
+        }
         if self.iov_max == 0 {
             self.iov_max = get_system_iov_max();
+        }
+        if self.writer_worker_tasks_num == 0 {
+            self.writer_worker_tasks_num = 100;
+        }
+        if self.create_next_record_file_threshold == 0 {
+            self.create_next_record_file_threshold = 90;
+        }
+        if self.message_size_limit_per_partition == 0 {
+            self.message_size_limit_per_partition = 100;
+        }
+        if self.message_count_limit_per_partition == 0 {
+            self.message_count_limit_per_partition = 10 * 1024 * 1024;
+        }
+        if self.message_size_limit_global == 0 {
+            self.message_size_limit_global = 10000;
+        }
+        if self.message_count_limit_global == 0 {
+            self.message_count_limit_global = 5 * 1024 * 1024 * 1024;
         }
         self
     }
@@ -165,16 +281,21 @@ impl Default for Config {
             enable_index: true, // 默认启用索引，性能测试时可设为 false
             disk_write_mode: DiskReadWriteMode::WriteVectored, // 默认使用零拷贝 write_vectored
 
-            // RocksDB 配置默认值（针对高性能写入优化）
-            rocksdb_max_open_files: 10000,
-            rocksdb_write_buffer_size: 128 * 1024 * 1024, // 128MB
-            rocksdb_max_write_buffer_number: 8,
-            rocksdb_target_file_size_base: 128 * 1024 * 1024, // 128MB
-            rocksdb_max_background_jobs: 8,
-            rocksdb_level_zero_file_num_compaction_trigger: 8,
-            rocksdb_level_zero_slowdown_writes_trigger: 20,
-            rocksdb_level_zero_stop_writes_trigger: 36,
-            rocksdb_disable_wal: false, // 默认不禁用 WAL，可根据需求设为 true
+            message_size_limit_per_partition: 100,
+            message_count_limit_per_partition: 10 * 1024 * 1024, // 10M
+            message_size_limit_global: 10000,
+            message_count_limit_global: 5 * 1024 * 1024 * 1024, // 5G
+
+                                                                // RocksDB 配置默认值（针对高性能写入优化）
+                                                                // rocksdb_max_open_files: 10000,
+                                                                // rocksdb_write_buffer_size: 128 * 1024 * 1024, // 128MB
+                                                                // rocksdb_max_write_buffer_number: 8,
+                                                                // rocksdb_target_file_size_base: 128 * 1024 * 1024, // 128MB
+                                                                // rocksdb_max_background_jobs: 8,
+                                                                // rocksdb_level_zero_file_num_compaction_trigger: 8,
+                                                                // rocksdb_level_zero_slowdown_writes_trigger: 20,
+                                                                // rocksdb_level_zero_stop_writes_trigger: 36,
+                                                                // rocksdb_disable_wal: false,
         }
     }
 }

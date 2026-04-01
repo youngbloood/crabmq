@@ -243,7 +243,8 @@ pub struct DiskStorageWriter {
 }
 
 impl DiskStorageWriter {
-    fn new(cfg: DiskConfig, stop: CancellationToken) -> Result<Self> {
+    fn new(mut cfg: DiskConfig, stop: CancellationToken) -> StorageResult<Self> {
+        cfg = cfg.fix();
         cfg.validate()?;
         let cfg = Arc::new(cfg);
 
@@ -390,16 +391,6 @@ impl DiskStorageWriter {
         payloads: Vec<MessagePayload>,
         notify: Option<oneshot::Sender<StorageResult<()>>>,
     ) -> StorageResult<()> {
-        // pre check
-        // for msg in &mut payloads {
-        //     if msg.timestamp == 0 {
-        //         msg.timestamp = SystemTime::now()
-        //             .duration_since(UNIX_EPOCH)
-        //             .unwrap()
-        //             .as_secs();
-        //     }
-        // }
-
         if let Some(pwb) = self.get_cached_partition(topic, partition_id) {
             let result = pwb.write_batch(payloads, true).await;
             self.topic_partition_manager
@@ -431,10 +422,6 @@ impl Drop for DiskStorageWriterWrapper {
         // 此时才应该触发 stop.cancel()
         if Arc::strong_count(&self.inner) == 1 {
             self.stop.cancel();
-            // 清理 RocksDB 实例
-            let storage_dir = self.inner.conf.storage_dir.clone();
-            crate::disk::partition_index::get_global_rocksdb_instance_manager()
-                .cleanup_storage_root(&storage_dir);
         }
     }
 }
@@ -448,8 +435,9 @@ impl Deref for DiskStorageWriterWrapper {
 }
 
 impl DiskStorageWriterWrapper {
-    pub fn new(cfg: DiskConfig) -> Result<Self> {
-        // 不再需要初始化全局 PartitionIndexManager，因为现在使用读写分离的架构
+    pub fn new(mut cfg: DiskConfig) -> StorageResult<Self> {
+        cfg = cfg.fix();
+        cfg.validate()?;
 
         let stop = CancellationToken::new();
         let dsw = DiskStorageWriter::new(cfg, stop.clone())?;
@@ -493,50 +481,17 @@ fn partition_to_worker(topic: &str, partition_id: u32, worker_num: u32) -> Resul
 
 #[cfg(test)]
 mod test {
-    use super::{DiskConfig, DiskStorageWriter};
+    use super::DiskConfig;
     use crate::{MessagePayload, StorageWriter as _, disk::DiskStorageWriterWrapper};
     use anyhow::Result;
     use bytes::Bytes;
     use futures::future::join_all;
-    use std::{collections::HashMap, default, path::PathBuf, sync::Arc, time::Duration};
+    use std::time::Duration;
     use tokio::time;
 
     fn new_disk_storage() -> DiskStorageWriterWrapper {
         let cfg = DiskConfig::default();
-        DiskStorageWriterWrapper::new(DiskConfig {
-            storage_dir: PathBuf::from("./data"),
-            flusher_period: 50,
-            flusher_factor: 1024 * 1024 * 1, // 1M
-            max_msg_num_per_file: 4000,
-            max_size_per_file: 500,
-            compress_type: 0,
-            create_next_record_file_threshold: 80,
-            flusher_partition_writer_buffer_tasks_num: 10,
-            flusher_partition_writer_ptr_tasks_num: 10,
-            flusher_partition_meta_tasks_num: 10,
-            batch_pop_size_from_buffer: 36,
-            partition_index_num_per_topic: 1000,
-            with_metrics: false,
-            partition_writer_prealloc: false,
-            writer_worker_tasks_num: 100,
-            partition_cleanup_interval: 150,
-            partition_inactive_threshold: 300,
-            iov_max: 2048,
-            enable_index: true,
-            rocksdb_max_open_files: cfg.rocksdb_max_open_files,
-            rocksdb_write_buffer_size: cfg.rocksdb_write_buffer_size,
-            rocksdb_max_write_buffer_number: cfg.rocksdb_max_write_buffer_number,
-            rocksdb_target_file_size_base: cfg.rocksdb_target_file_size_base,
-            rocksdb_max_background_jobs: cfg.rocksdb_max_background_jobs,
-            rocksdb_level_zero_file_num_compaction_trigger: cfg
-                .rocksdb_level_zero_file_num_compaction_trigger,
-            rocksdb_level_zero_slowdown_writes_trigger: cfg
-                .rocksdb_level_zero_slowdown_writes_trigger,
-            rocksdb_level_zero_stop_writes_trigger: cfg.rocksdb_level_zero_stop_writes_trigger,
-            rocksdb_disable_wal: cfg.rocksdb_disable_wal,
-            disk_write_mode: cfg.disk_write_mode,
-        })
-        .expect("error config")
+        DiskStorageWriterWrapper::new(cfg).expect("error config")
     }
 
     #[tokio::test]

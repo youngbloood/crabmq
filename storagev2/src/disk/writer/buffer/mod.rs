@@ -51,13 +51,15 @@ impl PartitionBufferSet {
             tp.1,
             conf.clone(),
             conf.storage_dir.clone(), // 直接传递存储目录
-        );
+        )
+        .await?;
 
         // 创建序列化器（默认使用S-G IO，可以修改为RkyvSerializer进行对比）
         let serializer: Arc<dyn MessageSerializer> = Arc::new(SgIoSerializer);
 
         let partition_writer_buffer =
-            PartitionWriterBuffer::new(dir.clone(), conf.clone(), write_ptr, flusher, serializer).await?;
+            PartitionWriterBuffer::new(dir.clone(), conf.clone(), write_ptr, flusher, serializer)
+                .await?;
 
         Ok(Self {
             dir,
@@ -130,13 +132,6 @@ impl PartitionBufferSet {
             self.index.push_batch(message_metas)?;
         }
         Ok(())
-    }
-
-    /// 获取读写分离的索引管理器（用于外部访问）
-    pub fn get_read_write_index_manager(
-        &self,
-    ) -> Arc<crate::disk::partition_index::ReadWritePartitionIndexManager> {
-        self.index.get_read_write_index_manager()
     }
 }
 

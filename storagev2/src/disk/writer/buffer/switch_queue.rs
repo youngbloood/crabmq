@@ -20,10 +20,11 @@ impl<T> SwitchQueue<T> {
     const RELAXED_ORDER: Ordering = Ordering::Relaxed;
 
     pub fn new(buf_length: usize) -> Self {
+        let half = buf_length / 2;
         Self {
             switcher: Arc::new(AtomicBool::new(false)),
-            queue_a: Arc::new(ArrayQueue::new(buf_length)),
-            queue_b: Arc::new(ArrayQueue::new(buf_length)),
+            queue_a: Arc::new(ArrayQueue::new(half)),
+            queue_b: Arc::new(ArrayQueue::new(buf_length - half)),
         }
     }
 

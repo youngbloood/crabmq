@@ -1,6 +1,7 @@
 use super::COMMIT_PTR_FILENAME;
 use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
 use crate::MessagePayload;
+use crate::disk::index::IndexManager;
 use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
 use crate::err::ErrorCode;
 use crate::serializer::{MessageSerializer, SgIoSerializer};
@@ -9,7 +10,7 @@ use crate::{StorageReader, StorageReaderSession};
 use anyhow::Result;
 use bytes::Bytes;
 use common::check_exist;
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry};
 use log::{error, warn};
 use std::num::NonZero;
 use std::path::Path;
@@ -49,17 +50,22 @@ impl StorageReader for DiskStorageReader {
         group_id: u32,
         read_position: Vec<(String, ReadPosition)>,
     ) -> StorageResult<Box<dyn StorageReaderSession>> {
-        let sess = self
-            .sessions
-            .entry(group_id)
-            .or_insert(DiskStorageReaderSession::new(
-                self.dir.clone(),
-                group_id,
-                self.partition_index_num_per_topic,
-                read_position,
-                self.conf.clone(),
-            ));
-        Ok(Box::new(sess.value().clone()))
+        if let Some(session) = self.sessions.get(&group_id) {
+            return Ok(Box::new(session.value().clone()));
+        }
+
+        let session = DiskStorageReaderSession::new(
+            self.dir.clone(),
+            group_id,
+            self.partition_index_num_per_topic,
+            read_position,
+            self.conf.clone(),
+        )
+        .await
+        .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
+
+        self.sessions.entry(group_id).or_insert(session.clone());
+        Ok(Box::new(session))
     }
 
     /// Close a session by group_id.
@@ -68,10 +74,11 @@ impl StorageReader for DiskStorageReader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiskStorageReaderSession {
     // 消息文件存储路径（storage_dir）
     dir: PathBuf,
+    // 消费者组
     group_id: u32,
 
     partition_index_num_per_topic: u32,
@@ -80,39 +87,33 @@ pub struct DiskStorageReaderSession {
     readers: Arc<DashMap<(String, u32), DiskStorageReaderSessionPartition>>,
 
     // 使用读写分离的索引管理器，专门用于读取操作
-    read_write_index_manager: Arc<crate::disk::partition_index::ReadWritePartitionIndexManager>,
+    index_manager: Arc<IndexManager>,
 }
 
 impl DiskStorageReaderSession {
-    pub fn new(
+    pub async fn new(
         dir: PathBuf,
         group_id: u32,
         partition_index_num_per_topic: u32,
         read_positions: Vec<(String, ReadPosition)>,
         conf: Arc<crate::disk::Config>,
-    ) -> Self {
+    ) -> Result<Self> {
         let m = DashMap::new();
         read_positions.iter().for_each(|(k, v)| {
             m.insert(k.clone(), v.clone());
         });
 
         // 创建读写分离的索引管理器，专门用于读取操作
-        let read_write_index_manager = Arc::new(
-            crate::disk::partition_index::ReadWritePartitionIndexManager::new(
-                dir.clone(),
-                partition_index_num_per_topic as _,
-                conf,
-            ),
-        );
+        let index_manager = Arc::new(IndexManager::new(dir.clone(), conf.disk_write_mode).await?);
 
-        Self {
+        Ok(Self {
             dir: dir.clone(),
             group_id,
             partition_index_num_per_topic,
             read_positions: Arc::new(m),
             readers: Arc::default(),
-            read_write_index_manager,
-        }
+            index_manager,
+        })
     }
 
     fn get_read_position(&self, topic: &str) -> ReadPosition {
@@ -120,13 +121,6 @@ impl DiskStorageReaderSession {
             return v.value().clone();
         }
         ReadPosition::Begin
-    }
-
-    /// 获取读写分离的索引管理器（用于外部访问）
-    pub fn get_read_write_index_manager(
-        &self,
-    ) -> Arc<crate::disk::partition_index::ReadWritePartitionIndexManager> {
-        self.read_write_index_manager.clone()
     }
 }
 
@@ -186,12 +180,7 @@ impl StorageReaderSession for DiskStorageReaderSession {
     }
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(
-        &self,
-        topic: &str,
-        partition_id: u32,
-        offset: SegmentOffset,
-    ) -> StorageResult<()> {
+    async fn commit(&self, topic: &str, partition_id: u32, logic_seq: u64) -> StorageResult<()> {
         // 获取对应的 partition reader
         let reader = self
             .readers
@@ -203,20 +192,7 @@ impl StorageReaderSession for DiskStorageReaderSession {
                 )
             })?;
 
-        // 使用读写分离的索引管理器验证 offset 的有效性
-        let _ = self
-            .read_write_index_manager
-            .get_msg_id_by_segment_offset(topic, partition_id, &offset)
-            .await
-            .map_err(|e| {
-                StorageError::with_message(
-                    ErrorCode::OffsetMismatch,
-                    format!("Invalid offset {:?}: {:?}", offset, e),
-                )
-            })?;
-
-        // 验证并更新 commit_ptr
-        reader.commit_offset(offset).await?;
+        reader.commit(logic_seq).await?;
 
         Ok(())
     }
@@ -431,7 +407,7 @@ impl DiskStorageReaderSessionPartition {
         }
     }
 
-    async fn commit_offset(&self, offset: SegmentOffset) -> StorageResult<()> {
+    async fn commit(&self, logic_seq: u64) -> StorageResult<()> {
         // 获取当前 commit_ptr 位置
         let current_commit = {
             let commit_rl = self.commit_ptr.read().await;

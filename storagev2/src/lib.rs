@@ -168,7 +168,17 @@ pub trait StorageReader: Send + Sync + Clone + 'static {
 
 #[async_trait]
 pub trait StorageReaderSession: Send + Sync + 'static {
-    /// Get the next n message
+    /**
+     * Get the next n message in the topic-partition
+     *
+     * @param topic: the topic name
+     * @param partition: the partition id
+     * @param n: the number of messages to get
+     * @return: a vector of (MessagePayload, u64, SegmentOffset)
+     *          the first element is the message payload,
+     *          the second element is the message size,
+     *          the third element is the segment offset
+     */
     async fn next(
         &self,
         topic: &str,
@@ -176,9 +186,15 @@ pub trait StorageReaderSession: Send + Sync + 'static {
         n: NonZero<u64>,
     ) -> StorageResult<Vec<(MessagePayload, u64, SegmentOffset)>>;
 
-    /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
-    async fn commit(&self, topic: &str, partition: u32, offset: SegmentOffset)
-    -> StorageResult<()>;
+    /**
+     * Commit the message has been consumed, and the consume ptr should rorate the next ptr.
+     *
+     * @param topic: the topic name
+     * @param partition: the partition id
+     * @param logic_seq: the logic sequence of the message
+     * @return: a result of the operation
+     */
+    async fn commit(&self, topic: &str, partition: u32, logic_seq: u64) -> StorageResult<()>;
 }
 
 #[derive(Default, Debug, Clone, PartialEq, PartialOrd)]

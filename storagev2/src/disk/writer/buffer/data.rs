@@ -241,7 +241,7 @@ impl PartitionWriterBuffer {
             #[cfg(not(target_os = "linux"))]
             current_fd: Arc::new(ArcSwap::from_pointee(current_fd)),
             conf: conf.clone(),
-            queue: Arc::new(SwitchQueue::new()),
+            queue: Arc::new(SwitchQueue::new(conf.message_size_limit_per_partition)),
             write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
