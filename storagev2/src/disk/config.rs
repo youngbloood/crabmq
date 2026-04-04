@@ -39,8 +39,6 @@ pub struct Config {
     // 刷盘相关配置
     // 刷盘周期，单位 ms
     pub flusher_period: u64,
-    // 刷盘因子，内存中的消息量超过该值时刷盘，默认： 4 * 1024 * 1024（4m）
-    pub flusher_factor: u64,
     // 刷盘配置：刷分区的任务数量
     pub flusher_partition_writer_buffer_tasks_num: usize,
     // 刷盘配置：刷分区写指针的任务数量
@@ -61,9 +59,6 @@ pub struct Config {
     // Linux/macOS 通常是 1024，POSIX 最小要求是 16
     // 可以通过 getconf IOV_MAX 查询系统值
     pub iov_max: usize,
-
-    // 每个 topic 下默认多少个索引分区（不同partition根据规则路由至index下进行存储，防止Too many open files）
-    pub partition_index_num_per_topic: u32,
 
     // 写时的 worker 任务数量
     pub writer_worker_tasks_num: usize,
@@ -129,7 +124,6 @@ impl Config {
             Ok(())
         };
         must_gt_zero("flusher_period", self.flusher_period)?;
-        must_gt_zero("flusher_factor", self.flusher_factor)?;
         must_gt_zero(
             "flusher_partition_writer_buffer_tasks_num",
             self.flusher_partition_writer_buffer_tasks_num as _,
@@ -149,10 +143,6 @@ impl Config {
         must_gt_zero(
             "partition_inactive_threshold",
             self.partition_inactive_threshold,
-        )?;
-        must_gt_zero(
-            "partition_index_num_per_topic",
-            self.partition_index_num_per_topic as _,
         )?;
         must_gt_zero("max_msg_num_per_file", self.max_msg_num_per_file)?;
         must_gt_zero("max_size_per_file", self.max_size_per_file)?;
@@ -199,9 +189,6 @@ impl Config {
         if self.flusher_period == 0 {
             self.flusher_period = 50;
         }
-        if self.flusher_factor == 0 {
-            self.flusher_factor = 1024 * 1024 * 4;
-        }
         if self.flusher_partition_writer_buffer_tasks_num == 0 {
             self.flusher_partition_writer_buffer_tasks_num = 64;
         }
@@ -216,9 +203,6 @@ impl Config {
         }
         if self.partition_inactive_threshold == 0 {
             self.partition_inactive_threshold = 300;
-        }
-        if self.partition_index_num_per_topic == 0 {
-            self.partition_index_num_per_topic = 100;
         }
         if self.max_msg_num_per_file == 0 {
             self.max_msg_num_per_file = 1024 * 1024 * 1024 * 10;
@@ -261,8 +245,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             storage_dir: PathBuf::from("./messages"),
-            flusher_period: 50,              // 50ms
-            flusher_factor: 1024 * 1024 * 4, // 4M
+            flusher_period: 50, // 50ms
             flusher_partition_writer_buffer_tasks_num: 64,
             flusher_partition_writer_ptr_tasks_num: 64,
             flusher_partition_meta_tasks_num: 64,
@@ -271,7 +254,6 @@ impl Default for Config {
             partition_inactive_threshold: 300,
             batch_pop_size_from_buffer: 128, // 优化：128 条消息 × 7 IoSlice = 896 < 1024（单次 write_vectored）
             iov_max: get_system_iov_max(),   // Linux/macOS 系统默认值，可通过 getconf IOV_MAX 查询
-            partition_index_num_per_topic: 100,
             max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
             max_size_per_file: 1024 * 1024 * 1024, // 1G
             compress_type: 0,

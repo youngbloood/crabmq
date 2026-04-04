@@ -57,6 +57,7 @@ pub enum ErrorCode {
     TimestampInvalid = 1007,
     PayloadTooShort = 1008,
     PayloadTooLong = 1009,
+    CheckSumMismatch = 1010,
 
     TopicNotFound = 1101,
     PartitionNotFound = 1102,

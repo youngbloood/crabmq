@@ -4,7 +4,7 @@ use crate::{
         DiskReadWriteMode,
         fd::create_reader,
         fd_cache::{FileHandlerWriterAsync, create_writer_fd},
-        meta::gen_index_filename,
+        gen_index_filename,
     },
 };
 use anyhow::Result;

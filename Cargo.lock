@@ -2502,6 +2502,7 @@ dependencies = [
  "bincode",
  "bytes",
  "common",
+ "crc32fast",
  "crossbeam",
  "dashmap",
  "futures",

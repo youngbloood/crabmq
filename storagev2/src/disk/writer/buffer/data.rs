@@ -3,11 +3,11 @@
  */
 
 use crate::{
-    MessageMeta, MessagePayload, SegmentOffset,
+    MessagePayload, SegmentOffset,
     disk::{
         Config as DiskConfig,
         fd_cache::{FileHandlerWriterAsync, create_writer_fd, create_writer_fd_with_prealloc},
-        meta::{WriterPositionPtr, gen_record_filename},
+        gen_record_filename,
         writer::{
             buffer::{BufferFlushable, parse_topic_partition_from_dir, switch_queue::SwitchQueue},
             flusher::Flusher,
@@ -30,6 +30,11 @@ use std::{
 };
 // use tokio_uring::fs::File as UringFile;
 
+/**
+ * # PartitionWriterBuffer
+ *
+ * 写入消息的缓冲区，用于将消息存入内存缓冲区，在 flush 时才序列化，保持零拷贝
+ */
 #[derive(Clone)]
 pub(crate) struct PartitionWriterBuffer {
     pub(crate) dir: PathBuf,
@@ -48,9 +53,6 @@ pub(crate) struct PartitionWriterBuffer {
 
     // 先将消息存入内存缓冲区 - 在 flush 时才序列化，保持零拷贝
     pub(crate) queue: Arc<SwitchQueue<MessagePayload>>,
-
-    // 写相关的位置指针
-    pub(crate) write_ptr: Arc<WriterPositionPtr>,
 
     // 是否已经预创建了下一个 record 文件
     has_create_next_record_file: Arc<AtomicBool>,
@@ -160,10 +162,7 @@ impl BufferFlushable for PartitionWriterBuffer {
             ));
         }
 
-        // 6. 更新刷盘位置
-        self.write_ptr.rotate_flush_offset(flushed_bytes);
-
-        // 7. 批量同步
+        // 6. 批量同步
         if fsync {
             let fd = self.current_fd.load_full();
             tokio::spawn(async move {
@@ -183,7 +182,6 @@ impl PartitionWriterBuffer {
     pub(crate) async fn new(
         dir: PathBuf,
         conf: Arc<DiskConfig>,
-        write_ptr: Arc<WriterPositionPtr>,
         flusher: Arc<Flusher>,
         serializer: Arc<dyn MessageSerializer>,
     ) -> Result<Self> {
@@ -211,13 +209,6 @@ impl PartitionWriterBuffer {
         };
 
         let max_record_filename = dir.join(gen_record_filename(max_file));
-        // 判断 WriterPositionPtr.filename 与最大 record文件 不一致的情况
-        // 此时表示文件可能为外界条件破坏。以下一个 record 文件重新开始
-        if write_ptr.get_filename().ne(&max_record_filename) {
-            max_file += 1;
-            write_ptr.reset_with_filename(dir.join(gen_record_filename(max_file)));
-            factor.fetch_add(1, Ordering::Relaxed);
-        }
 
         let _max_size_per_file = if conf.partition_writer_prealloc {
             conf.max_size_per_file
@@ -225,13 +216,7 @@ impl PartitionWriterBuffer {
             0
         };
 
-        let current_fd = Self::get_current_fd(
-            &dir,
-            max_file,
-            write_ptr.get_flush_offset(),
-            conf.disk_write_mode,
-        )
-        .await?;
+        let current_fd = Self::get_current_fd(&dir, max_file, conf.disk_write_mode).await?;
 
         Ok(Self {
             dir: dir.clone(),
@@ -242,7 +227,6 @@ impl PartitionWriterBuffer {
             current_fd: Arc::new(ArcSwap::from_pointee(current_fd)),
             conf: conf.clone(),
             queue: Arc::new(SwitchQueue::new(conf.message_size_limit_per_partition)),
-            write_ptr,
             has_create_next_record_file: Arc::default(),
             flusher,
             serializer,
@@ -253,7 +237,6 @@ impl PartitionWriterBuffer {
     async fn get_current_fd(
         dir: &PathBuf,
         max_file: u64,
-        offset: u64,
         mode: crate::disk::DiskReadWriteMode,
     ) -> Result<FileHandlerWriterAsync> {
         let current_fd = create_writer_fd(&dir.join(gen_record_filename(max_file)), mode).await?;
@@ -294,7 +277,6 @@ impl PartitionWriterBuffer {
             Ok(new_writer) => {
                 // 使用 ArcSwap::store 原子替换底层 Writer
                 self.current_fd.store(Arc::new(new_writer));
-                self.write_ptr.reset_with_filename(next_filename);
             }
             Err(e) => {
                 error!("create_writer_fd err: {e:?}");
@@ -323,9 +305,9 @@ impl PartitionWriterBuffer {
         let batch_len = batch.len();
         self.update_partition_state(batch_len);
 
-        let mut now_ptr_offset = self.write_ptr.get_offset();
+        // TODO: 从最新的data文件 获取 meta信息，一下就能获取到当前文件的大小了
+        let mut now_ptr_offset = 0;
         let mut now_batch_total_size = 0;
-        let mut now_count = self.write_ptr.get_current_count();
         let mut segment_offsets = Vec::with_capacity(batch_len);
         let mut did_rotate = false;
 
@@ -345,10 +327,7 @@ impl PartitionWriterBuffer {
 
             let msg_total_len = estimated_size as u64;
 
-            let should_rotate = {
-                now_ptr_offset + msg_total_len > self.conf.max_size_per_file
-                    || now_count + 1 >= self.conf.max_msg_num_per_file
-            };
+            let should_rotate = { now_ptr_offset + msg_total_len > self.conf.max_size_per_file };
 
             if should_rotate {
                 did_rotate = true;
@@ -364,8 +343,7 @@ impl PartitionWriterBuffer {
 
                 self.rotate_file().await;
                 // 重置位置信息
-                now_ptr_offset = self.write_ptr.get_offset();
-                now_count = self.write_ptr.get_current_count();
+                now_ptr_offset = 0;
             }
 
             // 生成消息元数据（包含文件段、偏移量等信息）
@@ -379,27 +357,6 @@ impl PartitionWriterBuffer {
 
             now_batch_total_size += msg_total_len;
             now_ptr_offset += msg_total_len;
-            now_count += 1;
-        }
-
-        {
-            // 更新指针（减少锁次数）
-            self.write_ptr.rotate_offset(now_batch_total_size);
-            self.write_ptr.rotate_current_count(batch_len as u64);
-        }
-
-        // 检查是否需要立即刷盘
-        if self.conf.flusher_factor != 0 && now_batch_total_size > self.conf.flusher_factor {
-            if self.conf.with_metrics {
-                self.flusher.metrics.update_data_min_start_timestamp();
-            }
-            let flush_bytes = self.flush(true, false).await?;
-            if self.conf.with_metrics {
-                self.flusher.metrics.inc_data_flush_count(1, 0);
-                self.flusher.metrics.inc_flush_bytes(flush_bytes, 0);
-                self.flusher.metrics.update_data_max_end_timestamp();
-            }
-            self.flusher.flush_metas(false, &self.dir).await?;
         }
 
         Ok((now_batch_total_size, segment_offsets, did_rotate))

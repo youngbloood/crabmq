@@ -15,7 +15,7 @@ use crate::serializer::SerializedMessage;
 ///
 /// metadata格式：
 /// [4:entry_count] + N * ([4:key_len] + [key] + [4:val_len] + [val])
-use crate::{MessagePayload, StorageError, StorageResult};
+use crate::{Attributes, MessagePayload, StorageError, StorageResult};
 use std::io::IoSlice;
 
 /// S-G IO 序列化实现
@@ -76,6 +76,10 @@ pub fn serialize_sg_io<'a>(
 pub fn deserialize_sg_io(mut data: Bytes) -> StorageResult<MessagePayload> {
     use bytes::Buf;
 
+    let version = data.get_u8();
+    let check_sum = data.get_u32_le();
+    let attributes = Attributes::from(data.get_u16_le().to_le_bytes());
+
     // 解析 msg_id
     let msg_id_len = data.get_u8() as usize;
     let msg_id = data.split_to(msg_id_len);
@@ -96,6 +100,9 @@ pub fn deserialize_sg_io(mut data: Bytes) -> StorageResult<MessagePayload> {
     }
 
     Ok(MessagePayload {
+        version,
+        check_sum,
+        attributes,
         msg_id,
         timestamp,
         metadata,
@@ -106,7 +113,6 @@ pub fn deserialize_sg_io(mut data: Bytes) -> StorageResult<MessagePayload> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_sg_io_roundtrip() -> StorageResult<()> {
@@ -114,7 +120,7 @@ mod tests {
         metadata.push((Bytes::from("key1"), Bytes::from("value1")));
         metadata.push((Bytes::from("key2"), Bytes::from("value2")));
 
-        let msg = MessagePayload::new(
+        let msg = MessagePayload::new_v1(
             Bytes::from("test_msg_123"),
             1234567890,
             metadata,
@@ -146,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_empty_metadata() -> StorageResult<()> {
-        let msg = MessagePayload::new(
+        let msg = MessagePayload::new_v1(
             Bytes::from("test"),
             12345,
             Vec::new(),
@@ -170,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_msg_id_too_long() {
-        let msg = MessagePayload::new(
+        let msg = MessagePayload::new_v1(
             Bytes::from("a".repeat(256)),
             12345,
             Vec::new(),

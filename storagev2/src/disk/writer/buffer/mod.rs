@@ -6,7 +6,6 @@ use crate::{
     MessagePayload,
     disk::{
         Config as DiskConfig,
-        meta::WriterPositionPtr,
         writer::{
             buffer::{data::PartitionWriterBuffer, index::PartitionIndexWriterBuffer},
             flusher::Flusher,
@@ -33,12 +32,7 @@ pub struct PartitionBufferSet {
 }
 
 impl PartitionBufferSet {
-    pub async fn new(
-        dir: PathBuf,
-        conf: Arc<DiskConfig>,
-        write_ptr: Arc<WriterPositionPtr>,
-        flusher: Arc<Flusher>,
-    ) -> Result<Self> {
+    pub async fn new(dir: PathBuf, conf: Arc<DiskConfig>, flusher: Arc<Flusher>) -> Result<Self> {
         let tp = parse_topic_partition_from_dir(&dir);
         if tp.is_none() {
             return Err(anyhow!("not found topic and partition_id in dir"));
@@ -58,8 +52,7 @@ impl PartitionBufferSet {
         let serializer: Arc<dyn MessageSerializer> = Arc::new(SgIoSerializer);
 
         let partition_writer_buffer =
-            PartitionWriterBuffer::new(dir.clone(), conf.clone(), write_ptr, flusher, serializer)
-                .await?;
+            PartitionWriterBuffer::new(dir.clone(), conf.clone(), flusher, serializer).await?;
 
         Ok(Self {
             dir,

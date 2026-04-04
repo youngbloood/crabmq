@@ -3,8 +3,7 @@ mod buffer;
 mod flusher;
 
 use super::Config as DiskConfig;
-use super::meta::{WRITER_PTR_FILENAME, gen_record_filename};
-use crate::disk::meta::WriterPositionPtr;
+use crate::disk::gen_record_filename;
 use crate::disk::writer::buffer::PartitionBufferSet;
 use crate::err::ErrorCode;
 use crate::metrics::StorageWriterMetrics;
@@ -17,7 +16,7 @@ use murmur3::murmur3_32;
 use std::io::Cursor;
 use std::ops::Deref;
 use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::{select, time};
@@ -189,27 +188,9 @@ impl TopicPartitionManager {
         let dir = self.storage_dir.join(topic).join(partition_id.to_string());
         tokio::fs::create_dir_all(&dir).await?;
 
-        // 加载写指针文件
-        let writer_ptr_filename = dir.join(WRITER_PTR_FILENAME);
-        let wpp = if writer_ptr_filename.exists() {
-            WriterPositionPtr::load(&writer_ptr_filename).await?
-        } else {
-            WriterPositionPtr::new(
-                writer_ptr_filename.clone(),
-                dir.join(gen_record_filename(0)),
-            )
-            .await?
-        };
-
         // 加载
-        let wpp = Arc::new(wpp);
-        let pwb = PartitionBufferSet::new(
-            dir.clone(),
-            self.conf.clone(),
-            wpp.clone(),
-            self.flusher.clone(),
-        )
-        .await?;
+        let pwb =
+            PartitionBufferSet::new(dir.clone(), self.conf.clone(), self.flusher.clone()).await?;
 
         // 获取或创建partition级别的锁
         let topic_partition_lock = self
@@ -222,8 +203,6 @@ impl TopicPartitionManager {
             return Ok(pwb.value().clone());
         }
         self.flusher.add_partition_writer(dir.clone(), pwb.clone());
-        self.flusher
-            .add_partition_writer_ptr(dir.clone(), wpp.clone());
         self.partitions.insert(key, pwb.clone());
         Ok(pwb)
     }
@@ -252,7 +231,6 @@ impl DiskStorageWriter {
         let flusher = Arc::new(Flusher::new(
             stop.clone(),
             cfg.flusher_partition_writer_buffer_tasks_num,
-            cfg.flusher_partition_writer_ptr_tasks_num,
             cfg.flusher_partition_meta_tasks_num,
             Duration::from_millis(cfg.flusher_period),
             cfg.with_metrics,
@@ -329,7 +307,7 @@ impl DiskStorageWriter {
             .join(partition_id.to_string());
 
         self.flusher.flush_topic_partition(p, true).await?;
-        self.flusher.flush_topic_partition_writer_ptr(p, true).await
+        Ok(())
     }
 
     #[inline]
@@ -534,7 +512,7 @@ mod test {
                 for _ in 0..100000 {
                     let idx = rand::random::<u32>() as usize;
                     let s = _datas[idx % _datas.len()];
-                    let msg = MessagePayload::new(
+                    let msg = MessagePayload::new_v1(
                         Bytes::from(format!("id_{}_{}", idx, s)),
                         0,
                         Vec::new(),

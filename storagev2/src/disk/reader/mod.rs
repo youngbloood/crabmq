@@ -1,8 +1,8 @@
 use super::COMMIT_PTR_FILENAME;
-use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync, meta::ReaderPositionPtr};
+use super::{READER_PTR_FILENAME, fd_cache::FdReaderCacheAync};
 use crate::MessagePayload;
 use crate::disk::index::IndexManager;
-use crate::disk::meta::{WRITER_PTR_FILENAME, WriterPositionPtrSnapshot, gen_record_filename};
+use crate::disk::meta::ReaderPositionPtr;
 use crate::err::ErrorCode;
 use crate::serializer::{MessageSerializer, SgIoSerializer};
 use crate::{ReadPosition, SegmentOffset, StorageError, StorageResult};
@@ -10,7 +10,7 @@ use crate::{StorageReader, StorageReaderSession};
 use anyhow::Result;
 use bytes::Bytes;
 use common::check_exist;
-use dashmap::{DashMap, Entry};
+use dashmap::DashMap;
 use log::{error, warn};
 use std::num::NonZero;
 use std::path::Path;
@@ -204,8 +204,10 @@ struct DiskStorageReaderSessionPartition {
     dir: PathBuf,
     group_id: u32,
     fd_cache: FdReaderCacheAync,
+
     reader_ptr: Arc<RwLock<ReaderPositionPtr>>,
     reader_ptr_filename: PathBuf,
+
     commit_ptr: Arc<RwLock<ReaderPositionPtr>>,
     commit_ptr_filename: PathBuf,
 }
@@ -250,9 +252,9 @@ impl DiskStorageReaderSessionPartition {
                         })?;
                     let mut wl = self.reader_ptr.write().await;
                     // 从 segment_id 重建 filename
-                    wl.filename =
-                        parent.join(crate::disk::meta::gen_record_filename(sp.segment_id));
-                    wl.offset = sp.offset;
+                    // wl.filename =
+                    //     parent.join(crate::disk::meta::gen_record_filename(sp.segment_id));
+                    // wl.offset = sp.offset;
                 }
             }
         }

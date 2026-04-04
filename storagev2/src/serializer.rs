@@ -113,14 +113,13 @@ pub mod sg_io;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_serializer_roundtrip() -> StorageResult<()> {
         let mut metadata = Vec::new();
         metadata.push((Bytes::from("key1"), Bytes::from("value1")));
 
-        let msg = MessagePayload::new(
+        let msg = MessagePayload::new_v1(
             Bytes::from("test_msg_id"),
             1234567890,
             metadata,

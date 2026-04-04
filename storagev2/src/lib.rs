@@ -4,40 +4,131 @@ pub mod metrics;
 pub mod serializer;
 use bytes::Bytes;
 pub use mem::*;
-
 pub mod err;
 
-use anyhow::Result;
+use crate::err::{ErrorCode, StorageError, StorageResult};
 use async_trait::async_trait;
-use rkyv::{Archive, Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::{collections::HashMap, num::NonZero};
+use std::num::NonZero;
 use tokio::sync::oneshot;
 
-use crate::err::{ErrorCode, StorageError, StorageResult};
+const VERSION_V1: u8 = 1;
 
-#[derive(Debug, Clone)]
-pub struct MessageMeta {
-    pub msg_id: Bytes,
-    pub timestamp: u64,
-    pub segment_id: u64,
-    pub offset: u64,
-    pub msg_len: u32,
+enum CompressionType {
+    None = 0,
+    Lz4 = 1,
+    Snappy = 2,
+    Gzip = 3,
+    Zstd = 4,
 }
 
-// 内部数据结构：只包含数据，可被 rkyv 序列化
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-pub(crate) struct MessagePayloadInner {
-    pub msg_id: String,
-    pub timestamp: u64,
-    pub metadata: HashMap<String, String>,
-    pub payload: Vec<u8>,
+impl From<u8> for CompressionType {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => CompressionType::None,
+            1 => CompressionType::Lz4,
+            2 => CompressionType::Snappy,
+            3 => CompressionType::Gzip,
+            4 => CompressionType::Zstd,
+            _ => CompressionType::None,
+        }
+    }
+}
+
+enum SerializationType {
+    SgIo = 0,
+    Rkyv = 1,
+    Json = 2,
+    Protobuf = 3,
+    Avro = 4,
+    Thrift = 5,
+    Msgpack = 6,
+    Capnproto = 7,
+}
+
+impl From<u8> for SerializationType {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => SerializationType::SgIo,
+            1 => SerializationType::Rkyv,
+            2 => SerializationType::Json,
+            3 => SerializationType::Protobuf,
+            4 => SerializationType::Avro,
+            5 => SerializationType::Thrift,
+            6 => SerializationType::Msgpack,
+            7 => SerializationType::Capnproto,
+            _ => SerializationType::SgIo,
+        }
+    }
 }
 
 /**
- * 消息负载结构
+ * # Attributes
+ * u8:
+ *  0-3 bits: compression type
+ *  4-7 bits: serialization type
+ *
+ * u8:
+ *  8 bits: reserved
+ */
+#[derive(Debug, Clone)]
+struct Attributes([u8; 2]);
+
+impl From<[u8; 2]> for Attributes {
+    fn from(value: [u8; 2]) -> Self {
+        Self(value)
+    }
+}
+
+impl Attributes {
+    pub fn new() -> Self {
+        Self([0; 2])
+    }
+
+    pub fn with_comporess(&mut self, compress: CompressionType) -> &mut Self {
+        let c = (compress as u8) << 4;
+        self.0[0] |= c;
+        self
+    }
+
+    pub fn with_serialization(&mut self, serialization: SerializationType) -> &mut Self {
+        let c = (serialization as u8) << 4 >> 4;
+        self.0[0] |= c;
+        self
+    }
+
+    pub fn get_compression(&self) -> CompressionType {
+        CompressionType::from(self.0[0] >> 4)
+    }
+
+    pub fn get_serialization(&self) -> SerializationType {
+        SerializationType::from(self.0[0] << 4 >> 4)
+    }
+}
+/**
+ * # MessagePayload
+ * **version**: 消息版本，用于标识消息的版本
+ * **check_sum**: 校验和，用于验证消息的完整性
+ * **attributes**: 消息属性，用于标识消息的属性
+ *   - compression: 压缩类型
+ *   - serialization: 序列化类型
+ * **msg_id**: 消息id，用于唯一标识消息
+ * **timestamp**: 消息时间戳，用于消息的排序
+ * **metadata**: 消息元数据，用于存储消息的元数据
+ * **metadata.key**: 消息元数据键，用于存储消息的元数据键
+ * **metadata.value**: 消息元数据值，用于存储消息的元数据值
+ * **payload**: 消息负载，用于存储消息的负载数据
+ *
+ *
+ * # 消息负载结构
  *
  * 磁盘格式：
+ * 1byte(u8): version
+ *
+ * 4bytes(u32): check_sum
+ *
+ * 2bytes(u16): attributes
+ *
  * 8bytes(u64): total_len: 该消息的总长
  *
  * msg_id:
@@ -56,67 +147,118 @@ pub(crate) struct MessagePayloadInner {
  */
 #[derive(Debug, Clone)]
 pub struct MessagePayload {
+    version: u8,
+
+    // CRC 校验码, 以下字段均参与校验
+    check_sum: u32,
+
+    attributes: Attributes,
+
     // 公开字段以支持直接访问和修改
-    pub msg_id: Bytes,
-    pub timestamp: u64,
+    msg_id: Bytes,
+    timestamp: u64,
     // Key: u8, 最长 255
     // Value: u16, 最长 255
-    pub(crate) metadata: SmallVec<[(Bytes, Bytes); 5]>,
-    pub payload: Bytes,
+    metadata: SmallVec<[(Bytes, Bytes); 5]>,
+    payload: Bytes,
 }
 
 impl MessagePayload {
-    pub fn new(
+    /**
+     * New a MessagePayload
+     *
+     * @param msg_id: the message id, msg_id length between 1 and 255
+     *
+     * @param timestamp: the message timestamp, timestamp must be greater than 0
+     *
+     * @param metadata: the message metadata, metadata length between 0 and 255
+     * @param metadata_key: the message metadata key, metadata key length between 1 and 255
+     * @param metadata_value: the message metadata value, metadata value length between 1 and u16::MAX
+     *
+     * @param payload: the message payload, payload length between 1 and u32::MAX
+     *
+     * @return: a MessagePayload
+     */
+    pub fn new_v1(
         msg_id: Bytes,
         timestamp: u64,
         metadata: Vec<(Bytes, Bytes)>,
         payload: Bytes,
     ) -> Self {
         let metadata = SmallVec::from_vec(metadata);
-        Self {
+        let mut mp = Self {
+            version: VERSION_V1,
+            check_sum: 0,
+            attributes: Attributes::new(),
             msg_id,
             timestamp,
             metadata,
             payload,
+        };
+        mp.check_sum = mp.calc_check_sum();
+        mp
+    }
+
+    pub fn with_comporess(&mut self, compress: CompressionType) -> &mut Self {
+        self.attributes.with_comporess(compress);
+        self
+    }
+
+    pub fn with_serialization(&mut self, serialization: SerializationType) -> &mut Self {
+        self.attributes.with_serialization(serialization);
+        self
+    }
+
+    fn calc_check_sum(&self) -> u32 {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&self.attributes.0[..]);
+        hasher.update(self.msg_id.as_ref());
+        hasher.update(&self.timestamp.to_le_bytes());
+        self.metadata.iter().for_each(|(k, v)| {
+            hasher.update(k.as_ref());
+            hasher.update(v.as_ref());
+        });
+        hasher.update(self.payload.as_ref());
+        hasher.finalize()
+    }
+
+    pub(crate) fn validate_check_sum(&self, check_sum: u32) -> StorageResult<()> {
+        if self.check_sum != check_sum {
+            return Err(StorageError::new(ErrorCode::CheckSumMismatch));
         }
+        Ok(())
     }
 
-    /// 从 rkyv 序列化的字节反序列化（用于性能测试和向后兼容）
-    pub fn from_rkyv_bytes(data: Bytes) -> Result<Self> {
-        let inner: MessagePayloadInner =
-            rkyv::from_bytes::<MessagePayloadInner, rkyv::rancor::Error>(data.as_ref())
-                .map_err(|e| anyhow::anyhow!("rkyv deserialize error: {}", e))?;
-        Ok(Self::new(
-            Bytes::from(inner.msg_id),
-            inner.timestamp,
-            inner
-                .metadata
-                .into_iter()
-                .map(|(k, v)| (Bytes::from(k), Bytes::from(v)))
-                .collect(),
-            Bytes::from(inner.payload),
-        ))
-    }
+    // /// 从 rkyv 序列化的字节反序列化（用于性能测试和向后兼容）
+    // pub(crate) fn from_rkyv_bytes(data: Bytes) -> Result<Self> {
+    //     let inner: MessagePayloadInner =
+    //         rkyv::from_bytes::<MessagePayloadInner, rkyv::rancor::Error>(data.as_ref())
+    //             .map_err(|e| anyhow::anyhow!("rkyv deserialize error: {}", e))?;
+    //     Ok(Self::new(
+    //         Bytes::from(inner.msg_id),
+    //         inner.timestamp,
+    //         inner
+    //             .metadata
+    //             .into_iter()
+    //             .map(|(k, v)| (Bytes::from(k), Bytes::from(v)))
+    //             .collect(),
+    //         Bytes::from(inner.payload),
+    //     ))
+    // }
 
-    pub(crate) fn gen_meta(&self, segment_id: u64, offset: u64) -> MessageMeta {
-        MessageMeta {
-            msg_id: self.msg_id.clone(),
-            timestamp: self.timestamp,
-            segment_id,
-            offset,
-            // payload 字段的原始长度（不是序列化后的长度）
-            msg_len: self.payload.len() as u32,
-        }
-    }
-
-    pub fn validate(&self) -> StorageResult<()> {
+    pub(crate) fn validate(&self) -> StorageResult<()> {
         if self.msg_id.len() < 1 {
             return Err(StorageError::new(ErrorCode::MsgIDTooShort));
         }
         if self.msg_id.len() > u8::MAX as usize {
             return Err(StorageError::new(ErrorCode::MsgIDTooLong));
         }
-        if self.metadata.len() > u16::MAX as usize {
+
+        if self.timestamp == 0 {
+            return Err(StorageError::new(ErrorCode::TimestampInvalid));
+        }
+
+        if self.metadata.len() > u8::MAX as usize {
             return Err(StorageError::new(ErrorCode::MetadataTooMany));
         }
         for (k, v) in &self.metadata {
@@ -127,9 +269,7 @@ impl MessagePayload {
                 return Err(StorageError::new(ErrorCode::MetadataValueTooLong));
             }
         }
-        if self.timestamp == 0 {
-            return Err(StorageError::new(ErrorCode::TimestampInvalid));
-        }
+
         if self.payload.is_empty() {
             return Err(StorageError::new(ErrorCode::PayloadTooShort));
         }
