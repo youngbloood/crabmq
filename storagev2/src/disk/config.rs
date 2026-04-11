@@ -33,7 +33,7 @@ pub fn get_system_iov_max() -> usize {
     1024
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Config {
+pub struct WriterConfig {
     pub storage_dir: PathBuf,
 
     // 刷盘相关配置
@@ -60,8 +60,6 @@ pub struct Config {
     // 可以通过 getconf IOV_MAX 查询系统值
     pub iov_max: usize,
 
-    // 写时的 worker 任务数量
-    pub writer_worker_tasks_num: usize,
     // 每个消息文件中的最大消息数量
     pub max_msg_num_per_file: u64,
     // 每个消息文件中的最大消息字节数
@@ -73,9 +71,6 @@ pub struct Config {
 
     // 开 metrics 统计
     pub with_metrics: bool,
-
-    // 是否启用索引（性能测试时可禁用）
-    pub enable_index: bool,
 
     // 磁盘写入方式：WriteVectored（零拷贝）或 Mmap（内存拷贝）
     pub disk_write_mode: DiskReadWriteMode,
@@ -100,7 +95,7 @@ pub struct Config {
     // pub rocksdb_disable_wal: bool,
 }
 
-impl Config {
+impl WriterConfig {
     pub fn validate(&self) -> StorageResult<()> {
         let must_gt_zero = |attr, v| -> StorageResult<()> {
             if v == 0 {
@@ -219,9 +214,6 @@ impl Config {
         if self.iov_max == 0 {
             self.iov_max = get_system_iov_max();
         }
-        if self.writer_worker_tasks_num == 0 {
-            self.writer_worker_tasks_num = 100;
-        }
         if self.create_next_record_file_threshold == 0 {
             self.create_next_record_file_threshold = 90;
         }
@@ -241,9 +233,9 @@ impl Config {
     }
 }
 
-impl Default for Config {
+impl Default for WriterConfig {
     fn default() -> Self {
-        Config {
+        WriterConfig {
             storage_dir: PathBuf::from("./messages"),
             flusher_period: 50, // 50ms
             flusher_partition_writer_buffer_tasks_num: 64,
@@ -257,10 +249,8 @@ impl Default for Config {
             max_msg_num_per_file: 1024 * 1024 * 1024 * 10,
             max_size_per_file: 1024 * 1024 * 1024, // 1G
             compress_type: 0,
-            writer_worker_tasks_num: 100,
             create_next_record_file_threshold: 90,
             with_metrics: false,
-            enable_index: true, // 默认启用索引，性能测试时可设为 false
             disk_write_mode: DiskReadWriteMode::WriteVectored, // 默认使用零拷贝 write_vectored
 
             message_size_limit_per_partition: 100,
@@ -281,3 +271,5 @@ impl Default for Config {
         }
     }
 }
+
+pub struct ReaderConfig {}

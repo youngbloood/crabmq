@@ -32,3 +32,4 @@ memmap2 = {version = "0.9",features= ["stable_deref_trait"]}
 arc-swap = "1.7"
 smallvec = "1.15.1"
 crc32fast = "1.5.0"
+chrono = "0.4.44"

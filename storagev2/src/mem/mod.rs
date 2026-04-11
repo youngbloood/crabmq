@@ -1,6 +1,6 @@
 use crate::err::ErrorCode;
 use crate::{
-    MessagePayload, ReadPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession,
+    MessagePayload, ConsumerReaderPosition, SegmentOffset, StorageError, StorageReader, StorageReaderSession,
     StorageResult, StorageWriter,
 };
 use async_trait::async_trait;
@@ -160,7 +160,7 @@ impl StorageReader for MemStorageReader {
     async fn new_session(
         &self,
         _group_id: u32,
-        _read_position: Vec<(String, ReadPosition)>,
+        _read_position: Vec<(String, ConsumerReaderPosition)>,
     ) -> StorageResult<Box<dyn StorageReaderSession>> {
         if self
             .has_session

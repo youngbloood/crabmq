@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use storagev2::{MessagePayload, ReadPosition, SegmentOffset as StorageSegmentOffset};
+use storagev2::{MessagePayload, ConsumerReaderPosition, SegmentOffset as StorageSegmentOffset};
 use storagev2::{StorageReader, StorageReaderSession};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time;
@@ -31,13 +31,13 @@ struct GroupMeta {
 }
 
 impl GroupMeta {
-    fn get_topic_read_positions(&self) -> Vec<(String, ReadPosition)> {
+    fn get_topic_read_positions(&self) -> Vec<(String, ConsumerReaderPosition)> {
         let mut list = vec![];
         self.group_topic_metas.iter().for_each(|v| {
             let read_position = if v.offset == 1 {
-                ReadPosition::Latest
+                ConsumerReaderPosition::Latest
             } else {
-                ReadPosition::Begin
+                ConsumerReaderPosition::Earliest
             };
             list.push((v.topic.clone(), read_position));
         });

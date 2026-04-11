@@ -7,6 +7,7 @@ use std::sync::{
 /**
  * 双队列
  */
+#[derive(Clone)]
 pub struct SwitchQueue<T> {
     switcher: Arc<AtomicBool>,
 

@@ -1,3 +1,4 @@
+use crate::disk::DiskReadWriteMode;
 use crate::err::ErrorCode;
 use crate::{StorageError, StorageResult};
 
@@ -110,6 +111,7 @@ impl MetaFileHandler {
 #[derive(Clone)]
 pub struct FileHandlerWriterAsync {
     inner: Arc<dyn Writer>,
+    // filename: PathBuf, // 可选：保留文件路径信息，便于调试和日志
 }
 
 impl FileHandlerWriterAsync {
@@ -163,10 +165,7 @@ pub async fn create_simple_async_file(p: &Path) -> Result<AsyncFile> {
 /// 创建写入文件句柄（不预分配）
 ///
 /// 注意：现在返回 FileHandlerWriterAsync，内部使用 fd::Writer
-pub async fn create_writer_fd(
-    p: &Path,
-    mode: crate::disk::DiskReadWriteMode,
-) -> Result<FileHandlerWriterAsync> {
+pub async fn create_writer_fd(p: &Path, mode: DiskReadWriteMode) -> Result<FileHandlerWriterAsync> {
     let writer = fd::create_writer(p, mode, false, 0).await?;
     Ok(FileHandlerWriterAsync::from_writer(writer))
 }

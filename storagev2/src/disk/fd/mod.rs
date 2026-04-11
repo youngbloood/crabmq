@@ -50,11 +50,11 @@ pub async fn create_writer(
     match mode {
         DiskReadWriteMode::WriteVectored => {
             let writer = VectoredWriter::new(filename, prealloc, prealloc_size).await?;
-            Ok(Box::new(writer))
+            Ok(Box::new(writer) as Box<dyn Writer>)
         }
         DiskReadWriteMode::Mmap => {
             let writer = MmapWriter::new(filename, prealloc, prealloc_size).await?;
-            Ok(Box::new(writer))
+            Ok(Box::new(writer) as Box<dyn Writer>)
         }
     }
 }
@@ -64,11 +64,11 @@ pub async fn create_reader(filename: &Path, mode: DiskReadWriteMode) -> Result<B
     match mode {
         DiskReadWriteMode::WriteVectored => {
             let reader = vectored::VectoredReader::new(filename).await?;
-            Ok(Box::new(reader))
+            Ok(Box::new(reader) as Box<dyn Reader>)
         }
         DiskReadWriteMode::Mmap => {
             let reader = mmap::MmapReader::new(filename).await?;
-            Ok(Box::new(reader))
+            Ok(Box::new(reader) as Box<dyn Reader>)
         }
     }
 }

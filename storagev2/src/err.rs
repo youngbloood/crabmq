@@ -48,6 +48,8 @@ impl Display for StorageError {
  */
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 pub enum ErrorCode {
+    StorageClosed = 1000,
+
     InvalidConfigParameter = 1001,
     MsgIDTooShort = 1002,
     MsgIDTooLong = 1003,
@@ -58,6 +60,7 @@ pub enum ErrorCode {
     PayloadTooShort = 1008,
     PayloadTooLong = 1009,
     CheckSumMismatch = 1010,
+    IlligalLogicSequence = 1011,
 
     TopicNotFound = 1101,
     PartitionNotFound = 1102,

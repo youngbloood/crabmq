@@ -10,7 +10,7 @@ use crate::err::{ErrorCode, StorageError, StorageResult};
 use async_trait::async_trait;
 use smallvec::SmallVec;
 use std::num::NonZero;
-use tokio::sync::oneshot;
+use tokio::{fs::File, sync::oneshot};
 
 const VERSION_V1: u8 = 1;
 
@@ -282,15 +282,35 @@ impl MessagePayload {
 }
 
 #[async_trait]
-pub trait StorageWriter: Send + Sync + Clone + 'static {
-    /// Store the message to the Storage Media
+pub trait StorageSearch {
+    /**
+     * Search the message by logic sequence, and return the message payload
+     */
+    async fn search(
+        &self,
+        topic: &str,
+        partition: u32,
+        logic_seq: u64,
+    ) -> StorageResult<MessagePayload>;
+}
+
+#[async_trait]
+pub trait StorageWriter: Send + Sync + Clone + 'static + StorageSearch {
+    /**
+     * Store the message to the Storage Media
+     * @param topic: the topic name
+     * @param partition: the partition id
+     * @param payloads: the message payloads to store
+     * @param notify: the notify channel to notify the result of the operation, if None, the operation will be performed in fire-and-forget mode
+     * @return: the start of the payloads's logic_sequence.
+     */
     async fn store(
         &self,
         topic: &str,
         partition: u32,
         payloads: Vec<MessagePayload>,
         notify: Option<oneshot::Sender<StorageResult<()>>>,
-    ) -> StorageResult<()>;
+    ) -> StorageResult<u64>;
 }
 
 #[async_trait]
@@ -298,8 +318,8 @@ pub trait StorageReader: Send + Sync + Clone + 'static {
     /// New a session with group_id, it will be return Err() when session has been created.
     async fn new_session(
         &self,
-        group_id: u32,
-        read_position: Vec<(String, ReadPosition)>, // 该 consumer-grpup 指定消费的 topic 的位置
+        group_id: &str,
+        read_position: Vec<(String, ConsumerReaderPosition)>, // 该 consumer-grpup 指定消费的 topic 的位置
     ) -> StorageResult<Box<dyn StorageReaderSession>>;
 
     /// Close a session by group_id.
@@ -307,9 +327,9 @@ pub trait StorageReader: Send + Sync + Clone + 'static {
 }
 
 #[async_trait]
-pub trait StorageReaderSession: Send + Sync + 'static {
+pub trait StorageReaderSession: Send + Sync + 'static + StorageSearch {
     /**
-     * Get the next n message in the topic-partition
+     * Get the next n message in the topic-partition from disk
      *
      * @param topic: the topic name
      * @param partition: the partition id
@@ -325,6 +345,8 @@ pub trait StorageReaderSession: Send + Sync + 'static {
         partition: u32,
         n: NonZero<u64>,
     ) -> StorageResult<Vec<(MessagePayload, u64, SegmentOffset)>>;
+
+    async fn next_fd(&self, topic: &str, partition: u32, n: NonZero<u64>) -> StorageResult<File>;
 
     /**
      * Commit the message has been consumed, and the consume ptr should rorate the next ptr.
@@ -344,7 +366,7 @@ pub struct SegmentOffset {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ReadPosition {
-    Begin,  // 从头开始消费
-    Latest, // 从最新消息开始消费，以第一次调用next为快照
+pub enum ConsumerReaderPosition {
+    Earliest, // 从头开始消费
+    Latest,   // 从最新消息开始消费，以第一次调用next为快照
 }
