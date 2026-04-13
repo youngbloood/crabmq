@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
-use log::error;
+use log::{error, info};
 use std::{
     future::Future,
     pin::Pin,
@@ -94,10 +94,13 @@ impl Flusher {
     }
 
     pub async fn run(self, mut flush_signal: Receiver<(bool, bool)>) {
+        println!("[STORAGE]: start flusher task...");
         let mut hot_ticker = time::interval(self.flush_interval);
         let mut warm_ticker = time::interval(self.flush_interval * 2);
         let mut cold_ticker = time::interval(self.flush_interval * 3);
         let _stop = self.stop.clone();
+
+        info!("[STORAGE]: start flusher task...");
 
         loop {
             select! {
@@ -129,22 +132,22 @@ impl Flusher {
     }
 
     async fn flush_hot(&self) {
-        self.flush_interval(self.flush_interval.as_secs(), true, false)
+        self.flush_interval(self.flush_interval.as_millis(), true, false)
             .await;
     }
 
     async fn flush_warm(&self) {
-        self.flush_interval(self.flush_interval.as_secs() * 2, true, false)
+        self.flush_interval(self.flush_interval.as_millis() * 2, true, false)
             .await;
     }
 
     async fn flush_cold(&self) {
-        self.flush_interval(self.flush_interval.as_secs() * 4, true, false)
+        self.flush_interval(self.flush_interval.as_millis() * 4, true, false)
             .await;
     }
 
-    async fn flush_interval(&self, i: u64, all: bool, fsync: bool) {
-        let now = Utc::now().timestamp() as u64;
+    async fn flush_interval(&self, i: u128, all: bool, fsync: bool) {
+        let now = Utc::now().timestamp_millis() as u64;
         let chunk: Vec<Arc<PartitionWriterHandle>> = self
             .waits
             .iter()
@@ -152,7 +155,7 @@ impl Flusher {
                 if i == 0 {
                     return true;
                 }
-                now - x.latest_write_timestamp.load(Ordering::Relaxed) > i
+                now - x.latest_write_timestamp > i
             })
             .map(|v| v.value().clone())
             .collect();

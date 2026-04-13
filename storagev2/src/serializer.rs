@@ -94,11 +94,13 @@ impl MessageSerializer for RkyvSerializer {
         msg: &'a MessagePayload,
         headers: &'a mut BytesMut,
     ) -> StorageResult<SerializedMessage<'a>> {
-        crate::serializer::rkyv_impl::serialize_rkyv(msg, headers)
+        todo!()
+        // crate::serializer::rkyv_impl::serialize_rkyv(msg, headers)
     }
 
     fn deserialize(&self, data: Bytes) -> StorageResult<MessagePayload> {
-        crate::serializer::rkyv_impl::deserialize_rkyv(data)
+        todo!()
+        // crate::serializer::rkyv_impl::deserialize_rkyv(data)
     }
 
     fn name(&self) -> &'static str {

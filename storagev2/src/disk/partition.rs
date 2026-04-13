@@ -2,22 +2,27 @@ use crate::{
     MessagePayload,
     disk::{
         config::DiskReadWriteMode,
+        gen_index_filename, gen_record_filename,
         index::{IndexReaderHandle, IndexWriterHandle},
+        is_index_filename, is_record_filename, parse_factor,
         record::{RecordReaderHandle, RecordWriterHandle},
         switch_queue::SwitchQueue,
     },
+    err::StorageResult,
 };
 use anyhow::Result;
+use chrono::Duration;
 use dashmap::DashMap;
 use std::{
     io::IoSlice,
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU16, AtomicU64, Ordering},
     },
-    time,
+    time::{self, Instant},
 };
+use tokio::{fs, sync::Mutex};
 
 pub struct PartitionWriterHandle {
     // 数据文件所在目录（包含 topic 和 partition 信息）
@@ -31,7 +36,7 @@ pub struct PartitionWriterHandle {
     store: StorageWriterGroup,
 
     // 最后写入时间
-    pub(crate) latest_write_timestamp: AtomicU64,
+    pub(crate) latest_write_timestamp: Instant,
 }
 
 impl PartitionWriterHandle {
@@ -50,7 +55,7 @@ impl PartitionWriterHandle {
             cursors: PartitionCursors::new(),
             buffer: SwitchQueue::new(1000), // TODO: 配置化
             store,
-            latest_write_timestamp: AtomicU64::new(0),
+            latest_write_timestamp: Duration::new(0, 0).unwrap(),
         })
     }
 
@@ -108,6 +113,10 @@ impl PartitionWriterHandle {
 
         // Ok(msg)
     }
+
+    fn init(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct PartitionCursors {
@@ -155,14 +164,12 @@ impl StorageWriterGroup {
         partition_id: u32,
         mode: DiskReadWriteMode,
     ) -> Result<Self> {
-        let record = RecordWriterHandle::new(dir.clone(), topic.clone(), partition_id, mode).await;
-        let index = IndexWriterHandle::new(dir.clone(), topic.clone(), partition_id, mode).await;
+        println!("dir = {:?}", dir);
+        let record =
+            RecordWriterHandle::new(dir.clone(), topic.clone(), partition_id, mode).await?;
+        let index = IndexWriterHandle::new(dir.clone(), topic.clone(), partition_id, mode).await?;
 
-        Ok(Self {
-            dir,
-            record,
-            index: index?,
-        })
+        Ok(Self { dir, record, index })
     }
 
     pub async fn flush(&self, data: &[MessagePayload], fsync: bool) -> Result<()> {
@@ -187,6 +194,13 @@ struct StorageReaderGroup {
     index: IndexReaderHandle,
 }
 
+impl StorageReaderGroup {
+    fn search(&self, offset: u64) -> Result<MessagePayload> {
+        todo!()
+    }
+}
+
+#[derive(Clone)]
 pub struct PartitionReaderHandle {
     // 数据文件所在目录（包含 topic 和 partition 信息）
     dir: PathBuf,
@@ -195,7 +209,7 @@ pub struct PartitionReaderHandle {
     partition_id: u32,
 
     // 已持久化的 seqs
-    visible_seqs: Vec<u64>,
+    visible_seqs: Arc<Mutex<Vec<u64>>>,
 
     // segment_id -> StorageReaderGroup
     stores: Arc<DashMap<u64, StorageReaderGroup>>,
@@ -218,15 +232,18 @@ impl PartitionReaderHandle {
             dir,
             topic,
             partition_id,
-            visible_seqs: vec![],
+            visible_seqs: Arc::default(),
             stores: Arc::new(DashMap::new()),
         })
     }
 
-    pub fn search(&self, logic_seq: u64) -> Result<MessagePayload> {
-        let segment_id = match self.visible_seqs.binary_search(&logic_seq) {
-            Ok(pos) => self.visible_seqs[pos],
-            Err(pos) => self.visible_seqs[pos - 1],
+    pub async fn search(&self, logic_seq: u64) -> Result<MessagePayload> {
+        let segment_id = {
+            let mu = self.visible_seqs.lock().await;
+            match mu.binary_search(&logic_seq) {
+                Ok(pos) => mu[pos],
+                Err(pos) => mu[pos - 1],
+            }
         };
 
         let offset = (logic_seq - segment_id) * 8;
@@ -238,6 +255,6 @@ impl PartitionReaderHandle {
             .ok_or_else(|| anyhow::anyhow!("Logic seq {} not found", logic_seq))?;
 
         // 2. 在 StorageGroup 中查找消息
-        store.search(logic_seq)
+        store.search(logic_seq - segment_id)
     }
 }

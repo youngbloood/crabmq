@@ -137,8 +137,8 @@ impl FileHandlerWriterAsync {
     }
 
     /// 获取当前写入位置（无需锁！）
-    pub fn write_pos(&self) -> u64 {
-        self.inner.write_pos()
+    pub fn get_write_cursor(&self) -> u64 {
+        self.inner.get_write_cursor()
     }
 }
 

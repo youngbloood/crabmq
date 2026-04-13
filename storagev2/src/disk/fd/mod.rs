@@ -23,8 +23,8 @@ pub trait Writer: Send + Sync {
     /// 同步数据到磁盘（fsync）
     async fn sync_data(&self) -> Result<()>;
 
-    /// 获取当前写入位置
-    fn write_pos(&self) -> u64;
+    /// 获取当前写入指针位置
+    fn get_write_cursor(&self) -> u64;
 }
 
 /// 读取 trait：统一抽象不同的磁盘读取方式
@@ -94,7 +94,7 @@ mod tests {
 
         let written = writer.write(&iovecs).await?;
         assert_eq!(written, 12);
-        assert_eq!(writer.write_pos(), 12);
+        assert_eq!(writer.get_write_cursor(), 12);
 
         writer.sync_data().await?;
         drop(writer);
@@ -127,7 +127,7 @@ mod tests {
 
         let written = writer.write(&iovecs).await?;
         assert_eq!(written, 10);
-        assert_eq!(writer.write_pos(), 10);
+        assert_eq!(writer.get_write_cursor(), 10);
 
         writer.sync_data().await?;
         drop(writer);

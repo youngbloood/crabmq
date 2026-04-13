@@ -1,9 +1,9 @@
 pub mod disk;
-pub mod mem;
+// pub mod mem;
 pub mod metrics;
 pub mod serializer;
 use bytes::Bytes;
-pub use mem::*;
+// pub use mem::*;
 pub mod err;
 
 use crate::err::{ErrorCode, StorageError, StorageResult};
@@ -289,7 +289,7 @@ pub trait StorageSearch {
     async fn search(
         &self,
         topic: &str,
-        partition: u32,
+        partition_id: u32,
         logic_seq: u64,
     ) -> StorageResult<MessagePayload>;
 }
@@ -319,11 +319,11 @@ pub trait StorageReader: Send + Sync + Clone + 'static {
     async fn new_session(
         &self,
         group_id: &str,
-        read_position: Vec<(String, ConsumerReaderPosition)>, // 该 consumer-grpup 指定消费的 topic 的位置
+        read_position: Vec<(String, ConsumerReaderPositionType)>, // 该 consumer-grpup 指定消费的 topic 的位置
     ) -> StorageResult<Box<dyn StorageReaderSession>>;
 
     /// Close a session by group_id.
-    async fn close_session(&self, group_id: u32);
+    async fn close_session(&self, group_id: &str);
 }
 
 #[async_trait]
@@ -336,15 +336,14 @@ pub trait StorageReaderSession: Send + Sync + 'static + StorageSearch {
      * @param n: the number of messages to get
      * @return: a vector of (MessagePayload, u64, SegmentOffset)
      *          the first element is the message payload,
-     *          the second element is the message size,
-     *          the third element is the segment offset
+     *          the second element is the logic_seq,
      */
     async fn next(
         &self,
         topic: &str,
-        partition: u32,
+        partition_id: u32,
         n: NonZero<u64>,
-    ) -> StorageResult<Vec<(MessagePayload, u64, SegmentOffset)>>;
+    ) -> StorageResult<Vec<(MessagePayload, u64)>>;
 
     async fn next_fd(&self, topic: &str, partition: u32, n: NonZero<u64>) -> StorageResult<File>;
 
@@ -366,7 +365,7 @@ pub struct SegmentOffset {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ConsumerReaderPosition {
+pub enum ConsumerReaderPositionType {
     Earliest, // 从头开始消费
     Latest,   // 从最新消息开始消费，以第一次调用next为快照
 }

@@ -1,6 +1,6 @@
 use crate::disk::fd::{Reader, Writer};
 use crate::disk::prealloc::preallocate;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use memmap2::{MmapMut, MmapOptions};
 use once_cell::sync::Lazy;
 use std::fs::{File, OpenOptions};
@@ -37,36 +37,37 @@ impl MmapWriter {
     pub async fn new(filename: &Path, prealloc: bool, prealloc_size: u64) -> Result<Self> {
         // 在 spawn_blocking 中执行同步文件操作
         let filename = filename.to_path_buf();
-        let (fd, mmap, file_len) = tokio::task::spawn_blocking(move || -> Result<(File, MmapMut, u64)> {
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .read(true)
-                .custom_flags(libc::O_DSYNC)
-                .open(&filename)?;
+        let (fd, mmap, file_len) =
+            tokio::task::spawn_blocking(move || -> Result<(File, MmapMut, u64)> {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .read(true)
+                    .custom_flags(libc::O_DSYNC)
+                    .open(&filename)?;
 
-            // 预分配文件空间
-            let initial_size = if prealloc && prealloc_size > 0 {
-                preallocate(&file, prealloc_size)?;
-                prealloc_size
-            } else {
-                let len = file.metadata()?.len();
-                if len == 0 {
-                    // 文件为空，初始分配 1MB
-                    let initial = 1024 * 1024;
-                    file.set_len(initial)?;
-                    initial
+                // 预分配文件空间
+                let initial_size = if prealloc && prealloc_size > 0 {
+                    preallocate(&file, prealloc_size)?;
+                    prealloc_size
                 } else {
-                    len
-                }
-            };
+                    let len = file.metadata()?.len();
+                    if len == 0 {
+                        // 文件为空，初始分配 1MB
+                        let initial = 1024 * 1024;
+                        file.set_len(initial)?;
+                        initial
+                    } else {
+                        len
+                    }
+                };
 
-            // 创建内存映射
-            let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+                // 创建内存映射
+                let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
-            Ok((file, mmap, initial_size))
-        })
-        .await??;
+                Ok((file, mmap, initial_size))
+            })
+            .await??;
 
         Ok(Self {
             fd: Mutex::new(fd),
@@ -150,7 +151,8 @@ impl Writer for MmapWriter {
         drop(mmap);
 
         // 5. 更新写入位置
-        self.write_pos.fetch_add(total_size as u64, Ordering::Relaxed);
+        self.write_pos
+            .fetch_add(total_size as u64, Ordering::Relaxed);
 
         Ok(total_size)
     }
@@ -169,7 +171,7 @@ impl Writer for MmapWriter {
     }
 
     /// 获取当前写入位置
-    fn write_pos(&self) -> u64 {
+    fn get_write_cursor(&self) -> u64 {
         self.write_pos.load(Ordering::Relaxed)
     }
 }

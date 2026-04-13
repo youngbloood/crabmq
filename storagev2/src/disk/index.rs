@@ -11,6 +11,15 @@ use std::{
 };
 use tokio::fs;
 
+const SIGNLE_OFFSET_LENGTH: usize = 8 + 4;
+/**
+ * SignleOffset mean signle MessagePayload start offset, and the length
+ */
+pub struct SignleOffset {
+    pub offset: u64,
+    pub length: u32,
+}
+
 /**
  * 索引管理器：负责管理一个 topic-partition 的索引文件写
  */
@@ -61,18 +70,19 @@ impl IndexWriterHandle {
         })
     }
 
-    pub async fn flush(&self, indexs: &[u64], fsync: bool) -> Result<()> {
+    pub async fn flush(&self, indexs: &[SignleOffset], fsync: bool) -> Result<()> {
         // 所有索引写入当前索引文件（剩余容量足够）
-        let mut bts = BytesMut::with_capacity(indexs.len() * 8);
+        let mut bts = BytesMut::with_capacity(indexs.len() * SIGNLE_OFFSET_LENGTH);
         for idx in indexs {
-            bts.extend_from_slice(&idx.to_le_bytes());
+            bts.extend_from_slice(&idx.offset.to_le_bytes());
+            bts.extend_from_slice(&idx.length.to_le_bytes());
         }
-
         let data: IoSlice<'_> = IoSlice::new(&bts);
 
-        self.wh
-            .write(&[data], DiskReadWriteMode::WriteVectored)
-            .await?;
+        self.wh.write(&[data], self.mode).await?;
+        if fsync {
+            self.wh.sync_data().await?;
+        }
 
         Ok(())
     }

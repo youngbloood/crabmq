@@ -272,4 +272,6 @@ impl Default for WriterConfig {
     }
 }
 
-pub struct ReaderConfig {}
+pub struct ReaderConfig {
+    pub dir: PathBuf,
+}

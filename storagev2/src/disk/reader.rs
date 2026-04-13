@@ -1,8 +1,9 @@
-use crate::MessagePayload;
 use crate::disk::ReaderConfig;
+use crate::disk::partition::PartitionReaderHandle;
 use crate::err::ErrorCode;
 use crate::serializer::{MessageSerializer, SgIoSerializer};
-use crate::{ConsumerReaderPosition, SegmentOffset, StorageError, StorageResult};
+use crate::{ConsumerReaderPositionType, SegmentOffset, StorageError, StorageResult};
+use crate::{MessagePayload, StorageSearch};
 use crate::{StorageReader, StorageReaderSession};
 use anyhow::Result;
 use bytes::Bytes;
@@ -24,7 +25,7 @@ pub struct DiskStorageReader {
     sessions: Arc<DashMap<String, DiskStorageReaderSession>>,
     sessions_lock: Arc<DashMap<String, Mutex<()>>>,
 
-    stop: DropGuard,
+    stop: Arc<DropGuard>,
 }
 
 impl DiskStorageReader {
@@ -34,7 +35,7 @@ impl DiskStorageReader {
             conf: Arc::new(conf),
             sessions: Arc::default(),
             sessions_lock: Arc::default(),
-            stop: stop.drop_guard(),
+            stop: Arc::new(stop.drop_guard()),
         }
     }
 }
@@ -45,9 +46,9 @@ impl StorageReader for DiskStorageReader {
     async fn new_session(
         &self,
         group_id: &str,
-        read_position: Vec<(String, ConsumerReaderPosition)>,
+        read_position: Vec<(String, ConsumerReaderPositionType)>,
     ) -> StorageResult<Box<dyn StorageReaderSession>> {
-        if let Some(session) = self.sessions.get(&group_id) {
+        if let Some(session) = self.sessions.get(group_id) {
             return Ok(Box::new(session.value().clone()));
         }
 
@@ -61,7 +62,7 @@ impl StorageReader for DiskStorageReader {
             .or_insert(Mutex::new(()));
         let _lock = mux.lock();
 
-        if let Some(session) = self.sessions.get(&group_id) {
+        if let Some(session) = self.sessions.get(group_id) {
             return Ok(Box::new(session.value().clone()));
         }
 
@@ -71,8 +72,8 @@ impl StorageReader for DiskStorageReader {
     }
 
     /// Close a session by group_id.
-    async fn close_session(&self, group_id: u32) {
-        self.sessions.remove(&group_id);
+    async fn close_session(&self, group_id: &str) {
+        self.sessions.remove(group_id);
     }
 }
 
@@ -84,17 +85,24 @@ pub struct DiskStorageReaderSession {
     conf: Arc<ReaderConfig>,
 
     // topic -> ConsumerReaderPosition
-    reader_position: Arc<DashMap<String, ConsumerReaderPosition>>,
+    reader_position_type: Arc<DashMap<String, ConsumerReaderPositionType>>,
 
-    // (topic, partition_id) -> FdReaderCacheAync
-    readers: Arc<DashMap<(String, u32), DiskStorageReaderSessionPartition>>,
+    // 该消费者组 read 指针
+    // (topic-partition_id) -> logic_seq
+    reader_cursors: Arc<DashMap<(String, u32), u64>>,
+
+    // 该消费者组 commit 指针
+    // (topic-partition_id) -> logic_seq
+    commit_cursors: Arc<DashMap<(String, u32), u64>>,
+
+    reader: SharedPartitionReader,
 }
 
 impl DiskStorageReaderSession {
     pub async fn new(
         group_id: &str,
         conf: Arc<ReaderConfig>,
-        read_positions: Vec<(String, ConsumerReaderPosition)>,
+        read_positions: Vec<(String, ConsumerReaderPositionType)>,
     ) -> Result<Self> {
         let m = DashMap::new();
         read_positions.iter().for_each(|(k, v)| {
@@ -104,16 +112,18 @@ impl DiskStorageReaderSession {
         Ok(Self {
             group_id: group_id.to_string(),
             conf,
-            reader_position: Arc::new(m),
-            readers: Arc::default(),
+            reader_position_type: Arc::new(m),
+            reader_cursors: Arc::default(),
+            commit_cursors: Arc::default(),
+            reader: SharedPartitionReader::new(),
         })
     }
 
-    fn get_read_position(&self, topic: &str) -> ConsumerReaderPosition {
-        if let Some(v) = self.reader_position.get(topic) {
+    fn get_read_position(&self, topic: &str) -> ConsumerReaderPositionType {
+        if let Some(v) = self.reader_position_type.get(topic) {
             return v.value().clone();
         }
-        ConsumerReaderPosition::Earliest
+        ConsumerReaderPositionType::Earliest
     }
 }
 
@@ -127,49 +137,8 @@ impl StorageReaderSession for DiskStorageReaderSession {
         topic: &str,
         partition_id: u32,
         n: NonZero<u64>,
-    ) -> StorageResult<Vec<(MessagePayload, u64, SegmentOffset)>> {
-        if self
-            .readers
-            .get(&(topic.to_string(), partition_id))
-            .is_none()
-        {
-            let partition_dir = self.dir.join(topic).join(partition_id.to_string());
-            if !check_exist(&partition_dir) {
-                return Err(StorageError::with_message(
-                    ErrorCode::PathNotExist,
-                    format!("{:?}", partition_dir),
-                ));
-            }
-
-            let mut partition =
-                DiskStorageReaderSessionPartition::new(partition_dir, self.group_id);
-            partition.load_ptr(&self.get_read_position(topic)).await?;
-
-            self.readers
-                .insert((topic.to_string(), partition_id), partition);
-        }
-        let reader = self
-            .readers
-            .get(&(topic.to_string(), partition_id))
-            .unwrap();
-
-        let mut list = vec![];
-        for _ in 0..n.into() {
-            let (data, offset, last) = reader.next().await?;
-            if !data.is_empty() {
-                // 使用新序列化器反序列化
-                let serializer = SgIoSerializer;
-                let data_len = data.len() as u64;
-                let payload = serializer.deserialize(data)?;
-
-                list.push((payload, data_len, offset));
-            }
-            if last {
-                break;
-            }
-        }
-
-        Ok(list)
+    ) -> StorageResult<Vec<(MessagePayload, u64)>> {
+        todo!()
     }
 
     async fn next_fd(&self, topic: &str, partition: u32, n: NonZero<u64>) -> StorageResult<File> {
@@ -178,219 +147,242 @@ impl StorageReaderSession for DiskStorageReaderSession {
 
     /// Commit the message has been consumed, and the consume ptr should rorate the next ptr.
     async fn commit(&self, topic: &str, partition_id: u32, logic_seq: u64) -> StorageResult<()> {
-        // 获取对应的 partition reader
-        let reader = self
-            .readers
-            .get(&(topic.to_string(), partition_id))
-            .ok_or_else(|| {
-                StorageError::with_message(
-                    ErrorCode::PartitionNotFound,
-                    format!("topic: {}, partition: {}", topic, partition_id),
-                )
-            })?;
-
-        reader.commit(logic_seq).await?;
-
-        Ok(())
+        todo!()
     }
 }
 
-#[derive(Debug, Clone)]
-struct DiskStorageReaderSessionPartition {
-    // topic-partition 的目录
-    dir: PathBuf,
-    group_id: String,
-
-    partition: PartitionReaderHandle,
-
-    // 消费者读取指针
-    // consumer_group -> logic_seq
-    reader_ptr: Arc<DashMap<String, u64>>,
-
-    // 消费者 commit 指针
-    // consumer_group -> logic_seq
-    commit_ptr: Arc<DashMap<String, u64>>,
-
-    // 该消费者组最后一次读的时间
-    latest_read: u64,
-}
-
-impl DiskStorageReaderSessionPartition {
-    /// returns:
-    /// 消息体，该消息的 SegmentOffset 信息， 该消息是否是该文件的最后一个消息
-    async fn read(&self) -> StorageResult<(Bytes, SegmentOffset, bool)> {
-        let (filename, read_offset) = {
-            let rl = self.reader_ptr.read().await;
-            (rl.filename.clone(), rl.offset)
-        };
-
-        let file = self.fd_cache.get_or_create(&filename, read_offset).await?;
-
-        let mut wl = file.write().await;
-
-        // 磁盘格式：[8:total_len] + S-G IO data
-        // 高效读取：只需2次系统调用
-
-        // 1. 读取8字节长度头
-        let mut len_buf = [0u8; 8];
-        match wl.read_exact(&mut len_buf).await {
-            Ok(_) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                warn!("read reached EOF in file {:?}", filename);
-                return Ok((Bytes::new(), SegmentOffset::default(), true));
-            }
-            Err(e) => {
-                error!("failed to read header length: {:?}", e);
-                return Err(StorageError::with_message(
-                    ErrorCode::IoError,
-                    e.to_string(),
-                ));
-            }
-        }
-
-        let len = u64::from_be_bytes(len_buf);
-        if len == 0 {
-            return Ok((Bytes::new(), SegmentOffset::default(), true));
-        }
-
-        // 2. 读取消息体
-        let mut buf = vec![0u8; len as usize];
-        match wl.read_exact(&mut buf).await {
-            Ok(_) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                error!(
-                    "incomplete message: len={}, file={:?}, offset={}",
-                    len, filename, read_offset
-                );
-                return Ok((Bytes::new(), SegmentOffset::default(), true));
-            }
-            Err(e) => {
-                error!("failed to read message content: {:?}", e);
-                return Err(StorageError::with_message(
-                    ErrorCode::IoError,
-                    e.to_string(),
-                ));
-            }
-        }
-
-        // 计算消息开始位置的offset
-        let message_start_offset = SegmentOffset {
-            segment_id: extract_segment_id_from_filename(&filename),
-            offset: read_offset,
-        };
-
-        {
-            let mut ptr_wl = self.reader_ptr.write().await;
-            // 更新读指针：8字节头 + 消息体长度
-            ptr_wl.offset += 8 + len;
-        }
-        let reader = self.clone();
-        tokio::spawn(async move {
-            let _ = reader.save_reader_ptr().await;
-        });
-        Ok((Bytes::from(buf), message_start_offset, false))
-    }
-
-    async fn next(&self) -> StorageResult<(Bytes, SegmentOffset, bool)> {
-        match self.read().await {
-            Ok(data) => {
-                if !data.0.is_empty() {
-                    return Ok(data);
-                }
-                // 文件滚动
-                let (_current_filename, next_filename) = {
-                    let reader_ptr_rl = self.reader_ptr.read().await;
-                    let next = self
-                        .dir
-                        .join(filename_factor_next_record(&reader_ptr_rl.filename));
-                    (reader_ptr_rl.filename.clone(), next)
-                };
-                if check_exist(&next_filename) {
-                    let mut read_ptr_wl = self.reader_ptr.write().await;
-                    read_ptr_wl.filename = next_filename;
-                    read_ptr_wl.offset = 0;
-                    return self.read().await;
-                }
-                // 没有更多文件
-                Ok((Bytes::new(), SegmentOffset::default(), true))
-            }
-            Err(e) => {
-                error!("StorageReader read failed: {:?}", e.to_string());
-                Err(e)
-            }
-        }
-    }
-
-    async fn commit(&self, logic_seq: u64) -> StorageResult<()> {
-        // 获取当前 commit_ptr 位置
-        let current_commit = {
-            let commit_rl = self.commit_ptr.read().await;
-            SegmentOffset {
-                segment_id: extract_segment_id_from_filename(&commit_rl.filename),
-                offset: commit_rl.offset,
-            }
-        };
-
-        // 验证 offset 不能回退（基本的顺序性检查）
-        if offset.segment_id < current_commit.segment_id
-            || (offset.segment_id == current_commit.segment_id
-                && offset.offset < current_commit.offset)
-        {
-            return Err(StorageError::with_message(
-                ErrorCode::OffsetMismatch,
-                format!(
-                    "Cannot commit offset {:?} which is before current commit offset {:?}",
-                    offset, current_commit
-                ),
-            ));
-        }
-
-        // 更新 commit_ptr
-        let target_filename = self.dir.join(gen_record_filename(offset.segment_id));
-        {
-            let mut commit_wl = self.commit_ptr.write().await;
-            commit_wl.filename = target_filename;
-            commit_wl.offset = offset.offset;
-        }
-
-        // 异步保存 commit_ptr
-        let reader = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = reader.save_commit_ptr().await {
-                error!("Failed to save commit pointer: {:?}", e);
-            }
-        });
-
-        Ok(())
+#[async_trait::async_trait]
+impl StorageSearch for DiskStorageReaderSession {
+    async fn search(
+        &self,
+        topic: &str,
+        partition_id: u32,
+        logic_seq: u64,
+    ) -> StorageResult<MessagePayload> {
+        todo!()
     }
 }
 
-fn filename_factor_next_record(filename: &Path) -> PathBuf {
-    let filename: PathBuf = PathBuf::from(filename.file_name().unwrap());
-    let filename_factor = filename
-        .with_extension("")
-        .to_str()
-        .unwrap()
-        .parse::<u64>()
-        .unwrap();
-    PathBuf::from(gen_record_filename(filename_factor + 1))
+#[derive(Clone)]
+struct SharedPartitionReader {
+    partitions: Arc<DashMap<(String, u32), PartitionReaderHandle>>,
+    partitions_lock: Arc<DashMap<(String, u32), Mutex<()>>>,
 }
 
-fn extract_segment_id_from_filename(p: &Path) -> u64 {
-    // 获取文件名（去除目录）
-    let file_name = p
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("0.record");
+impl SharedPartitionReader {
+    fn new() -> Self {
+        Self {
+            partitions: Arc::default(),
+            partitions_lock: Arc::default(),
+        }
+    }
 
-    // 提取 xxxx.record 中的 xxxx
-    let segment_id = file_name
-        .strip_suffix(".record")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-
-    segment_id
+    fn read(
+        &self,
+        topic: &str,
+        partition_id: u32,
+        n: NonZero<u64>,
+    ) -> StorageResult<Vec<MessagePayload>> {
+        todo!()
+    }
 }
+
+// #[derive(Clone)]
+// struct DiskStorageReaderSessionPartition {
+//     // topic-partition 的目录
+//     dir: PathBuf,
+//     group_id: String,
+
+//     partition: PartitionReaderHandle,
+
+//     // 消费者读取指针
+//     // consumer_group -> logic_seq
+//     reader_ptr: Arc<DashMap<String, u64>>,
+
+//     // 消费者 commit 指针
+//     // consumer_group -> logic_seq
+//     commit_ptr: Arc<DashMap<String, u64>>,
+
+//     // 该消费者组最后一次读的时间
+//     latest_read: u64,
+// }
+
+// impl DiskStorageReaderSessionPartition {
+//     /// returns:
+//     /// 消息体，该消息的 SegmentOffset 信息， 该消息是否是该文件的最后一个消息
+//     async fn read(&self) -> StorageResult<(Bytes, SegmentOffset, bool)> {
+//         let (filename, read_offset) = {
+//             let rl = self.reader_ptr.read().await;
+//             (rl.filename.clone(), rl.offset)
+//         };
+
+//         let file = self.fd_cache.get_or_create(&filename, read_offset).await?;
+
+//         let mut wl = file.write().await;
+
+//         // 磁盘格式：[8:total_len] + S-G IO data
+//         // 高效读取：只需2次系统调用
+
+//         // 1. 读取8字节长度头
+//         let mut len_buf = [0u8; 8];
+//         match wl.read_exact(&mut len_buf).await {
+//             Ok(_) => (),
+//             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+//                 warn!("read reached EOF in file {:?}", filename);
+//                 return Ok((Bytes::new(), SegmentOffset::default(), true));
+//             }
+//             Err(e) => {
+//                 error!("failed to read header length: {:?}", e);
+//                 return Err(StorageError::with_message(
+//                     ErrorCode::IoError,
+//                     e.to_string(),
+//                 ));
+//             }
+//         }
+
+//         let len = u64::from_be_bytes(len_buf);
+//         if len == 0 {
+//             return Ok((Bytes::new(), SegmentOffset::default(), true));
+//         }
+
+//         // 2. 读取消息体
+//         let mut buf = vec![0u8; len as usize];
+//         match wl.read_exact(&mut buf).await {
+//             Ok(_) => (),
+//             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+//                 error!(
+//                     "incomplete message: len={}, file={:?}, offset={}",
+//                     len, filename, read_offset
+//                 );
+//                 return Ok((Bytes::new(), SegmentOffset::default(), true));
+//             }
+//             Err(e) => {
+//                 error!("failed to read message content: {:?}", e);
+//                 return Err(StorageError::with_message(
+//                     ErrorCode::IoError,
+//                     e.to_string(),
+//                 ));
+//             }
+//         }
+
+//         // 计算消息开始位置的offset
+//         let message_start_offset = SegmentOffset {
+//             segment_id: extract_segment_id_from_filename(&filename),
+//             offset: read_offset,
+//         };
+
+//         {
+//             let mut ptr_wl = self.reader_ptr.write().await;
+//             // 更新读指针：8字节头 + 消息体长度
+//             ptr_wl.offset += 8 + len;
+//         }
+//         let reader = self.clone();
+//         tokio::spawn(async move {
+//             let _ = reader.save_reader_ptr().await;
+//         });
+//         Ok((Bytes::from(buf), message_start_offset, false))
+//     }
+
+//     async fn next(&self) -> StorageResult<(Bytes, SegmentOffset, bool)> {
+//         match self.read().await {
+//             Ok(data) => {
+//                 if !data.0.is_empty() {
+//                     return Ok(data);
+//                 }
+//                 // 文件滚动
+//                 let (_current_filename, next_filename) = {
+//                     let reader_ptr_rl = self.reader_ptr.read().await;
+//                     let next = self
+//                         .dir
+//                         .join(filename_factor_next_record(&reader_ptr_rl.filename));
+//                     (reader_ptr_rl.filename.clone(), next)
+//                 };
+//                 if check_exist(&next_filename) {
+//                     let mut read_ptr_wl = self.reader_ptr.write().await;
+//                     read_ptr_wl.filename = next_filename;
+//                     read_ptr_wl.offset = 0;
+//                     return self.read().await;
+//                 }
+//                 // 没有更多文件
+//                 Ok((Bytes::new(), SegmentOffset::default(), true))
+//             }
+//             Err(e) => {
+//                 error!("StorageReader read failed: {:?}", e.to_string());
+//                 Err(e)
+//             }
+//         }
+//     }
+
+//     async fn commit(&self, logic_seq: u64) -> StorageResult<()> {
+//         // 获取当前 commit_ptr 位置
+//         let current_commit = {
+//             let commit_rl = self.commit_ptr.read().await;
+//             SegmentOffset {
+//                 segment_id: extract_segment_id_from_filename(&commit_rl.filename),
+//                 offset: commit_rl.offset,
+//             }
+//         };
+
+//         // 验证 offset 不能回退（基本的顺序性检查）
+//         if offset.segment_id < current_commit.segment_id
+//             || (offset.segment_id == current_commit.segment_id
+//                 && offset.offset < current_commit.offset)
+//         {
+//             return Err(StorageError::with_message(
+//                 ErrorCode::OffsetMismatch,
+//                 format!(
+//                     "Cannot commit offset {:?} which is before current commit offset {:?}",
+//                     offset, current_commit
+//                 ),
+//             ));
+//         }
+
+//         // 更新 commit_ptr
+//         let target_filename = self.dir.join(gen_record_filename(offset.segment_id));
+//         {
+//             let mut commit_wl = self.commit_ptr.write().await;
+//             commit_wl.filename = target_filename;
+//             commit_wl.offset = offset.offset;
+//         }
+
+//         // 异步保存 commit_ptr
+//         let reader = self.clone();
+//         tokio::spawn(async move {
+//             if let Err(e) = reader.save_commit_ptr().await {
+//                 error!("Failed to save commit pointer: {:?}", e);
+//             }
+//         });
+
+//         Ok(())
+//     }
+// }
+
+// fn filename_factor_next_record(filename: &Path) -> PathBuf {
+//     let filename: PathBuf = PathBuf::from(filename.file_name().unwrap());
+//     let filename_factor = filename
+//         .with_extension("")
+//         .to_str()
+//         .unwrap()
+//         .parse::<u64>()
+//         .unwrap();
+//     PathBuf::from(gen_record_filename(filename_factor + 1))
+// }
+
+// fn extract_segment_id_from_filename(p: &Path) -> u64 {
+//     // 获取文件名（去除目录）
+//     let file_name = p
+//         .file_name()
+//         .and_then(|name| name.to_str())
+//         .unwrap_or("0.record");
+
+//     // 提取 xxxx.record 中的 xxxx
+//     let segment_id = file_name
+//         .strip_suffix(".record")
+//         .and_then(|s| s.parse::<u64>().ok())
+//         .unwrap_or(0);
+
+//     segment_id
+// }
 
 // #[cfg(test)]
 // mod test {

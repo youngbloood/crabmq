@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 /// - 并发安全：使用 Mutex 保护文件句柄，支持多线程并发写入
 pub struct VectoredWriter {
     fd: Mutex<AsyncFile>,
-    write_pos: AtomicU64,
+    write_cursor: AtomicU64,
 }
 
 impl VectoredWriter {
@@ -46,7 +46,7 @@ impl VectoredWriter {
 
         Ok(Self {
             fd: Mutex::new(async_file),
-            write_pos: AtomicU64::new(write_pos),
+            write_cursor: AtomicU64::new(write_pos),
         })
     }
 }
@@ -64,7 +64,7 @@ impl Writer for VectoredWriter {
 
         let mut fd = self.fd.lock().await;
         let size = fd.write_vectored(datas).await?;
-        self.write_pos.fetch_add(size as u64, Ordering::Relaxed);
+        self.write_cursor.fetch_add(size as u64, Ordering::Relaxed);
         Ok(size)
     }
 
@@ -76,8 +76,8 @@ impl Writer for VectoredWriter {
     }
 
     /// 获取当前写入位置
-    fn write_pos(&self) -> u64 {
-        self.write_pos.load(Ordering::Relaxed)
+    fn get_write_cursor(&self) -> u64 {
+        self.write_cursor.load(Ordering::Relaxed)
     }
 }
 

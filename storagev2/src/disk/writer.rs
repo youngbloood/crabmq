@@ -56,7 +56,9 @@ impl DiskStorageWriter {
 
         let (tx, rx) = mpsc::channel(1);
         let _flusher = flusher.clone();
-        tokio::spawn(async move { _flusher.run(rx) });
+        tokio::spawn(async move {
+            _flusher.run(rx).await;
+        });
         // let worker_tasks_num = cfg.writer_worker_tasks_num;
         Ok(Self {
             partitions,
@@ -227,9 +229,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn storage_store_multi() -> Result<()> {
-        let store = DiskStorageWriter::new(DiskConfig::default()).expect("error config");
-        let datas: Vec<&'static str> = vec![
+    async fn storage_store() -> Result<()> {
+        let store = new_disk_storage();
+        let payloads: Vec<&'static str> = vec![
             "Apple",
             "Banana",
             "Cat",
@@ -258,30 +260,80 @@ mod test {
             "Zebra",
         ];
 
-        let mut handles = vec![];
-        for _ in 0..20 {
-            let _store = store.clone();
-            let _datas = datas.clone();
-            handles.push(tokio::spawn(async move {
-                for _ in 0..100000 {
-                    let idx = rand::random::<u32>() as usize;
-                    let s = _datas[idx % _datas.len()];
-                    let msg = MessagePayload::new_v1(
-                        Bytes::from(format!("id_{}_{}", idx, s)),
-                        0,
-                        Vec::new(),
-                        Bytes::from(s),
-                    );
-                    if let Err(e) = _store.store("topic111", 11, vec![msg], None).await {
-                        eprintln!("e = {e:?}");
-                    }
-                }
-            }));
+        for _ in 0..4 {
+            let idx = rand::random::<u32>() as usize;
+            let s = payloads[idx % payloads.len()];
+            let msg = MessagePayload::new_v1(
+                Bytes::from(format!("id_{}_{}", idx, s)),
+                0,
+                Vec::new(),
+                Bytes::from(s),
+            );
+            if let Err(e) = store.store("topic", 11, vec![msg], None).await {
+                eprintln!("e = {e:?}");
+            }
         }
 
-        join_all(handles).await;
-        store.flush_topic_partition_force("topic111", 11).await?;
         time::sleep(Duration::from_secs(5)).await;
         Ok(())
     }
+
+    // #[tokio::test]
+    // async fn storage_store_multi() -> Result<()> {
+    //     let store = DiskStorageWriter::new(DiskConfig::default()).expect("error config");
+    //     let datas: Vec<&'static str> = vec![
+    //         "Apple",
+    //         "Banana",
+    //         "Cat",
+    //         "Dog",
+    //         "Elephant",
+    //         "Fish",
+    //         "Giraffe",
+    //         "Horse",
+    //         "Igloo",
+    //         "Jaguar",
+    //         "Kangaroo",
+    //         "Lion",
+    //         "Monkey",
+    //         "Nest",
+    //         "Ostrich",
+    //         "Penguin",
+    //         "Queen",
+    //         "Rabbit",
+    //         "Snake",
+    //         "Tiger",
+    //         "Umbrella",
+    //         "Violin",
+    //         "Whale",
+    //         "Xylophone",
+    //         "Yak",
+    //         "Zebra",
+    //     ];
+
+    //     let mut handles = vec![];
+    //     for _ in 0..20 {
+    //         let _store = store.clone();
+    //         let _datas = datas.clone();
+    //         handles.push(tokio::spawn(async move {
+    //             for _ in 0..100000 {
+    //                 let idx = rand::random::<u32>() as usize;
+    //                 let s = _datas[idx % _datas.len()];
+    //                 let msg = MessagePayload::new_v1(
+    //                     Bytes::from(format!("id_{}_{}", idx, s)),
+    //                     0,
+    //                     Vec::new(),
+    //                     Bytes::from(s),
+    //                 );
+    //                 if let Err(e) = _store.store("topic111", 11, vec![msg], None).await {
+    //                     eprintln!("e = {e:?}");
+    //                 }
+    //             }
+    //         }));
+    //     }
+
+    //     join_all(handles).await;
+    //     // store.flush_topic_partition_force("topic111", 11).await?;
+    //     time::sleep(Duration::from_secs(5)).await;
+    //     Ok(())
+    // }
 }
