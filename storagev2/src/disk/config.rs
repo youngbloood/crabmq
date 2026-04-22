@@ -76,13 +76,9 @@ pub struct WriterConfig {
     pub disk_write_mode: DiskReadWriteMode,
 
     // 每个分区缓冲区的最大消息字节数，超过该值会写入失败
-    pub message_size_limit_per_partition: usize,
-    // 每个分区缓冲区的最大消息数量，超过该值会写入失败
-    pub message_count_limit_per_partition: usize,
+    pub message_size_limit_per_partition: u64,
     // 全局消息大小限制，超过该值会写入失败
-    pub message_size_limit_global: usize,
-    // 全局消息数量限制，超过该值会写入失败
-    pub message_count_limit_global: usize,
+    pub message_size_limit_global: u64,
     // RocksDB 配置参数
     // pub rocksdb_max_open_files: i32,
     // pub rocksdb_write_buffer_size: usize, // 单位：字节
@@ -153,19 +149,9 @@ impl WriterConfig {
             2,
         )?;
         must_gt_const(
-            "message_count_limit_per_partition",
-            self.message_count_limit_per_partition as _,
-            1024, // 1K
-        )?;
-        must_gt_const(
             "message_size_limit_global",
             self.message_size_limit_global as _,
             100, // 100 条数据
-        )?;
-        must_gt_const(
-            "message_count_limit_global",
-            self.message_count_limit_global as _,
-            50 * 1024, // 50K
         )?;
 
         Ok(())
@@ -220,14 +206,8 @@ impl WriterConfig {
         if self.message_size_limit_per_partition == 0 {
             self.message_size_limit_per_partition = 100;
         }
-        if self.message_count_limit_per_partition == 0 {
-            self.message_count_limit_per_partition = 10 * 1024 * 1024;
-        }
         if self.message_size_limit_global == 0 {
             self.message_size_limit_global = 10000;
-        }
-        if self.message_count_limit_global == 0 {
-            self.message_count_limit_global = 5 * 1024 * 1024 * 1024;
         }
         self
     }
@@ -253,21 +233,8 @@ impl Default for WriterConfig {
             with_metrics: false,
             disk_write_mode: DiskReadWriteMode::WriteVectored, // 默认使用零拷贝 write_vectored
 
-            message_size_limit_per_partition: 100,
-            message_count_limit_per_partition: 10 * 1024 * 1024, // 10M
-            message_size_limit_global: 10000,
-            message_count_limit_global: 5 * 1024 * 1024 * 1024, // 5G
-
-                                                                // RocksDB 配置默认值（针对高性能写入优化）
-                                                                // rocksdb_max_open_files: 10000,
-                                                                // rocksdb_write_buffer_size: 128 * 1024 * 1024, // 128MB
-                                                                // rocksdb_max_write_buffer_number: 8,
-                                                                // rocksdb_target_file_size_base: 128 * 1024 * 1024, // 128MB
-                                                                // rocksdb_max_background_jobs: 8,
-                                                                // rocksdb_level_zero_file_num_compaction_trigger: 8,
-                                                                // rocksdb_level_zero_slowdown_writes_trigger: 20,
-                                                                // rocksdb_level_zero_stop_writes_trigger: 36,
-                                                                // rocksdb_disable_wal: false,
+            message_size_limit_per_partition: 1024 * 1024 * 1024 * 1, // 1GB
+            message_size_limit_global: 1024 * 1024 * 1024 * 10,       // 10GB
         }
     }
 }

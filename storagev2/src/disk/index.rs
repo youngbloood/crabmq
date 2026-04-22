@@ -1,7 +1,11 @@
-use crate::disk::{
-    fd::create_reader,
-    fd_cache::{FileHandlerReaderAsync, FileHandlerWriterAsync, create_writer_fd},
-    {config::DiskReadWriteMode, gen_index_filename},
+use crate::{
+    disk::{
+        config::DiskReadWriteMode,
+        fd::create_reader,
+        fd_cache::{FileHandlerReaderAsync, FileHandlerWriterAsync, create_writer_fd},
+        gen_index_filename,
+    },
+    err::{ErrorCode, StorageError, StorageResult},
 };
 use anyhow::Result;
 use bytes::BytesMut;
@@ -70,7 +74,7 @@ impl IndexWriterHandle {
         })
     }
 
-    pub async fn flush(&self, indexs: &[SignleOffset], fsync: bool) -> Result<()> {
+    pub async fn flush(&self, indexs: &[SignleOffset], fsync: bool) -> StorageResult<()> {
         // 所有索引写入当前索引文件（剩余容量足够）
         let mut bts = BytesMut::with_capacity(indexs.len() * SIGNLE_OFFSET_LENGTH);
         for idx in indexs {
@@ -79,9 +83,16 @@ impl IndexWriterHandle {
         }
         let data: IoSlice<'_> = IoSlice::new(&bts);
 
-        self.wh.write(&[data], self.mode).await?;
+        self.wh
+            .write(&[data], self.mode)
+            .await
+            .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
+
         if fsync {
-            self.wh.sync_data().await?;
+            self.wh
+                .sync_data()
+                .await
+                .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
         }
 
         Ok(())

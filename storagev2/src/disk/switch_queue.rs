@@ -1,43 +1,83 @@
 use crossbeam::queue::{ArrayQueue, SegQueue};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
+
+use crate::{
+    MessageSize,
+    err::{ErrorCode, StorageError, StorageResult},
 };
 
 /**
  * 双队列
  */
 #[derive(Clone)]
-pub struct SwitchQueue<T> {
+pub struct SwitchQueue<T: MessageSize> {
     switcher: Arc<AtomicBool>,
 
-    queue_a: Arc<ArrayQueue<T>>,
-    queue_b: Arc<ArrayQueue<T>>,
+    queue_a: Arc<SegQueue<T>>,
+    queue_b: Arc<SegQueue<T>>,
+
+    size_limit: Arc<AtomicU64>,
 }
 
-impl<T> SwitchQueue<T> {
+impl<T: MessageSize> SwitchQueue<T> {
     const ACQUIRE_ORDER: Ordering = Ordering::Acquire;
     const RELEASE_ORDER: Ordering = Ordering::Release;
     const RELAXED_ORDER: Ordering = Ordering::Relaxed;
 
-    pub fn new(buf_length: usize) -> Self {
-        let half = buf_length / 2;
+    pub fn new(s: u64) -> Self {
         Self {
             switcher: Arc::new(AtomicBool::new(false)),
-            queue_a: Arc::new(ArrayQueue::new(half)),
-            queue_b: Arc::new(ArrayQueue::new(buf_length - half)),
+            queue_a: Arc::new(SegQueue::new()),
+            queue_b: Arc::new(SegQueue::new()),
+            size_limit: Arc::new(AtomicU64::new(s)),
         }
     }
 
     #[inline(always)]
-    pub fn push(&self, data: T) {
+    pub fn push(&self, data: T) -> StorageResult<()> {
         let current = self.switcher.load(Self::RELAXED_ORDER);
         let queue = if current {
             &self.queue_b
         } else {
             &self.queue_a
         };
+
+        let data_size = data.get_size() as u64;
+
+        self.size_limit
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current < data_size {
+                    None
+                } else {
+                    Some(current - data_size)
+                }
+            })
+            .map_err(|e| StorageError::new(ErrorCode::PartitionSizeLimitExceeded))?;
+
+        // 使用CAS循环原子地检查并扣除容量
+        loop {
+            let current_limit = self.size_limit.load(Ordering::Relaxed);
+            if current_limit < data_size {
+                return Err(StorageError::new(ErrorCode::PartitionSizeLimitExceeded));
+            }
+
+            // 原子地从 current_limit 扣除 data_size
+            match self.size_limit.compare_exchange(
+                current_limit,
+                current_limit - data_size,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,     // 成功扣除
+                Err(_) => continue, // 有竞争，重试
+            }
+        }
+
         queue.push(data);
+        Ok(())
     }
 
     #[inline(always)]
@@ -58,10 +98,13 @@ impl<T> SwitchQueue<T> {
             (&self.queue_a, &self.queue_b)
         };
 
+        let mut size = 0;
         // 优先处理活跃队列，为 None 自动结束循环
         while let Some(item) = active_queue.pop() {
+            size += item.get_size() as u64;
             results.push(item);
             if results.len() >= batch_size {
+                self.size_limit.fetch_add(size, Ordering::Relaxed);
                 return results;
             }
         }
@@ -82,12 +125,14 @@ impl<T> SwitchQueue<T> {
 
             // 为 None 自动结束循环
             while let Some(item) = new_active.pop() {
+                size += item.get_size() as u64;
                 results.push(item);
                 if results.len() >= batch_size {
                     break;
                 }
             }
         }
+        self.size_limit.fetch_add(size, Ordering::Relaxed);
 
         results
     }
@@ -97,6 +142,7 @@ impl<T> SwitchQueue<T> {
      */
     pub fn pop_all(&self) -> Vec<T> {
         let mut results = Vec::new();
+        let mut size = 0;
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
 
         let (active_queue, _inactive_queue) = if current {
@@ -107,6 +153,7 @@ impl<T> SwitchQueue<T> {
 
         // 清空活跃队列
         while let Some(item) = active_queue.pop() {
+            size += item.get_size() as u64;
             results.push(item);
         }
 
@@ -122,9 +169,11 @@ impl<T> SwitchQueue<T> {
                 &self.queue_b
             };
             while let Some(item) = new_active.pop() {
+                size += item.get_size() as u64;
                 results.push(item);
             }
         }
+        self.size_limit.fetch_add(size, Ordering::Relaxed);
 
         results
     }
@@ -134,6 +183,7 @@ impl<T> SwitchQueue<T> {
      */
     pub fn pop_active(&self) -> Vec<T> {
         let mut results = Vec::new();
+        let mut size = 0;
         let current = self.switcher.load(Self::ACQUIRE_ORDER);
 
         let (active_queue, _inactive_queue) = if current {
@@ -144,12 +194,14 @@ impl<T> SwitchQueue<T> {
 
         // 清空活跃队列
         while let Some(item) = active_queue.pop() {
+            size += item.get_size() as u64;
             results.push(item);
         }
 
         // 切换活跃队列
         self.switcher
             .compare_exchange(current, !current, Self::RELEASE_ORDER, Self::RELAXED_ORDER);
+        self.size_limit.fetch_add(size, Ordering::Relaxed);
 
         results
     }

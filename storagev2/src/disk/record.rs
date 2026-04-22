@@ -64,6 +64,7 @@ impl RecordWriterHandle {
     }
 
     pub async fn flush(&self, data: &[IoSlice<'_>], fsync: bool) -> Result<Vec<SignleOffset>> {
+        // build the index info
         let mut offsets = Vec::with_capacity(data.len());
         let mut start = self.current_fd.get_write_cursor();
         for d in data {
@@ -73,6 +74,11 @@ impl RecordWriterHandle {
             });
             start += d.len() as u64;
         }
+
+        // write to PageCache
+        self.current_fd.write(data, self.mode).await?;
+
+        // fsync
         if fsync {
             self.current_fd.sync_data().await?;
         }

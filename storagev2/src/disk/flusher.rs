@@ -1,12 +1,14 @@
 use anyhow::Result;
-use chrono::Utc;
 use dashmap::DashMap;
 use log::{error, info};
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::{
     select,
@@ -25,6 +27,10 @@ pub struct Flusher {
     stop: CancellationToken,
     flush_interval: Duration,
 
+    tasks_num: u32,
+
+    global_size_limit: Arc<AtomicU64>,
+
     waits: Arc<DashMap<(String, u32), Arc<PartitionWriterHandle>>>,
 
     // 1st: Vec<Arc<PartitionWriterHandle>>: Wait flush PartitionWriterHandle Vec
@@ -41,14 +47,18 @@ impl Flusher {
         stop: CancellationToken,
         tasks_num: u32,
         flush_interval: Duration,
+        global_size_limit: Arc<AtomicU64>,
         waits: Arc<DashMap<(String, u32), Arc<PartitionWriterHandle>>>,
         with_metrics: bool,
     ) -> Self {
+        let metrics = StorageWriterMetrics::default();
         let mut tasks_channel = Vec::with_capacity(tasks_num as _);
         for _ in 0..tasks_num {
             let _stop = stop.child_token();
             let (tx, mut rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
             tasks_channel.push(tx);
+            let _metrics = metrics.clone();
+            let _global_size_limit = global_size_limit.clone();
             tokio::spawn(async move {
                 loop {
                     select! {
@@ -71,8 +81,18 @@ impl Flusher {
                                         return;
                                     }
                                     res = c.flush(all, fsync) => {
-                                        if let Err(e) = res{
-                                            error!("{}", e.to_string())
+                                        match res {
+                                            Ok((sim,l,s)) => {
+                                                _global_size_limit.fetch_sub(sim as u64, Ordering::Relaxed);
+                                                _metrics.update_data_min_start_timestamp();
+                                                _metrics.inc_data_flush_count(l, 0);
+                                                _metrics.inc_flush_bytes(s, 0);
+                                                _metrics.update_data_max_end_timestamp();
+                                            }
+                                            Err(e) => {
+                                                _metrics.inc_data_flush_count(0, 1);
+                                                error!("{:?}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -86,21 +106,21 @@ impl Flusher {
         Self {
             stop,
             flush_interval,
+            tasks_num,
+            global_size_limit,
             waits,
             tasks_channel: Arc::new(tasks_channel),
             with_metrics,
-            metrics: StorageWriterMetrics::default(),
+            metrics,
         }
     }
 
     pub async fn run(self, mut flush_signal: Receiver<(bool, bool)>) {
-        println!("[STORAGE]: start flusher task...");
+        info!("[STORAGE]: start flusher task...");
         let mut hot_ticker = time::interval(self.flush_interval);
         let mut warm_ticker = time::interval(self.flush_interval * 2);
         let mut cold_ticker = time::interval(self.flush_interval * 3);
         let _stop = self.stop.clone();
-
-        info!("[STORAGE]: start flusher task...");
 
         loop {
             select! {
@@ -147,30 +167,30 @@ impl Flusher {
     }
 
     async fn flush_interval(&self, i: u128, all: bool, fsync: bool) {
-        let now = Utc::now().timestamp_millis() as u64;
-        let chunk: Vec<Arc<PartitionWriterHandle>> = self
+        let now1 = Instant::now();
+        let need_flush: Vec<Arc<PartitionWriterHandle>> = self
             .waits
             .iter()
             .filter(|x| {
                 if i == 0 {
                     return true;
                 }
-                now - x.latest_write_timestamp > i
+
+                now1.duration_since(x.latest_write_timestamp.load())
+                    .as_millis() as u128
+                    > i
             })
             .map(|v| v.value().clone())
             .collect();
 
-        for c in chunk {
-            let fut: PartitionFlushFuture<'_> =
-                Box::pin(PartitionWriterHandle::flush(c.as_ref(), all, fsync));
-            select! {
-                _ = self.stop.cancelled() => {
-                    return;
-                }
-                res = fut => {
-                    let _ = res;
-                }
-            }
+        if need_flush.is_empty() || self.tasks_channel.is_empty() {
+            return;
+        }
+
+        let worker_num = self.tasks_channel.len();
+        let chunk_size = need_flush.len().div_ceil(worker_num);
+        for (i, c) in need_flush.chunks(chunk_size).enumerate() {
+            let _ = self.tasks_channel[i].send((c.to_vec(), all, fsync)).await;
         }
     }
 }

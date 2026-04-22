@@ -4,13 +4,17 @@ use crate::disk::gen_record_filename;
 use crate::disk::partition::PartitionWriterHandle;
 use crate::err::ErrorCode;
 use crate::metrics::StorageWriterMetrics;
-use crate::{MessagePayload, StorageError, StorageResult, StorageSearch, StorageWriter};
+use crate::{
+    MessagePayload, MessagePayloadWithSize, MessageSize as _, StorageError, StorageResult,
+    StorageSearch, StorageWriter,
+};
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use murmur3::murmur3_32;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -30,6 +34,8 @@ pub struct DiskStorageWriter {
 
     partitions_lock: Arc<DashMap<(String, u32), Mutex<()>>>,
 
+    global_size_limit: Arc<AtomicU64>,
+
     flusher: Flusher,
     // NOTE: 会导致所有分区刷盘，慎用
     _flush_sender: mpsc::Sender<(bool, bool)>,
@@ -38,18 +44,20 @@ pub struct DiskStorageWriter {
 }
 
 impl DiskStorageWriter {
-    fn new(mut conf: DiskConfig) -> StorageResult<Self> {
+    pub fn new(mut conf: DiskConfig) -> StorageResult<Self> {
         conf = conf.fix();
         conf.validate()?;
         let conf = Arc::new(conf);
 
         let partitions = Arc::new(DashMap::new());
         let stop = CancellationToken::new();
+        let global_size_limit = Arc::new(AtomicU64::new(conf.message_size_limit_global));
 
         let flusher = Flusher::new(
             stop.child_token(),
-            1,
+            200,
             Duration::from_millis(50),
+            global_size_limit.clone(),
             partitions.clone(),
             true,
         );
@@ -63,6 +71,7 @@ impl DiskStorageWriter {
         Ok(Self {
             partitions,
             flusher,
+            global_size_limit,
             _flush_sender: tx,
             stop: Arc::new(stop.drop_guard()),
             // workers: Arc::new(DashMap::new()),
@@ -120,6 +129,7 @@ impl DiskStorageWriter {
             dir,
             topic.to_string(),
             partition_id,
+            self.conf.message_size_limit_per_partition,
             self.conf.disk_write_mode,
         )
         .await?;
@@ -158,13 +168,29 @@ impl StorageWriter for DiskStorageWriter {
             .await
             .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
 
-        // 2. 写入
-        let seq = pwh
-            .write_batch(payloads)
-            .await
-            .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
+        // 2. 计算剩余量
+        let mut messages = Vec::with_capacity(payloads.len());
+        let mut size = 0;
+        for p in payloads {
+            let size = p.get_size();
+            messages.push(MessagePayloadWithSize { payload: p, size });
+        }
 
-        // 3. (如果需要)向外面确认返回
+        self.global_size_limit
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                // 如果当前剩余容量小于本批次的大小，不更新
+                if current < size {
+                    None // 返回 None 表示不更新，fetch_update 会返回 Err(old_value)
+                } else {
+                    Some(current - size) // 返回 Some 表示更新，原子性地替换为新值
+                }
+            })
+            .map_err(|_| StorageError::new(ErrorCode::GlobalSizeLimitExceeded))?;
+
+        // 3. 写入
+        let seq = pwh.write_batch(messages).await?;
+
+        // 4. (如果需要)向外面确认返回
         if let Some(notify_tx) = notify {
             // 如果你的架构需要等待 Flusher，就把 notify_tx 塞进 pwb 的内存队列里
             // 如果不需要等待落盘，这里即刻返回 Ok(())

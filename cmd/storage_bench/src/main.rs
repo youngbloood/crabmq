@@ -4,10 +4,8 @@ use clap::Parser;
 use governor::{Quota, RateLimiter};
 use nanoid::nanoid;
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
-use storagev2::{
-    MessagePayload, StorageWriter as _,
-    disk::{DiskStorageWriterWrapper, default_config},
-};
+use storagev2::disk::{DiskStorageWriter, WriterConfig};
+use storagev2::{MessagePayload, StorageWriter as _};
 use tokio::sync::{Barrier, oneshot};
 
 // 火焰图相关导入
@@ -351,7 +349,7 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
     use tokio::time::{Duration, Instant};
 
     // 准备测试环境
-    let mut config = default_config();
+    let mut config = WriterConfig::default();
     config.storage_dir = PathBuf::from(storage_dir);
     config.with_metrics = true;
 
@@ -383,7 +381,7 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
         }
     }
 
-    let store = DiskStorageWriterWrapper::new(config)?;
+    let store = DiskStorageWriter::new(config).expect("new storage writer failed");
     // 测试参数
     let topic = format!("flush_speed_test_{}", partition_count);
 
@@ -416,12 +414,14 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
                 for _ in 0..10 {
                     let msg =
                         message_pool[rand::random::<u32>() as usize % message_pool.len()].clone();
-                    let payload = MessagePayload::new(
-                        nanoid!(),
+
+                    let payload = MessagePayload::new_v1(
+                        Bytes::from(nanoid!()),
                         chrono::Utc::now().timestamp_millis() as u64,
                         Default::default(),
-                        msg.to_vec(),
+                        Bytes::from(msg.to_vec()),
                     );
+
                     let (notify_tx, notify_rx) = oneshot::channel();
                     if let Err(e) = store
                         .store(&topic, partition as u32, vec![payload], Some(notify_tx))
@@ -512,11 +512,11 @@ async fn bench_flush_speed_with_dynamic_rate_multi_partition(
 
                     let msg_idx = rand::random::<u32>() as usize % message_pool.len();
                     let msg = message_pool[msg_idx].clone();
-                    let payload = MessagePayload::new(
-                        nanoid!(),
+                    let payload = MessagePayload::new_v1(
+                        Bytes::from(nanoid!()),
                         chrono::Utc::now().timestamp_millis() as u64,
                         Default::default(),
-                        msg.to_vec(),
+                        Bytes::from(msg.to_vec()),
                     );
                     if let Err(e) = store.store(&topic, partition, vec![payload], None).await {
                         eprintln!("store.store err: {e:?}");

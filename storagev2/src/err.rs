@@ -71,6 +71,8 @@ pub enum ErrorCode {
     PathNotExist = 1301,
     IoError = 1302,
     DiskFull = 1303,
+    GlobalSizeLimitExceeded = 1304,
+    PartitionSizeLimitExceeded = 1305,
 
     SerializeError = 1401,
 

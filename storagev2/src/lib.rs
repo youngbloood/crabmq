@@ -62,6 +62,10 @@ impl From<u8> for SerializationType {
     }
 }
 
+pub trait MessageSize {
+    fn get_size(&self) -> u32;
+}
+
 /**
  * # Attributes
  * u8:
@@ -278,6 +282,30 @@ impl MessagePayload {
         }
 
         Ok(())
+    }
+
+    fn get_size(&self) -> u32 {
+        (1 + 4
+            + 2
+            + self.msg_id.len()
+            + 8
+            + self
+                .metadata
+                .iter()
+                .map(|(k, v)| 1 + k.len() + 2 + v.len())
+                .sum::<usize>()
+            + self.payload.len()) as u32
+    }
+}
+
+pub(crate) struct MessagePayloadWithSize {
+    payload: MessagePayload,
+    size: u32,
+}
+
+impl MessageSize for MessagePayloadWithSize {
+    fn get_size(&self) -> u32 {
+        self.size
     }
 }
 

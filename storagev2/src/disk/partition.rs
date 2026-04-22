@@ -1,5 +1,5 @@
 use crate::{
-    MessagePayload,
+    MessagePayload, MessagePayloadWithSize, MessageSize,
     disk::{
         config::DiskReadWriteMode,
         gen_index_filename, gen_record_filename,
@@ -8,10 +8,13 @@ use crate::{
         record::{RecordReaderHandle, RecordWriterHandle},
         switch_queue::SwitchQueue,
     },
-    err::StorageResult,
+    err::{ErrorCode, StorageError, StorageResult},
+    serializer::{SerializedMessage, sg_io::serialize_sg_io},
 };
 use anyhow::Result;
+use bytes::BytesMut;
 use chrono::Duration;
+use crossbeam::{atomic::AtomicCell, epoch::Atomic};
 use dashmap::DashMap;
 use std::{
     io::IoSlice,
@@ -32,11 +35,11 @@ pub struct PartitionWriterHandle {
     partition_id: u32,
 
     cursors: PartitionCursors,
-    buffer: SwitchQueue<MessagePayload>,
+    buffer: SwitchQueue<MessagePayloadWithSize>,
     store: StorageWriterGroup,
 
     // 最后写入时间
-    pub(crate) latest_write_timestamp: Instant,
+    pub(crate) latest_write_timestamp: AtomicCell<Instant>,
 }
 
 impl PartitionWriterHandle {
@@ -44,6 +47,7 @@ impl PartitionWriterHandle {
         dir: PathBuf,
         topic: String,
         partition_id: u32,
+        partition_size_limit: u64,
         mode: DiskReadWriteMode,
     ) -> Result<Self> {
         let store = StorageWriterGroup::new(dir.clone(), topic.clone(), partition_id, mode).await?;
@@ -53,17 +57,17 @@ impl PartitionWriterHandle {
             topic,
             partition_id,
             cursors: PartitionCursors::new(),
-            buffer: SwitchQueue::new(1000), // TODO: 配置化
+            buffer: SwitchQueue::new(partition_size_limit), // TODO: 配置化
             store,
-            latest_write_timestamp: Duration::new(0, 0).unwrap(),
+            latest_write_timestamp: AtomicCell::new(Instant::now()),
         })
     }
 
-    pub async fn write_batch(&self, messages: Vec<MessagePayload>) -> Result<u64> {
+    pub async fn write_batch(&self, messages: Vec<MessagePayloadWithSize>) -> StorageResult<u64> {
         let messages_len = messages.len() as u64;
         // 1. write 'messages' into buffer
         for msg in messages {
-            self.buffer.push(msg);
+            self.buffer.push(msg)?;
         }
 
         let cursor: u64 = self.cursors.max_append_seq.load(Ordering::Relaxed);
@@ -72,13 +76,12 @@ impl PartitionWriterHandle {
             .fetch_add(messages_len, Ordering::Relaxed);
 
         // 2. update the latest_write_timestamp
-        self.latest_write_timestamp
-            .store(time::Instant::now().elapsed().as_secs(), Ordering::Relaxed);
+        self.latest_write_timestamp.store(Instant::now());
 
         Ok(cursor)
     }
 
-    pub async fn flush(&self, all: bool, fsync: bool) -> Result<()> {
+    pub async fn flush(&self, all: bool, fsync: bool) -> StorageResult<(u32, u64, u64)> {
         // batch pop data from buffer
         let batch = if all {
             self.buffer.pop_all()
@@ -87,11 +90,21 @@ impl PartitionWriterHandle {
         };
 
         if batch.is_empty() {
-            return Ok(());
+            return Ok((0, 0, 0));
         }
 
-        self.store.flush(&batch, fsync).await?;
-        Ok(())
+        let mut size_in_mem = 0;
+
+        let mut headers = vec![BytesMut::new(); batch.len()];
+        let mut serialized_batch = Vec::with_capacity(batch.len());
+        for (p, header) in batch.iter().zip(headers.iter_mut()) {
+            size_in_mem += p.get_size();
+            let c = serialize_sg_io(&p.payload, header)?;
+            serialized_batch.push(c);
+        }
+
+        let size = self.store.flush(&serialized_batch, fsync).await?;
+        Ok((size_in_mem, batch.len() as u64, size))
     }
 
     pub fn search(&self, logic_seq: u64) -> Result<MessagePayload> {
@@ -164,7 +177,6 @@ impl StorageWriterGroup {
         partition_id: u32,
         mode: DiskReadWriteMode,
     ) -> Result<Self> {
-        println!("dir = {:?}", dir);
         let record =
             RecordWriterHandle::new(dir.clone(), topic.clone(), partition_id, mode).await?;
         let index = IndexWriterHandle::new(dir.clone(), topic.clone(), partition_id, mode).await?;
@@ -172,17 +184,33 @@ impl StorageWriterGroup {
         Ok(Self { dir, record, index })
     }
 
-    pub async fn flush(&self, data: &[MessagePayload], fsync: bool) -> Result<()> {
-        let data = data
-            .iter()
-            .map(|msg| IoSlice::new(&msg.payload))
-            .collect::<Vec<_>>();
-        let offsets = self.record.flush(&data, fsync).await?;
-        self.index.flush(&offsets, fsync).await?;
-        Ok(())
+    pub async fn flush<'a>(
+        &self,
+        data: &[SerializedMessage<'a>],
+        fsync: bool,
+    ) -> StorageResult<u64> {
+        let mut all_length = 0u64;
+        let mut all_data = Vec::with_capacity(data.len() * 2);
+
+        for msg in data {
+            all_length += msg.total_len;
+            all_data.extend_from_slice(&msg.iovecs);
+        }
+
+        let offsets = self
+            .record
+            .flush(&all_data, fsync)
+            .await
+            .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
+
+        self.index
+            .flush(&offsets, fsync)
+            .await
+            .map_err(|e| StorageError::with_message(ErrorCode::IoError, e.to_string()))?;
+        Ok(all_length)
     }
 
-    fn search(&self, logic_seq: u64) -> Result<MessagePayload> {
+    fn search(&self, logic_seq: u64) -> StorageResult<MessagePayload> {
         todo!()
     }
 }
